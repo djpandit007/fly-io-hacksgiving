@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     pinecone_key: SecretStr = SecretStr("")
     llama_base: str = "https://api.cloud.llamaindex.ai"
     llama_key: SecretStr = SecretStr("")
+    # Exa (search + page contents): the Exa connector's gateway base on a Sprite.
+    exa_base: str = ""
+    exa_key: SecretStr = SecretStr("")
 
     @field_validator("public_url")
     @classmethod
@@ -95,6 +98,10 @@ class Settings(BaseSettings):
             auth_header="Api-Key",
             auth_prefix="",
         )
+
+    @property
+    def exa(self) -> Provider:
+        return Provider(name="exa", base_url=self.exa_base, key=self.exa_key, auth_header="x-api-key", auth_prefix="")
 
     @property
     def llama(self) -> Provider:

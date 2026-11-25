@@ -20,7 +20,9 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
-from app import judge, ledger, memory, parse, tosdr, writer
+import httpx
+
+from app import exa, judge, ledger, memory, parse, tosdr, writer
 from app.config import settings
 from app.db import Change, Service, Snapshot, User, now, one, rows
 from app.gateway import Gateway
@@ -28,6 +30,7 @@ from app.history import backfill
 from app.judge import Verdict
 from app.locks import locks
 from app.memory import Precedent
+from app.netguard import BlockedURL
 from app.telegram import esc, rich
 from app.watch import SectionChange, diff, fetch, html_to_markdown, markdown_to_canonical, normalise, opt_out_days, redline, sha
 
@@ -49,12 +52,13 @@ class Clients:
         oc = settings.opencode
         self.ai = Gateway(oc) if oc.key.get_secret_value() or "sprites.dev" in oc.base_url else None
         self.pinecone = make(settings.pinecone)
+        self.exa = make(settings.exa)
         # LlamaCloud has a default direct URL, so it counts as configured only with a key or a gateway URL.
         llama = settings.llama
         self.llama = Gateway(llama) if llama.key.get_secret_value() or "sprites.dev" in llama.base_url else None
 
     async def aclose(self) -> None:
-        for gw in (self.ai, self.pinecone, self.llama):
+        for gw in (self.ai, self.pinecone, self.exa, self.llama):
             if gw:
                 await gw.aclose()
 
@@ -91,14 +95,45 @@ class ChangeReport(BaseModel):
 
 # --- Services and subscriptions -------------------------------------------------------------------
 
+def normalise_url(url: str) -> str:
+    """Identity of a terms page: scheme-less, lower-case host without www., no query/fragment/trailing /."""
+    u = urlparse(url.strip())
+    host = (u.hostname or "").lower().removeprefix("www.")
+    port = f":{u.port}" if u.port and u.port not in (80, 443) else ""
+    return f"{host}{port}{u.path.rstrip('/')}"
+
+
+def find_service(conn: sqlite3.Connection, url: str) -> Service | None:
+    key = normalise_url(url)
+    for svc in rows(Service, conn.execute("SELECT * FROM services")):
+        if normalise_url(svc.terms_url) == key:
+            return svc
+    return None
+
+
 def add_service(conn: sqlite3.Connection, name: str, url: str) -> Service:
-    domain = urlparse(url).hostname or ""
+    """The shared service for this terms URL, created if new.
+
+    Services are keyed by their (normalised) terms URL, and an existing service's URL is never
+    changed by a later watcher: otherwise one member could repoint everyone's "YouTube" to a page they
+    control (look-alike domain, or a user-generated page on a shared host) and push fake changes to all
+    of its watchers. A display name already used by a different URL is disambiguated with the host.
+    """
+    existing = find_service(conn, url)
+    if existing:
+        return existing
+    host = (urlparse(url).hostname or "").removeprefix("www.")
+    display = name
+    if one(Service, conn.execute("SELECT * FROM services WHERE name = ?", (display,))):
+        display = f"{name} ({host})"
+        n = 2
+        while one(Service, conn.execute("SELECT * FROM services WHERE name = ?", (display,))):
+            display, n = f"{name} ({host} #{n})", n + 1
     conn.execute(
-        """INSERT INTO services (name, terms_url, domain, added_at) VALUES (?, ?, ?, ?)
-           ON CONFLICT(name) DO UPDATE SET terms_url = excluded.terms_url""",
-        (name, url, domain.removeprefix("www."), now()),
+        "INSERT INTO services (name, terms_url, domain, added_at) VALUES (?, ?, ?, ?)",
+        (display, url, host, now()),
     )
-    svc = one(Service, conn.execute("SELECT * FROM services WHERE name = ?", (name,)))
+    svc = one(Service, conn.execute("SELECT * FROM services WHERE name = ?", (display,)))
     assert svc
     return svc
 
@@ -286,15 +321,40 @@ def past_material_changes(conn: sqlite3.Connection, service_id: int, days: int =
 
 
 async def page_text(cl: Clients, url: str) -> str:
-    """Live terms page to normalised text; LlamaParse for PDFs and JavaScript-rendered pages."""
-    content_type, body = await fetch(url)
-    if "pdf" not in content_type:
-        text = normalise(html_to_markdown(body))
-        if len(text) >= MIN_HTML_CHARS or not cl.llama:
-            return text
-    if not cl.llama:
-        raise RuntimeError(f"{url} is a PDF and LlamaParse is not configured")
-    return normalise(markdown_to_canonical((await parse.parse_url(cl.llama, url)).markdown))
+    """A terms page as normalised text.
+
+    1. Direct fetch (public addresses only). 2. Exa page contents when the fetch is refused, fails or
+    yields almost nothing (bot walls, JavaScript-only pages). 3. LlamaParse for PDFs and as last resort.
+    A URL that resolves to a non-public address is never fetched and never handed to a fallback.
+    """
+    text, is_pdf, error = "", False, None
+    try:
+        content_type, body = await fetch(url)
+        is_pdf = "pdf" in content_type
+        if not is_pdf:
+            text = normalise(html_to_markdown(body))
+            if len(text) >= MIN_HTML_CHARS:
+                return text
+    except BlockedURL:
+        raise
+    except httpx.HTTPError as exc:
+        error = exc
+        log.info("direct fetch of %s failed (%s); trying fallbacks", url, type(exc).__name__)
+
+    if not is_pdf and cl.exa:
+        try:
+            extracted = await exa.contents(cl.exa, url)
+            candidate = normalise(markdown_to_canonical(extracted))
+            if len(candidate) >= MIN_HTML_CHARS:
+                return candidate
+            text = max(text, candidate, key=len)
+        except Exception as exc:
+            log.warning("exa contents failed for %s: %s", url, exc)
+    if cl.llama:
+        return normalise(markdown_to_canonical((await parse.parse_url(cl.llama, url)).markdown))
+    if text:
+        return text
+    raise RuntimeError(f"couldn't read {url}" + (f": {type(error).__name__}" if error else ""))
 
 
 async def check_service(conn: sqlite3.Connection, cl: Clients, svc: Service) -> list[Change]:
@@ -327,7 +387,7 @@ async def subscribe(
     The first watcher pays for the backfill and judging (under a per-service lock, so concurrent
     first watches do it once); later watchers get the stored results replayed with no judge calls.
     """
-    async with locks.hold(f"service-name:{name.lower()}"):
+    async with locks.hold(f"service-url:{normalise_url(url)}"):
         svc = add_service(conn, name, url)
         if not _has_history(conn, svc.id):
             async with locks.hold(f"service:{svc.id}"):

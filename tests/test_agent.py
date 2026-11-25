@@ -236,3 +236,20 @@ async def test_verdict_card_survives_writer_failure():
     card = await agent.verdict_card(cl, "Lease", "Some lease text")
     await cl.aclose()
     assert "🔴 arbitration (90%)" in card and "not legal advice" in card
+
+
+def test_later_watcher_cannot_repoint_a_shared_service(conn):
+    original = agent.add_service(conn, "Youtube", "https://www.youtube.com/t/terms")
+    # Same display name from a look-alike domain: a separate service, never the shared one.
+    lookalike = agent.add_service(conn, "Youtube", "https://youtube.co/terms")
+    # Same URL written differently: the same service, URL unchanged.
+    same = agent.add_service(conn, "Youtube", "https://youtube.com/t/terms/?utm_source=x")
+    assert same.id == original.id
+    assert lookalike.id != original.id and lookalike.name == "Youtube (youtube.co)"
+    assert agent.find_service(conn, "https://www.youtube.com/t/terms").terms_url == "https://www.youtube.com/t/terms"
+
+
+def test_user_generated_page_on_shared_host_is_its_own_service(conn):
+    real = agent.add_service(conn, "Github", "https://docs.github.com/en/site-policy/github-terms/github-terms-of-service")
+    fake = agent.add_service(conn, "Github", "https://github.com/attacker/terms")
+    assert fake.id != real.id and fake.name == "Github (github.com)"

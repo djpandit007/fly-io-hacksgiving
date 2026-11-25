@@ -88,7 +88,7 @@ async def _watch(conn: sqlite3.Connection, cl: Clients, tg: Telegram, user: User
     if not arg:
         await tg.send(chat, "Usage: /watch https://example.com/terms, /watch example.com or /watch notion")
         return
-    url = arg if arg.startswith("http") else await find_terms_url(arg.strip("/ "))
+    url = arg if arg.startswith("http") else await find_terms_url(arg.strip("/ "), cl)
     if not url:
         await tg.send(chat, f"I couldn't find a terms page for {esc(arg)}. Send the full URL instead.")
         return

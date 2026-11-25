@@ -16,3 +16,4 @@ os.environ.update(
 )
 os.environ.setdefault("FP_OWNER_CLAIM_CODE", "owner-code")
 os.environ.setdefault("FP_JOIN_CODE", "join-code")
+os.environ.setdefault("FP_EXA_BASE", "https://exa.test")
