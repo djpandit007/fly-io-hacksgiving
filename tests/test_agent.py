@@ -97,3 +97,15 @@ async def test_immaterial_change_is_stored_but_not_reported(conn):
     await cl.aclose()
     assert conn.execute("SELECT COUNT(*) FROM changes").fetchone()[0] == 2
     assert not chat.called
+
+
+@respx.mock
+async def test_verdict_card_survives_writer_failure():
+    flags = {"model": "jev-1.14", "answers": {k: {"type": "noul", "noul": 0.9} for k in
+             ("auto_renews", "arbitration", "data_sharing", "unilateral_changes", "content_licence", "hard_to_cancel")}}
+    respx.post(JEV).mock(return_value=httpx.Response(200, json=flags))
+    respx.post(CHAT).mock(return_value=httpx.Response(200, json={"choices": [{"message": {"content": None}, "finish_reason": "length"}]}))
+    cl = agent.Clients()
+    card = await agent.verdict_card(cl, "Lease", "Some lease text")
+    await cl.aclose()
+    assert "🔴 arbitration (90%)" in card and "not legal advice" in card

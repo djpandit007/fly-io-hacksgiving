@@ -237,7 +237,10 @@ async def verdict_card(cl: Clients, title: str, text: str, domain: str | None = 
     card = ""
     if cl.ai:
         flags = await judge.red_flags(cl.ai, title, text[: judge.MAX_DOCUMENT_CHARS])
-        card = await writer.verdict_card(cl.ai, title, flags, text)
+        try:
+            card = await writer.verdict_card(cl.ai, title, flags, text)
+        except Exception as exc:  # the flags and grade are still worth sending
+            log.warning("verdict card failed for %s: %s", title, exc)
     lines = [f"<b>{esc(title)}</b>"]
     if card:
         lines.append(rich(card))
@@ -376,5 +379,10 @@ async def wrapped(conn: sqlite3.Connection, cl: Clients) -> str:
         for r in stats
     )
     total = sum(r["n"] for r in stats)
-    body = await writer.wrapped(cl.ai, facts) if cl.ai else facts
+    body = facts
+    if cl.ai:
+        try:
+            body = await writer.wrapped(cl.ai, facts)
+        except Exception as exc:
+            log.warning("wrapped failed: %s", exc)
     return f"<b>Agreed Wrapped {date.today():%Y}</b>\n{total} material changes you accepted by carrying on.\n\n{rich(body)}"

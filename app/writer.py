@@ -2,26 +2,61 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+import logging
+
+from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.gateway import Gateway
+
+log = logging.getLogger(__name__)
 
 
 CHAT_PATH = "openai/v1/chat/completions"
 
 
+# Reasoning models think before answering, and the thinking counts against max_tokens. If the
+# budget runs out mid-thought the reply has content=None; retry once with a bigger budget.
+TOKEN_BUDGETS = (1500, 4000)
+
+
+class EmptyReply(RuntimeError):
+    pass
+
+
 class _Message(BaseModel):
     role: str = "assistant"
-    content: str
+    content: str | None = None
 
 
 class _Choice(BaseModel):
     message: _Message
+    finish_reason: str | None = None
+
+
+class _CompletionDetails(BaseModel):
+    reasoning_tokens: int | None = None
+
+
+class _Usage(BaseModel):
+    completion_tokens: int | None = None
+    completion_tokens_details: _CompletionDetails | None = None
 
 
 class ChatCompletion(BaseModel):
-    choices: list[_Choice]
+    choices: list[_Choice] = Field(default_factory=list)
+    usage: _Usage | None = None
+
+    def text(self) -> str:
+        if not self.choices:
+            return ""
+        return (self.choices[0].message.content or "").strip()
+
+    def why_empty(self) -> str:
+        finish = self.choices[0].finish_reason if self.choices else "no choices"
+        details = self.usage.completion_tokens_details if self.usage else None
+        reasoning = details.reasoning_tokens if details else None
+        return f"finish_reason={finish}, reasoning_tokens={reasoning}"
 
 SYSTEM = (
     "You explain changes to consumer terms of service in plain English for one person who uses the "
@@ -31,18 +66,22 @@ SYSTEM = (
 
 
 async def chat(gw: Gateway, prompt: str, system: str = SYSTEM) -> str:
-    data = await gw.post(
-        CHAT_PATH,
-        json={
-            "model": settings.writer_model,
-            "max_tokens": 1500,  # reasoning models spend part of this before answering
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-        },
-    )
-    completion = ChatCompletion.model_validate(data)
-    if not completion.choices:
-        raise ValueError("writer model returned no choices")
-    return completion.choices[0].message.content.strip()
+    reason = ""
+    for budget in TOKEN_BUDGETS:
+        data = await gw.post(
+            CHAT_PATH,
+            json={
+                "model": settings.writer_model,
+                "max_tokens": budget,
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+            },
+        )
+        completion = ChatCompletion.model_validate(data)
+        if text := completion.text():
+            return text
+        reason = completion.why_empty()
+        log.warning("writer returned no text (max_tokens=%s, %s)", budget, reason)
+    raise EmptyReply(f"the writing model returned no text ({reason})")
 
 
 async def summarise_change(gw: Gateway, service: str, heading: str, before: str, after: str) -> str:
