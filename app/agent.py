@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+import html
 import json
 import logging
+import re
 import sqlite3
 from datetime import UTC, date, datetime, timedelta
 from urllib.parse import urlparse
@@ -286,13 +288,41 @@ async def intake_file(conn: sqlite3.Connection, cl: Clients, filename: str, cont
     return card
 
 
+def _plain(html_text: str) -> str:
+    """Telegram HTML card to Markdown-ish plain text for the Box copy."""
+    text = re.sub(r"</?b>", "**", html_text)
+    text = re.sub(r"<a href=\"([^\"]+)\">([^<]*)</a>", r"[\2](\1)", text)
+    return html.unescape(re.sub(r"<[^>]+>", "", text))
+
+
+async def archive_to_box(conn: sqlite3.Connection, cl: Clients, filename: str, content: bytes, card_html: str) -> str | None:
+    """Keep what you were asked to agree to, and the verdict, in your Box folder.
+
+    The uploaded original is marked as seen so the Box inbox does not process it a second time.
+    Returns the Box file id, or None when Box is not configured or the upload fails.
+    """
+    if not cl.box:
+        return None
+    try:
+        file_id = await box.upload(cl.box, filename, content)
+        seen = set(json.loads(get_kv(conn, "box_seen", "[]") or "[]")) | {file_id}
+        set_kv(conn, "box_seen", json.dumps(sorted(seen)))
+        stem = filename.rsplit(".", 1)[0]
+        report = f"# Fine Print verdict: {filename}\n\n_{date.today():%d %b %Y}_\n\n{_plain(card_html)}\n"
+        await box.upload_report(cl.box, f"Fine Print report - {stem}.md", report)
+        return file_id
+    except Exception as exc:
+        log.warning("archiving %s to Box failed: %s", filename, exc)
+        return None
+
+
 async def process_box_inbox(conn: sqlite3.Connection, cl: Clients) -> list[str]:
     if not cl.box:
         return []
     seen = set(json.loads(get_kv(conn, "box_seen", "[]") or "[]"))
     messages = []
     for item in await box.list_inbox(cl.box):
-        if item.id in seen or item.name.startswith("Fine Print report"):
+        if item.id in seen or item.name.startswith(("Fine Print report", "Fine Print verdict")):
             continue
         content = await box.download(cl.box, item.id)
         messages.append(f"📥 From Box: {esc(item.name)}\n\n" + await intake_file(conn, cl, item.name, content))

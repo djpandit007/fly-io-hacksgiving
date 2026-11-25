@@ -8,7 +8,10 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Literal
+
+import httpx
 
 from pydantic import BaseModel, Field
 
@@ -42,12 +45,30 @@ async def download(gw: Gateway, file_id: str) -> bytes:
     return resp.content
 
 
+async def upload(gw: Gateway, name: str, content: bytes, content_type: str = "application/octet-stream") -> str:
+    """Upload into the Fine Print folder; on a name clash, retry once with a timestamp suffix."""
+    for attempt in (name, _stamped(name)):
+        # The Sprites Box connector serves uploads on the same gateway under /upload/...
+        # Attributes must come before the file part.
+        attributes = json.dumps({"name": attempt, "parent": {"id": settings.box_folder_id}})
+        try:
+            data = await gw.post(
+                "upload/files/content",
+                files={"attributes": (None, attributes), "file": (attempt, content, content_type)},
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409 and attempt == name:
+                continue
+            raise
+        return BoxItems.model_validate(data).entries[0].id
+    raise AssertionError("unreachable")
+
+
+def _stamped(name: str) -> str:
+    stem, dot, ext = name.rpartition(".")
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    return f"{stem} ({stamp}).{ext}" if dot else f"{name} ({stamp})"
+
+
 async def upload_report(gw: Gateway, name: str, markdown: str) -> str:
-    # The Sprites Box connector serves uploads on the same gateway under /upload/...
-    # Attributes must come before the file part.
-    attributes = json.dumps({"name": name, "parent": {"id": settings.box_folder_id}})
-    data = await gw.post(
-        "upload/files/content",
-        files={"attributes": (None, attributes), "file": (name, markdown.encode(), "text/markdown")},
-    )
-    return BoxItems.model_validate(data).entries[0].id
+    return await upload(gw, name, markdown.encode(), "text/markdown")

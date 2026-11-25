@@ -109,3 +109,34 @@ async def test_verdict_card_survives_writer_failure():
     card = await agent.verdict_card(cl, "Lease", "Some lease text")
     await cl.aclose()
     assert "🔴 arbitration (90%)" in card and "not legal advice" in card
+
+
+@respx.mock
+async def test_archive_to_box_uploads_file_and_verdict_and_marks_seen(conn, monkeypatch):
+    from app import box
+    from app.config import settings
+
+    monkeypatch.setattr(box, "settings", settings.model_copy(update={"box_folder_id": "42"}))
+    upload = respx.post("https://box.test/upload/files/content").mock(side_effect=[
+        httpx.Response(409, json={"code": "item_name_in_use"}),  # original name taken
+        httpx.Response(201, json={"entries": [{"id": "f1", "name": "lease (x).pdf", "type": "file"}]}),
+        httpx.Response(201, json={"entries": [{"id": "f2", "name": "Fine Print report - lease.md", "type": "file"}]}),
+    ])
+    cl = agent.Clients()
+    cl.box = agent.Gateway(settings.model_copy(update={"box_base": "https://box.test"}).box)
+    file_id = await agent.archive_to_box(conn, cl, "lease.pdf", b"%PDF", "<b>Lease</b>\n\n🔴 arbitration (90%) &amp; more")
+    await cl.aclose()
+
+    assert file_id == "f1"
+    assert '"f1"' in db.get_kv(conn, "box_seen")
+    retried = upload.calls[1].request.content
+    assert b'"parent": {"id": "42"}' in retried and b"lease (" in retried
+    report = upload.calls[2].request.content
+    assert b"**Lease**" in report and b"& more" in report and b"<b>" not in report
+
+
+async def test_archive_without_box_is_a_no_op(conn):
+    cl = agent.Clients()
+    cl.box = None
+    assert await agent.archive_to_box(conn, cl, "x.pdf", b"", "") is None
+    await cl.aclose()

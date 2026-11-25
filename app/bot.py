@@ -125,7 +125,11 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
         if msg.file_id:
             await tg.send(chat, "Reading it…")
             name, content = await tg.download(msg.file_id)
-            await tg.send(chat, await agent.intake_file(conn, cl, msg.file_name or name, content))
+            filename = msg.file_name or name
+            card = await agent.intake_file(conn, cl, filename, content)
+            await tg.send(chat, card)
+            if await agent.archive_to_box(conn, cl, filename, content, card):
+                await tg.send(chat, f"📁 Saved {esc(filename)} and its verdict to your Box folder.")
             return
 
         cmd, _, arg = msg.text.strip().partition(" ")
