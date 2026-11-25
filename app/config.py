@@ -51,17 +51,18 @@ class Settings(BaseSettings):
     owner_claim_code: SecretStr = SecretStr("")
     gmail_token_file: Path | None = None
 
-    jev_model: str = "jev-latest"
-    ollama_model: str = "gpt-oss:120b"
+    # Both models are reached through one OpenCode key: Jev (TypeSafe's decision model) for
+    # judgments, a chat model for writing. Free OpenCode models refuse calls from outside OpenCode.
+    judge_model: str = "jev-1.14"
+    writer_model: str = "glm-5.3-flash"
     pinecone_namespace: str = "clauses"
     box_folder_id: str = "0"
     llama_project_id: str = ""
     material_threshold: float = Field(0.7, ge=0, le=1)
 
-    typesafe_base: str = ""
-    typesafe_key: SecretStr = SecretStr("")
-    ollama_base: str = ""
-    ollama_key: SecretStr = SecretStr("")
+    # On a Sprite: a Custom API connector's gateway base for https://opencode.ai/inference.
+    opencode_base: str = "https://opencode.ai/inference"
+    opencode_key: SecretStr = SecretStr("")
     # Pinecone's data plane lives on a per-index host: this is that host (direct) or the gateway
     # path that forwards to it.
     pinecone_base: str = ""
@@ -87,12 +88,8 @@ class Settings(BaseSettings):
         return self.gmail_token_file or self.data_dir / "gmail.json"
 
     @property
-    def typesafe(self) -> Provider:
-        return Provider(name="typesafe", base_url=self.typesafe_base, key=self.typesafe_key)
-
-    @property
-    def ollama(self) -> Provider:
-        return Provider(name="ollama", base_url=self.ollama_base, key=self.ollama_key)
+    def opencode(self) -> Provider:
+        return Provider(name="opencode", base_url=self.opencode_base, key=self.opencode_key)
 
     @property
     def pinecone(self) -> Provider:

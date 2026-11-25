@@ -1,5 +1,6 @@
-"""End to end through record_version with TypeSafe, Ollama and Pinecone mocked at the HTTP layer."""
+"""End to end through record_version with OpenCode (Jev + chat) and Pinecone mocked at the HTTP layer."""
 
+import json
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -10,6 +11,9 @@ from app import agent, db, ledger
 from app.watch import html_to_markdown, normalise
 from tests.test_judge import GOOD
 from tests.test_watch import NEW_HTML, OLD_HTML
+
+JEV = "https://opencode.test/inference/systemone/v1/systemone"
+CHAT = "https://opencode.test/inference/openai/v1/chat/completions"
 
 
 def text(html):
@@ -23,9 +27,9 @@ def conn(tmp_path):
 
 @respx.mock
 async def test_change_is_judged_summarised_remembered_and_deadlined(conn):
-    jev = respx.post("https://typesafe.test/v1/systemone").mock(return_value=httpx.Response(200, json=GOOD))
-    ollama = respx.post("https://ollama.test/api/chat").mock(
-        return_value=httpx.Response(200, json={"message": {"role": "assistant", "content": "Disputes now go to arbitration; opt out within 30 days."}})
+    jev = respx.post(JEV).mock(return_value=httpx.Response(200, json=GOOD))
+    chat = respx.post(CHAT).mock(
+        return_value=httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "Disputes now go to arbitration; opt out within 30 days."}}]})
     )
     search = respx.post("https://pinecone.test/records/namespaces/clauses/search").mock(
         return_value=httpx.Response(200, json={"result": {"hits": [
@@ -55,14 +59,16 @@ async def test_change_is_judged_summarised_remembered_and_deadlined(conn):
     assert upsert.calls[0].request.headers["content-type"] == "application/x-ndjson"
     assert b'"chunk_text"' in upsert.calls[0].request.content
     # Direct mode sends provider-specific auth.
-    assert jev.calls[0].request.headers["authorization"] == "Bearer ts-key"
+    assert jev.calls[0].request.headers["authorization"] == "Bearer oc-key"
+    assert json.loads(jev.calls[0].request.content)["model"] == "jev-1.14"
+    assert json.loads(chat.calls[0].request.content)["model"] == "glm-5.3-flash"
     assert search.calls[0].request.headers["api-key"] == "pc-key"
-    assert ollama.called
+    assert chat.called
 
 
 @respx.mock
 async def test_unchanged_text_does_no_work(conn):
-    jev = respx.post("https://typesafe.test/v1/systemone").mock(return_value=httpx.Response(200, json=GOOD))
+    jev = respx.post(JEV).mock(return_value=httpx.Response(200, json=GOOD))
     cl = agent.Clients()
     svc = agent.add_service(conn, "Acme", "https://acme.test/terms")
     now = datetime.now(UTC)
@@ -75,8 +81,8 @@ async def test_unchanged_text_does_no_work(conn):
 @respx.mock
 async def test_immaterial_change_is_stored_but_not_reported(conn):
     quiet = {**GOOD, "answers": {**GOOD["answers"], "material": {"type": "noul", "noul": 0.05}}}
-    respx.post("https://typesafe.test/v1/systemone").mock(return_value=httpx.Response(200, json=quiet))
-    ollama = respx.post("https://ollama.test/api/chat")
+    respx.post(JEV).mock(return_value=httpx.Response(200, json=quiet))
+    chat = respx.post(CHAT)
     cl = agent.Clients()
     svc = agent.add_service(conn, "Acme", "https://acme.test/terms")
     now = datetime.now(UTC)
@@ -84,4 +90,4 @@ async def test_immaterial_change_is_stored_but_not_reported(conn):
     assert await agent.record_version(conn, cl, svc, text(NEW_HTML), now, "live") == []
     await cl.aclose()
     assert conn.execute("SELECT COUNT(*) FROM changes").fetchone()[0] == 2
-    assert not ollama.called
+    assert not chat.called

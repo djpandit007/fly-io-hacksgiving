@@ -1,4 +1,4 @@
-"""Plain-language writing, from Ollama Cloud (``/api/chat``)."""
+"""Plain-language writing, from a chat model on OpenCode (OpenAI-compatible chat completions)."""
 
 from __future__ import annotations
 
@@ -8,13 +8,20 @@ from app.config import settings
 from app.gateway import Gateway
 
 
+CHAT_PATH = "openai/v1/chat/completions"
+
+
 class _Message(BaseModel):
     role: str = "assistant"
     content: str
 
 
-class ChatResponse(BaseModel):
+class _Choice(BaseModel):
     message: _Message
+
+
+class ChatCompletion(BaseModel):
+    choices: list[_Choice]
 
 SYSTEM = (
     "You explain changes to consumer terms of service in plain English for one person who uses the "
@@ -25,14 +32,17 @@ SYSTEM = (
 
 async def chat(gw: Gateway, prompt: str, system: str = SYSTEM) -> str:
     data = await gw.post(
-        "api/chat",
+        CHAT_PATH,
         json={
-            "model": settings.ollama_model,
-            "stream": False,
+            "model": settings.writer_model,
+            "max_tokens": 600,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
         },
     )
-    return ChatResponse.model_validate(data).message.content.strip()
+    completion = ChatCompletion.model_validate(data)
+    if not completion.choices:
+        raise ValueError("writer model returned no choices")
+    return completion.choices[0].message.content.strip()
 
 
 async def summarise_change(gw: Gateway, service: str, heading: str, before: str, after: str) -> str:

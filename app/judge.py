@@ -1,4 +1,4 @@
-"""Typed judgments on each changed clause, from TypeSafe's Jev model.
+"""Typed judgments on each changed clause, from TypeSafe's Jev model (served by OpenCode).
 
 Code owns the workflow: the diff engine finds what changed, Jev answers narrow questions about
 it, and explicit policy below turns the answers into "tell the user" or "stay quiet".
@@ -13,6 +13,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.config import settings
 from app.gateway import Gateway
 from app.watch import SectionChange
+
+SYSTEMONE_PATH = "systemone/v1/systemone"
+# Jev's default context is 64k tokens per request; keep whole-document checks well inside it.
+MAX_DOCUMENT_CHARS = 150_000
 
 CATEGORIES: dict[str, str] = {
     "arbitration": "How disputes are resolved: arbitration, class-action waivers, jury waivers, governing law or venue.",
@@ -77,7 +81,7 @@ QUESTIONS: dict[str, dict[str, Any]] = {
 Probability = Annotated[float, Field(ge=0, le=1)]
 
 
-# --- TypeSafe /v1/systemone response, validated at the boundary ---------------------------------
+# --- System One response (OpenCode /systemone/v1/systemone), validated at the boundary ---------------------------------
 
 class NoulAnswer(BaseModel):
     type: Literal["noul"]
@@ -171,8 +175,8 @@ def parse_verdict(data: dict[str, Any]) -> Verdict:
 
 
 async def judge(gw: Gateway, service: str, change: SectionChange) -> Verdict:
-    body = {"model": settings.jev_model, "state": state_for(service, change), "questions": QUESTIONS}
-    return parse_verdict(await gw.post("v1/systemone", json=body))
+    body = {"model": settings.judge_model, "state": state_for(service, change), "questions": QUESTIONS}
+    return parse_verdict(await gw.post(SYSTEMONE_PATH, json=body))
 
 
 # --- "Before you agree": judging a whole document you have not accepted yet ---------------------
@@ -189,9 +193,7 @@ RED_FLAGS: dict[str, str] = {
 
 async def red_flags(gw: Gateway, title: str, text: str) -> dict[str, float]:
     questions = {key: {"type": "noul", "instructions": q} for key, q in RED_FLAGS.items()}
-    body = {"model": settings.jev_model, "state": {"document_title": title, "document": text}, "questions": questions}
-    data = await gw.post(
-        "v1/systemone", json=body, headers={"TypeSafe-Danger-Zone-Long-Context": "true"}
-    )
+    body = {"model": settings.judge_model, "state": {"document_title": title, "document": text}, "questions": questions}
+    data = await gw.post(SYSTEMONE_PATH, json=body)
     resp = SystemOneResponse.model_validate(data)
     return {key: resp.noul(key) for key in RED_FLAGS}

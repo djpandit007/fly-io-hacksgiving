@@ -18,7 +18,7 @@ Built for [Fly.io Hacksgiving](https://fly.io/hacksgiving), Nov 23–29, 2026.
                      +--+------+------+------+-----+
  Gmail (read-only) <----+      |      |      +-----> /calendar.ics
  terms history (OTA/Wayback) <-+      |
- connectors: TypeSafe · Pinecone · Ollama Cloud · Box · LlamaParse (Custom API)
+ connectors: Pinecone · Box · OpenCode (Custom API) · LlamaParse (Custom API)
 ```
 
 ## What it does
@@ -37,8 +37,8 @@ Built for [Fly.io Hacksgiving](https://fly.io/hacksgiving), Nov 23–29, 2026.
 | Piece | Role |
 |---|---|
 | **Sprite** | The agent's home: SQLite, snapshots, a service on :8080; holds a task while it works |
-| **TypeSafe (Jev)** | Typed judgments per change: material (Noul), category and who it favours (Choice), opt-out (Noul), severity (Score) |
-| **Ollama Cloud** | Plain-language summaries, verdict cards, Wrapped |
+| **OpenCode → Jev** | TypeSafe's decision model, served by OpenCode: typed judgments per change — material (Noul), category and who it favours (Choice), opt-out (Noul), severity (Score) |
+| **OpenCode → chat model** | Plain-language summaries, verdict cards, Wrapped (`glm-5.3-flash` by default) |
 | **Pinecone** | Clause memory: "you already accepted similar wording from Spotify and Uber" |
 | **Box** | Drop folder for your own documents; archive of change reports |
 | **LlamaParse / LlamaExtract** | PDFs, scans, screenshots and JS-heavy pages → per-page Markdown; dated obligations with page citations |
@@ -58,9 +58,9 @@ uv run uvicorn app.main:app --reload --port 8080
 
 ## Deploy to a Sprite
 
-1. In the Fly.io dashboard → Sprites → Connectors, add **TypeSafeAI**, **Ollama Cloud**,
-   **Pinecone**, **Box**, and a **Custom API** for LlamaCloud (`https://api.cloud.llamaindex.ai`,
-   bearer token). Restrict each to the `fineprint` label.
+1. In the Fly.io dashboard → Sprites → Connectors, add **Pinecone**, **Box**, and two **Custom API**
+   connectors with bearer tokens: OpenCode (`https://opencode.ai/inference`) and LlamaCloud
+   (`https://api.cloud.llamaindex.ai`). Restrict each to Sprite name prefix `fly-io-hacksgiving`.
 2. `PINECONE_API_KEY=… ./scripts/setup_pinecone.sh` creates the index.
 3. `cp .env.example .env.sprite`, fill in secrets and Telegram token, then `./scripts/setup_sprite.sh`.
 4. `./scripts/connectors.sh`, copy each gateway base into `.env.sprite`, set `FP_PUBLIC_URL`, redeploy.

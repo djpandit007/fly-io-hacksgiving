@@ -1,7 +1,7 @@
 """The workflow. Code decides what happens; each provider supplies one kind of intelligence.
 
     fetch / backfill --> normalise --> diff vs snapshot --> Jev judgments per changed section
-        --> (material) Ollama summary + Pinecone precedents + ledger deadline --> Telegram / Box
+        --> (material) plain-English summary + Pinecone precedents + ledger deadline --> Telegram / Box
 """
 
 from __future__ import annotations
@@ -37,8 +37,10 @@ class Clients:
         def make(provider):
             return Gateway(provider) if provider.configured else None
 
-        self.typesafe = make(settings.typesafe)
-        self.ollama = make(settings.ollama)
+        # One OpenCode gateway serves both the judge (Jev) and the writer (chat model). It has a
+        # default direct URL, so it counts as configured only with a key or a gateway URL.
+        oc = settings.opencode
+        self.ai = Gateway(oc) if oc.key.get_secret_value() or "sprites.dev" in oc.base_url else None
         self.pinecone = make(settings.pinecone)
         self.box = make(settings.box)
         self.box_upload = make(settings.box_upload)
@@ -47,7 +49,7 @@ class Clients:
         self.llama = Gateway(llama) if llama.key.get_secret_value() or "sprites.dev" in llama.base_url else None
 
     async def aclose(self) -> None:
-        for gw in (self.typesafe, self.ollama, self.pinecone, self.box, self.box_upload, self.llama):
+        for gw in (self.ai, self.pinecone, self.box, self.box_upload, self.llama):
             if gw:
                 await gw.aclose()
 
@@ -101,19 +103,19 @@ def services(conn: sqlite3.Connection, status: str = "active") -> list[Service]:
 # --- Core loop -----------------------------------------------------------------------------------
 
 async def _judge(cl: Clients, service: str, change: SectionChange) -> Verdict | None:
-    if not cl.typesafe:
+    if not cl.ai:
         return None
     try:
-        return await judge.judge(cl.typesafe, service, change)
+        return await judge.judge(cl.ai, service, change)
     except Exception as exc:  # one bad section must not sink the run
         log.warning("judge failed for %s/%s: %s", service, change.heading, exc)
         return None
 
 
 async def _summary(cl: Clients, service: str, change: SectionChange) -> str:
-    if cl.ollama:
+    if cl.ai:
         try:
-            return await writer.summarise_change(cl.ollama, service, change.heading, change.before, change.after)
+            return await writer.summarise_change(cl.ai, service, change.heading, change.before, change.after)
         except Exception as exc:
             log.warning("summary failed: %s", exc)
     return redline(change.before, change.after)[:600]
@@ -233,9 +235,10 @@ async def onboard_service(conn: sqlite3.Connection, cl: Clients, svc: Service) -
 
 async def verdict_card(cl: Clients, title: str, text: str, domain: str | None = None) -> str:
     flags: dict[str, float] = {}
-    if cl.typesafe:
-        flags = await judge.red_flags(cl.typesafe, title, text[:200_000])
-    card = await writer.verdict_card(cl.ollama, title, flags, text) if cl.ollama else ""
+    card = ""
+    if cl.ai:
+        flags = await judge.red_flags(cl.ai, title, text[: judge.MAX_DOCUMENT_CHARS])
+        card = await writer.verdict_card(cl.ai, title, flags, text)
     lines = [f"<b>{esc(title)}</b>"]
     if card:
         lines.append(esc(card))
@@ -374,5 +377,5 @@ async def wrapped(conn: sqlite3.Connection, cl: Clients) -> str:
         for r in stats
     )
     total = sum(r["n"] for r in stats)
-    body = await writer.wrapped(cl.ollama, facts) if cl.ollama else facts
+    body = await writer.wrapped(cl.ai, facts) if cl.ai else facts
     return f"<b>Agreed Wrapped {date.today():%Y}</b>\n{total} material changes you accepted by carrying on.\n\n{esc(body)}"
