@@ -5,7 +5,7 @@ import pytest
 import respx
 from pydantic import SecretStr
 
-from app import bot, db, netguard
+from app import netguard
 from app.config import settings
 from app.telegram import Incoming, Telegram, TelegramError, redact
 
@@ -124,51 +124,6 @@ def test_proxies_from_environment_are_ignored(monkeypatch):
     monkeypatch.setenv("HTTPS_PROXY", "http://10.0.0.1:3128")
     client = netguard.safe_client()
     assert client._trust_env is False
-
-
-# --- Owner claim -----------------------------------------------------------------------------------
-
-class FakeTelegram:
-    def __init__(self):
-        self.sent = []
-
-    async def send(self, chat, text):
-        self.sent.append((chat, text))
-
-
-@pytest.fixture
-def claim(monkeypatch):
-    patched = settings.model_copy(update={"owner_claim_code": SecretStr("s3cret-code"), "owner_chat_id": None})
-    monkeypatch.setattr(bot, "settings", patched)
-
-
-@pytest.fixture
-def conn(tmp_path):
-    return db.connect(tmp_path / "b.db")
-
-
-async def test_bare_start_does_not_claim_but_explains(conn, claim):
-    tg = FakeTelegram()
-    await bot.handle(conn, None, tg, Incoming(chat_id=7, text="/start"))
-    assert bot.owner(conn) is None
-    assert tg.sent == [(7, "This is a private Fine Print bot: send /start followed by your claim code.")]
-
-
-async def test_wrong_code_does_not_claim(conn, claim):
-    await bot.handle(conn, None, FakeTelegram(), Incoming(chat_id=7, text="/start nope"))
-    assert bot.owner(conn) is None
-
-
-async def test_right_code_claims_and_then_others_are_ignored(conn, claim):
-    tg = FakeTelegram()
-    await bot.handle(conn, None, tg, Incoming(chat_id=7, text="/start s3cret-code"))
-    assert bot.owner(conn) == 7 and tg.sent[0][0] == 7
-    before = len(tg.sent)
-    await bot.handle(conn, None, tg, Incoming(chat_id=8, text="/start s3cret-code"))
-    assert bot.owner(conn) == 7
-    assert tg.sent[before:] == [(8, "This is a private Fine Print bot: it already has an owner.")]
-    await bot.handle(conn, None, tg, Incoming(chat_id=8, text="/list"))
-    assert len(tg.sent) == before + 1  # non-/start messages from strangers get no reply at all
 
 
 # --- Token redaction -------------------------------------------------------------------------------

@@ -14,3 +14,5 @@ os.environ.update(
         "FP_PINECONE_KEY": "pc-key",
     }
 )
+os.environ.setdefault("FP_OWNER_CLAIM_CODE", "owner-code")
+os.environ.setdefault("FP_JOIN_CODE", "join-code")

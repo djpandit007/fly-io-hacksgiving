@@ -49,7 +49,8 @@ class Settings(BaseSettings):
     # The bot answers one chat. Either fix it here, or claim it once with `/start <claim code>`.
     owner_chat_id: int | None = None
     owner_claim_code: SecretStr = SecretStr("")
-    gmail_token_file: Path | None = None
+    # Shared code for colleagues and judges: `/start <join code>` in Telegram, or in an email subject.
+    join_code: SecretStr = SecretStr("")
 
     # Both models are reached through one OpenCode key: Jev (TypeSafe's decision model) for
     # judgments, a chat model for writing. Free OpenCode models refuse calls from outside OpenCode.
@@ -57,8 +58,9 @@ class Settings(BaseSettings):
     writer_model: str = "glm-5.3-flash"
     pinecone_index: str = "fine-print"
     pinecone_namespace: str = "clauses"
-    box_folder_id: str = "0"
     llama_project_id: str = ""
+    # Shared inbox members forward mail to (AgentMail).
+    agentmail_address: str = ""
     material_threshold: float = Field(0.7, ge=0, le=1)
 
     # On a Sprite: a Custom API connector's gateway base for https://opencode.ai/inference.
@@ -67,8 +69,6 @@ class Settings(BaseSettings):
     # The Sprites Pinecone connector routes by index name, so this is the connector's gateway base.
     pinecone_base: str = ""
     pinecone_key: SecretStr = SecretStr("")
-    box_base: str = ""
-    box_key: SecretStr = SecretStr("")
     llama_base: str = "https://api.cloud.llamaindex.ai"
     llama_key: SecretStr = SecretStr("")
 
@@ -80,10 +80,6 @@ class Settings(BaseSettings):
     @property
     def db_path(self) -> Path:
         return self.data_dir / "fineprint.db"
-
-    @property
-    def gmail_token_path(self) -> Path:
-        return self.gmail_token_file or self.data_dir / "gmail.json"
 
     @property
     def opencode(self) -> Provider:
@@ -99,10 +95,6 @@ class Settings(BaseSettings):
             auth_header="Api-Key",
             auth_prefix="",
         )
-
-    @property
-    def box(self) -> Provider:
-        return Provider(name="box", base_url=self.box_base, key=self.box_key)
 
     @property
     def llama(self) -> Provider:

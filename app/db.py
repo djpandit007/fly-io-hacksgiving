@@ -10,6 +10,8 @@ from typing import Iterator, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict
 
+# Version 1: the single-owner schema. Kept as the base so every database, new or old, walks the same
+# migration path to the current version.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS services (
     id          INTEGER PRIMARY KEY,
@@ -75,6 +77,83 @@ def now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+SCHEMA_VERSION = 2
+
+# Version 2: members, per-member watchlists and deadlines, email dedupe, replayable verdicts.
+V2_MIGRATION = """
+CREATE TABLE users (
+    id                  INTEGER PRIMARY KEY,
+    chat_id             INTEGER UNIQUE,                   -- Telegram chat; NULL for email-only members
+    email               TEXT UNIQUE,                      -- verified address only
+    email_pending       TEXT,
+    email_code_hash     TEXT,
+    email_code_expires  TEXT,
+    email_code_attempts INTEGER NOT NULL DEFAULT 0,
+    role                TEXT NOT NULL DEFAULT 'member',   -- owner | member
+    name                TEXT NOT NULL DEFAULT '',
+    calendar_token      TEXT NOT NULL UNIQUE,
+    joined_at           TEXT NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'active'    -- active | removed
+);
+CREATE UNIQUE INDEX users_one_owner ON users(role) WHERE role = 'owner';
+
+CREATE TABLE subscriptions (
+    user_id    INTEGER NOT NULL REFERENCES users(id),
+    service_id INTEGER NOT NULL REFERENCES services(id),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, service_id)
+);
+
+CREATE TABLE mail_seen (
+    message_id TEXT PRIMARY KEY,
+    seen_at    TEXT NOT NULL
+);
+
+CREATE TABLE ledger_v2 (
+    id          INTEGER PRIMARY KEY,
+    user_id     INTEGER REFERENCES users(id),             -- NULL: pre-v2 row, adopted by the owner
+    title       TEXT NOT NULL,
+    detail      TEXT NOT NULL DEFAULT '',
+    due_on      TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    service_id  INTEGER REFERENCES services(id),
+    change_id   INTEGER REFERENCES changes(id),
+    created_at  TEXT NOT NULL,
+    nudged_at   TEXT,
+    UNIQUE (user_id, title, due_on)
+);
+INSERT INTO ledger_v2 (id, user_id, title, detail, due_on, kind, service_id, change_id, created_at, nudged_at)
+    SELECT id, NULL, title, detail, due_on, kind, service_id, change_id, created_at, nudged_at FROM ledger;
+DROP TABLE ledger;
+ALTER TABLE ledger_v2 RENAME TO ledger;
+
+ALTER TABLE changes ADD COLUMN favours TEXT;
+ALTER TABLE changes ADD COLUMN partial INTEGER NOT NULL DEFAULT 0;
+"""
+
+
+def backup_path(path: Path, version: int) -> Path:
+    return path.with_name(f"{path.name}.v{version}.bak")
+
+
+def _migrate(conn: sqlite3.Connection, path: Path) -> None:
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version >= SCHEMA_VERSION:
+        return
+    has_data = conn.execute("SELECT COUNT(*) FROM services").fetchone()[0] > 0
+    if has_data and str(path) != ":memory:":
+        # Keep a copy of the pre-migration database for rollback.
+        with sqlite3.connect(backup_path(path, max(version, 1))) as bak:
+            conn.backup(bak)
+    if version < 2:
+        # executescript commits first, so run the statements one by one inside our own transaction.
+        statements = [s.strip() for s in V2_MIGRATION.split(";\n") if s.strip()]
+        with transaction(conn):
+            for stmt in statements:
+                conn.execute(stmt)
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
 def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, isolation_level=None)
@@ -82,6 +161,7 @@ def connect(path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(SCHEMA)
+    _migrate(conn, path)
     return conn
 
 
@@ -119,10 +199,9 @@ class Service(Row):
     name: str
     terms_url: str
     domain: str | None = None
-    source: Literal["manual", "gmail", "telegram"] = "manual"
-    status: Literal["active", "proposed", "paused"] = "active"
     tosdr_grade: str | None = None
     added_at: datetime
+    # `source` and `status` remain as unused v1 columns; watch state lives in `subscriptions`.
 
 
 class Snapshot(Row):
@@ -151,10 +230,13 @@ class Change(Row):
     severity: float | None = None
     summary: str | None = None
     notified_at: datetime | None = None
+    favours: str | None = None
+    partial: bool = False
 
 
 class LedgerEntry(Row):
     id: int
+    user_id: int | None = None
     title: str
     detail: str = ""
     due_on: date
@@ -163,6 +245,35 @@ class LedgerEntry(Row):
     change_id: int | None = None
     created_at: datetime
     nudged_at: datetime | None = None
+
+
+class User(Row):
+    id: int
+    chat_id: int | None = None
+    email: str | None = None
+    email_pending: str | None = None
+    email_code_hash: str | None = None
+    email_code_expires: datetime | None = None
+    email_code_attempts: int = 0
+    role: Literal["owner", "member"] = "member"
+    name: str = ""
+    calendar_token: str
+    joined_at: datetime
+    status: Literal["active", "removed"] = "active"
+
+    @property
+    def is_owner(self) -> bool:
+        return self.role == "owner"
+
+    @property
+    def label(self) -> str:
+        return self.name or (f"chat {self.chat_id}" if self.chat_id else self.email or f"user {self.id}")
+
+
+class Subscription(Row):
+    user_id: int
+    service_id: int
+    created_at: datetime
 
 
 R = TypeVar("R", bound=Row)

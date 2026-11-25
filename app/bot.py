@@ -1,49 +1,61 @@
-"""Telegram conversation: one owner, a handful of commands, and anything forwarded gets checked."""
+"""Telegram conversation: the owner, members who joined with the join code, and nobody else.
+
+Each member sees only their own watchlist, deadlines, calendar feed and Wrapped. Anything else
+forwarded (a link, a PDF, a screenshot) gets a "before you agree" check.
+"""
 
 from __future__ import annotations
 
-import hmac
 import logging
 import re
 import sqlite3
 from urllib.parse import urlparse
 
-from app import agent, ledger
+from app import agent, ledger, users
 from app.agent import Clients
 from app.config import settings
-from app.db import get_kv, set_kv
+from app.db import User
 from app.discover import find_terms_url
-from app.gmail import Gmail
 from app.telegram import Incoming, Telegram, esc, redact
 
 log = logging.getLogger(__name__)
 
 URL = re.compile(r"https?://\S+")
+
 HELP = """<b>Fine Print</b> watches the fine print you've agreed to.
 
-/watch <i>url or domain</i> — watch a service's terms (backfills a year of changes)
-/list — what I'm watching, with community grades
-/scan — find services from your inbox (read-only, senders and subjects only)
-/approve <i>name</i> | all — start watching scanned services
-/deadlines — opt-out windows, renewals and notice periods
+/watch <i>url, domain or name</i> — watch a service's terms (shows the past year's changes)
+/list — what you're watching, with community grades
+/deadlines — your opt-out windows, renewals and notice periods, plus your calendar link
 /wrapped — your year in accepted terms
-
-Send me a link or a file (PDF, screenshot, photo) to check it <b>before you agree</b>.
+{email}
+Send a link or a file (PDF, screenshot, photo) to check it <b>before you agree</b>.
 <i>Information, not legal advice.</i>"""
 
+OWNER_HELP = """
 
-def owner(conn: sqlite3.Connection) -> int | None:
-    if settings.owner_chat_id:
-        return settings.owner_chat_id
-    value = get_kv(conn, "owner_chat")
-    return int(value) if value else None
+<b>Owner</b>
+/members — who has joined
+/remove <i>id</i> — remove a member"""
+
+WELCOME = """Welcome to <b>Fine Print</b>, {name}! 👋
+
+I read the terms you agree to and tell you when something that matters changes.
+{forward}
+Documents and links you send are read by AI providers on the operator's accounts; I keep only the
+deadlines I extract and your watchlist. I give information, not legal advice."""
+
+PRIVATE = "This is a private Fine Print bot: {hint}."
 
 
-def _claims(text: str) -> bool:
-    """`/start <code>` with the FP_OWNER_CLAIM_CODE secret claims an unowned bot."""
-    expected = settings.owner_claim_code.get_secret_value()
-    cmd, _, code = text.strip().partition(" ")
-    return bool(expected) and cmd.split("@")[0] == "/start" and hmac.compare_digest(code.strip(), expected)
+def _email_help() -> str:
+    if not settings.agentmail_address:
+        return ""
+    return f"/email <i>address</i> — link your email, then forward terms emails to {esc(settings.agentmail_address)}\n"
+
+
+def help_text(user: User) -> str:
+    return HELP.format(email=_email_help()) + (OWNER_HELP if user.is_owner else "")
 
 
 def _name_for(host: str) -> str:
@@ -51,117 +63,120 @@ def _name_for(host: str) -> str:
     return host.split(".")[-2].capitalize() if host.count(".") >= 1 else host
 
 
-async def _watch(conn: sqlite3.Connection, cl: Clients, tg: Telegram, chat: int, arg: str) -> None:
+async def _start(conn: sqlite3.Connection, tg: Telegram, msg: Incoming, arg: str) -> User | None:
+    """`/start <code>`: claim ownership or join. Returns the member it produced, if any."""
+    owner = users.claim_owner(conn, msg.chat_id, arg, msg.name)
+    if owner:
+        await tg.send(msg.chat_id, "You're the owner of this Fine Print bot.\n\n" + help_text(owner))
+        return owner
+    member = users.join_member(conn, arg, chat_id=msg.chat_id, name=msg.name)
+    if member:
+        forward = (
+            f"\nForward terms emails, receipts and contracts to <b>{esc(settings.agentmail_address)}</b> after /email.\n"
+            if settings.agentmail_address else ""
+        )
+        await tg.send(msg.chat_id, WELCOME.format(name=esc(msg.name or "there"), forward=forward))
+        await tg.send(msg.chat_id, help_text(member))
+        return member
+    hint = "ask the operator for a join code, then send /start followed by it"
+    await tg.send(msg.chat_id, PRIVATE.format(hint=hint))
+    return None
+
+
+async def _watch(conn: sqlite3.Connection, cl: Clients, tg: Telegram, user: User, arg: str) -> None:
+    chat = user.chat_id
     if not arg:
-        await tg.send(chat, "Usage: /watch https://example.com/terms  or  /watch example.com")
+        await tg.send(chat, "Usage: /watch https://example.com/terms, /watch example.com or /watch notion")
         return
     url = arg if arg.startswith("http") else await find_terms_url(arg.strip("/ "))
     if not url:
-        await tg.send(chat, f"I couldn't find a terms page on {esc(arg)}. Send the full URL instead.")
+        await tg.send(chat, f"I couldn't find a terms page for {esc(arg)}. Send the full URL instead.")
         return
-    svc = agent.add_service(conn, _name_for(urlparse(url).hostname or arg), url, source="telegram")
-    await tg.send(chat, f"Watching <b>{esc(svc.name)}</b> — {esc(url)}\nBackfilling a year of changes…")
-    reports = await agent.onboard_service(conn, cl, svc)
+    name = _name_for(urlparse(url).hostname or arg)
+    await tg.send(chat, f"Watching <b>{esc(name)}</b> — {esc(url)}\nLooking at the past year of changes…")
+    svc, reports = await agent.subscribe(conn, cl, user, name, url)
     if not reports:
         await tg.send(chat, f"No material changes to {esc(svc.name)}'s terms in the past year. I'll check daily.")
     for r in reports:
         await tg.send(chat, r.to_html())
 
 
-async def _scan(conn: sqlite3.Connection, tg: Telegram, chat: int) -> None:
-    gmail = Gmail(settings.gmail_token_path)
-    if not gmail.configured:
-        await tg.send(chat, "Gmail isn't connected. Run scripts/gmail_auth.py on the Sprite first.")
-        return
-    try:
-        await tg.send(chat, "Scanning your inbox for sign-ups and receipts…")
-        watched = {s.domain for s in agent.services(conn)}
-        proposed = []
-        for stat in (await gmail.senders())[:15]:
-            if stat.domain in watched:
-                continue
-            url = await find_terms_url(stat.domain)
-            if url:
-                agent.add_service(conn, _name_for(stat.domain), url, source="gmail", status="proposed")
-                proposed.append(
-                    f"• <b>{esc(_name_for(stat.domain))}</b> ({stat.count} emails, e.g. “{esc(stat.sample_subject[:60])}”)\n  {esc(url)}"
-                )
-        if proposed:
-            await tg.send(chat, "Found these services:\n" + "\n".join(proposed) + "\n\n/approve all — or /approve <i>name</i>")
-        else:
-            await tg.send(chat, "No new services found.")
-    finally:
-        await gmail.aclose()
+async def _members(conn: sqlite3.Connection, tg: Telegram, user: User) -> None:
+    lines = [
+        f"{'👑' if m.is_owner else '•'} <code>{m.id}</code> {esc(m.label)}"
+        f"{' · ' + esc(m.email) if m.email and m.chat_id else ''} · joined {m.joined_at:%d %b}"
+        for m in users.members(conn)
+    ]
+    await tg.send(user.chat_id, "<b>Members</b>\n" + "\n".join(lines))
 
 
-async def _approve(conn: sqlite3.Connection, cl: Clients, tg: Telegram, chat: int, arg: str) -> None:
-    pending = agent.services(conn, status="proposed")
-    chosen = pending if arg.lower() == "all" else [s for s in pending if s.name.lower() == arg.lower()]
-    if not chosen:
-        await tg.send(chat, "Nothing to approve. Try /scan first.")
+async def _remove(conn: sqlite3.Connection, tg: Telegram, user: User, arg: str) -> None:
+    if not arg.isdigit():
+        await tg.send(user.chat_id, "Usage: /remove <i>id</i> (see /members)")
         return
-    total = 0
-    for svc in chosen:
-        conn.execute("UPDATE services SET status = 'active' WHERE id = ?", (svc.id,))
-        reports = await agent.onboard_service(conn, cl, svc)
-        total += len(reports)
-        for r in reports[:3]:
-            await tg.send(chat, r.to_html())
-    await tg.send(chat, f"Now watching {len(chosen)} more service(s); found {total} material change(s) in the past year.")
+    ok = users.remove(conn, int(arg))
+    await tg.send(user.chat_id, f"Removed member {arg}." if ok else f"No member {esc(arg)} to remove.")
 
 
 async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incoming) -> None:
-    current = owner(conn)
-    if current is None and _claims(msg.text):
-        set_kv(conn, "owner_chat", str(msg.chat_id))
-        current = msg.chat_id
-        log.info("bot claimed by chat %s", msg.chat_id)
-    if current is None or msg.chat_id != current:
-        log.info("ignoring chat %s (not the owner)", msg.chat_id)
-        if msg.text.startswith("/start"):
-            # Say so instead of staying silent; reveals nothing beyond "this bot is taken".
-            hint = "send /start followed by your claim code" if current is None else "it already has an owner"
-            await tg.send(msg.chat_id, f"This is a private Fine Print bot: {hint}.")
-        return
+    cmd, _, arg = msg.text.strip().partition(" ")
+    cmd, arg = cmd.lower().split("@")[0], arg.strip()
 
+    user = users.active(users.by_chat(conn, msg.chat_id))
+    if cmd == "/start" and (user is None or arg):
+        if user is None:
+            await _start(conn, tg, msg, arg)
+            return
+        if user is not None and arg:
+            # An existing member re-sending a code: maybe the owner claim; otherwise just show help.
+            if users.claim_owner(conn, msg.chat_id, arg, msg.name):
+                user = users.by_chat(conn, msg.chat_id)
+    if user is None:
+        log.info("ignoring chat %s (not a member)", msg.chat_id)
+        return
+    users.set_name(conn, user, msg.name)
     chat = msg.chat_id
+
     try:
         if msg.file_id:
             await tg.send(chat, "Reading it…")
             name, content = await tg.download(msg.file_id)
-            filename = msg.file_name or name
-            card = await agent.intake_file(conn, cl, filename, content)
-            await tg.send(chat, card)
-            if await agent.archive_to_box(conn, cl, filename, content, card):
-                await tg.send(chat, f"📁 Saved {esc(filename)} and its verdict to your Box folder.")
+            await tg.send(chat, await agent.intake_file(conn, cl, user, msg.file_name or name, content))
             return
 
-        cmd, _, arg = msg.text.strip().partition(" ")
-        cmd, arg = cmd.lower().split("@")[0], arg.strip()
         if cmd in ("/start", "/help"):
-            await tg.send(chat, HELP)
+            await tg.send(chat, help_text(user))
         elif cmd == "/watch":
-            await _watch(conn, cl, tg, chat, arg)
+            await _watch(conn, cl, tg, user, arg)
         elif cmd == "/list":
-            svcs = agent.services(conn)
-            lines = [f"• <b>{esc(s.name)}</b> {f'[{s.tosdr_grade}]' if s.tosdr_grade else ''} — {esc(s.terms_url)}" for s in svcs]
-            await tg.send(chat, "\n".join(lines) or "Not watching anything yet. /watch or /scan.")
-        elif cmd == "/scan":
-            await _scan(conn, tg, chat)
-        elif cmd == "/approve":
-            await _approve(conn, cl, tg, chat, arg)
+            lines = [
+                f"• <b>{esc(s.name)}</b> {f'[{s.tosdr_grade}]' if s.tosdr_grade else ''} — {esc(s.terms_url)}"
+                for s in agent.services_for(conn, user.id)
+            ]
+            await tg.send(chat, "\n".join(lines) or "Not watching anything yet. Try /watch youtube.com")
         elif cmd == "/deadlines":
-            entries = ledger.upcoming(conn)
+            entries = ledger.upcoming(conn, user.id)
             lines = [f"⏰ <b>{e.due_on:%d %b %Y}</b>: {esc(e.title)}" for e in entries]
-            cal = f"\n\nCalendar feed: {settings.public_url}/calendar.ics?token=…" if settings.public_url else ""
-            await tg.send(chat, ("\n".join(lines) or "No upcoming deadlines.") + cal)
+            feed = (
+                f"\n\nYour private calendar feed (subscribe in any calendar app):\n"
+                f"{esc(settings.public_url)}/calendar.ics?token={user.calendar_token}"
+                if settings.public_url else ""
+            )
+            await tg.send(chat, ("\n".join(lines) or "No upcoming deadlines.") + feed)
         elif cmd == "/wrapped":
-            await tg.send(chat, await agent.wrapped(conn, cl))
+            await tg.send(chat, await agent.wrapped(conn, cl, user))
+        elif cmd in ("/members", "/remove"):
+            if not user.is_owner:
+                await tg.send(chat, "That command is owner-only.")
+            elif cmd == "/members":
+                await _members(conn, tg, user)
+            else:
+                await _remove(conn, tg, user, arg)
         elif m := URL.search(msg.text):
             await tg.send(chat, "Checking…")
             await tg.send(chat, await agent.check_url(cl, m.group(0)))
         else:
-            await tg.send(chat, HELP)
+            await tg.send(chat, help_text(user))
     except Exception as exc:
         log.error("handling message failed: %s", redact(f"{type(exc).__name__}: {exc}"))
         await tg.send(chat, f"Something went wrong: {esc(redact(str(exc))[:300])}")

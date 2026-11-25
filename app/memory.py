@@ -89,8 +89,23 @@ async def remember(gw: Gateway, clause_id: str, service: str, heading: str, text
     )
 
 
-async def similar(gw: Gateway, text: str, exclude_service: str, top_k: int = 5, min_score: float = 0.5) -> list[Precedent]:
-    values = await embed(gw, text, "query")
+async def similar(
+    gw: Gateway,
+    text: str,
+    exclude_service: str,
+    services: list[str],
+    top_k: int = 5,
+    min_score: float = 0.5,
+    vector: list[float] | None = None,
+) -> list[Precedent]:
+    """Clauses similar to `text`, only from `services` (the asking member's own watchlist).
+
+    Pass `vector` to reuse an embedding when the same change is reported to several members.
+    """
+    candidates = sorted(set(services) - {exclude_service})
+    if not candidates:
+        return []
+    values = vector or await embed(gw, text, "query")
     data = await gw.post(
         _index_path("query"),
         json={
@@ -98,6 +113,7 @@ async def similar(gw: Gateway, text: str, exclude_service: str, top_k: int = 5, 
             "vector": values,
             "topK": top_k + 3,
             "includeMetadata": True,
+            "filter": {"service": {"$in": candidates}},
         },
     )
     found = [

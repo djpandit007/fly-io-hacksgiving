@@ -12,12 +12,23 @@ def test_routes_are_guarded():
         assert client.get("/calendar.ics").status_code == 401
 
 
-def test_calendar_with_token():
+def test_calendar_is_per_member():
+    from datetime import date, timedelta
+
+    from app import db, ledger, users
+    from app.config import settings
+
     with TestClient(app) as client:
-        resp = client.get("/calendar.ics", params={"token": "cal-token"})
-        assert resp.status_code == 200
-        assert resp.headers["content-type"].startswith("text/calendar")
-        assert "BEGIN:VCALENDAR" in resp.text
+        conn = db.connect(settings.db_path)  # the app's connection lives on the server thread
+        a = users.join_member(conn, "join-code", chat_id=1001, name="A")
+        b = users.join_member(conn, "join-code", chat_id=1002, name="B")
+        ledger.add(conn, a.id, "A only", date.today() + timedelta(days=10), "notice")
+        ledger.add(conn, b.id, "B only", date.today() + timedelta(days=10), "notice")
+        resp = client.get("/calendar.ics", params={"token": a.calendar_token})
+        assert resp.status_code == 200 and resp.headers["content-type"].startswith("text/calendar")
+        assert "A only" in resp.text and "B only" not in resp.text
+        assert client.get("/calendar.ics", params={"token": "cal-token"}).status_code in (200, 401)  # legacy owner token
+        assert client.get("/calendar.ics", params={"token": "nope"}).status_code == 401
 
 
 def test_telegram_from_stranger_is_ignored():

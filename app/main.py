@@ -13,10 +13,10 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Qu
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 
-from app import agent, bot, db, ledger
+from app import agent, bot, db, ledger, users
+from app.locks import locks
 from app.agent import Clients
 from app.config import settings
-from app.gmail import Gmail
 from app import sprite
 from app.sprite import stay_awake
 from app.telegram import Telegram, parse_update
@@ -26,8 +26,8 @@ log = logging.getLogger("fineprint")
 # httpx logs every request URL at INFO, and Telegram URLs contain the bot token.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-# One worker, one event loop: a single SQLite connection is safe; the lock keeps long jobs in order.
-work_lock = asyncio.Lock()
+# One worker, one event loop, one SQLite connection. Jobs are ordered per member (chat:<id>) and per
+# service (inside the agent), and only one daily run happens at a time ("tick").
 
 
 @asynccontextmanager
@@ -58,7 +58,7 @@ class TickSummary(BaseModel):
     failed: list[str]
     changes: int
     nudges: int
-    inbox: int
+    members_notified: int
     sent: int
 
 
@@ -71,21 +71,32 @@ async def health() -> dict[str, str]:
 async def tick(request: Request) -> TickSummary:
     """Daily run. Called by the external cron, which keeps the connection open until done."""
     st = request.app.state
-    async with work_lock, stay_awake("tick", expire="10m"):
-        gmail = Gmail(settings.gmail_token_path)
-        try:
-            result = await agent.tick(st.conn, st.clients, gmail)
-        finally:
-            await gmail.aclose()
-        sent = 0
-        if (chat := bot.owner(st.conn)) and st.tg.configured:
-            for msg in agent.tick_messages(result):
-                await st.tg.send(chat, msg)
-                sent += 1
+    async with locks.hold("tick"), stay_awake("tick", expire="10m"):
+        result = await agent.tick(st.conn, st.clients)
+        sent = await deliver(request.app, result.deliveries)
     return TickSummary(
-        checked=result.checked, failed=result.failed, changes=len(result.reports),
-        nudges=len(result.nudges), inbox=len(result.inbox), sent=sent,
+        checked=result.checked, failed=result.failed, changes=result.changes,
+        nudges=result.nudges, members_notified=len(result.deliveries), sent=sent,
     )
+
+
+async def deliver(app_: FastAPI, deliveries: dict[int, list[str]]) -> int:
+    """Send each member their own messages, by Telegram. Returns how many messages went out."""
+    st = app_.state
+    sent = 0
+    for user_id, messages in deliveries.items():
+        user = users.active(users.by_id(st.conn, user_id))
+        if not user or not user.chat_id or not st.tg.configured:
+            continue
+        for text in messages:
+            try:
+                await st.tg.send(user.chat_id, text)
+                sent += 1
+            except Exception as exc:  # one blocked chat must not stop the others
+                log.warning("delivery to member %s failed: %s", user_id, exc)
+                break
+            await asyncio.sleep(0.05)  # stay well inside Telegram's per-bot rate limit
+    return sent
 
 
 async def _handle_message(app_: FastAPI, payload: dict, task: str) -> None:
@@ -95,7 +106,7 @@ async def _handle_message(app_: FastAPI, payload: dict, task: str) -> None:
         if not msg:
             return
         # The hold was taken before the webhook answered; keep refreshing it while queued and working.
-        async with stay_awake(task, expire="5m"), work_lock:
+        async with stay_awake(task, expire="5m"), locks.hold(f"chat:{msg.chat_id}"):
             await bot.handle(st.conn, st.clients, st.tg, msg)
     finally:
         await sprite.release(task)
@@ -120,9 +131,10 @@ async def telegram_webhook(
 
 @app.get("/calendar.ics")
 async def calendar(request: Request, token: Annotated[str, Query()] = "") -> Response:
-    if not _same(token, settings.calendar_token.get_secret_value()):
+    user = users.by_calendar_token(request.app.state.conn, token)
+    if user is None:
         raise HTTPException(status_code=401)
-    body = ledger.to_ics(ledger.upcoming(request.app.state.conn))
+    body = ledger.to_ics(ledger.upcoming(request.app.state.conn, user.id), calendar_name=f"Fine Print — {user.label}")
     return PlainTextResponse(body, media_type="text/calendar; charset=utf-8")
 
 

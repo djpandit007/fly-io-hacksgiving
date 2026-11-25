@@ -1,19 +1,24 @@
-"""End to end through record_version with OpenCode (Jev + chat) and Pinecone mocked at the HTTP layer."""
+"""Multi-user workflow with OpenCode (Jev + chat), Pinecone and the history backfill mocked."""
 
+import asyncio
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import httpx
 import pytest
 import respx
 
-from app import agent, db, ledger
-from app.watch import html_to_markdown, normalise
+from app import agent, db, ledger, users
 from tests.test_judge import GOOD
 from tests.test_watch import NEW_HTML, OLD_HTML
+from app.watch import html_to_markdown, normalise
 
 JEV = "https://opencode.test/inference/systemone/v1/systemone"
 CHAT = "https://opencode.test/inference/openai/v1/chat/completions"
+EMBED = "https://pinecone.test/embed"
+QUERY = "https://pinecone.test/indexes/fine-print/query"
+UPSERT = "https://pinecone.test/indexes/fine-print/vectors/upsert"
+SUMMARY = "Disputes now go to arbitration; opt out within 30 days."
 
 
 def text(html):
@@ -25,78 +30,200 @@ def conn(tmp_path):
     return db.connect(tmp_path / "a.db")
 
 
-@respx.mock
-async def test_change_is_judged_summarised_remembered_and_deadlined(conn):
-    jev = respx.post(JEV).mock(return_value=httpx.Response(200, json=GOOD))
-    chat = respx.post(CHAT).mock(
-        return_value=httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "Disputes now go to arbitration; opt out within 30 days."}}]})
-    )
-    respx.post("https://pinecone.test/embed").mock(
-        return_value=httpx.Response(200, json={"model": "llama-text-embed-v2", "data": [{"values": [0.1] * 1024}]})
-    )
-    search = respx.post("https://pinecone.test/indexes/fine-print/query").mock(
-        return_value=httpx.Response(200, json={"matches": [
-            {"id": "chg-9", "score": 0.83, "metadata": {"service": "Spotify", "heading": "Disputes", "text": "..."}},
+@pytest.fixture
+def members(conn):
+    return [users.join_member(conn, "join-code", chat_id=i, name=n) for i, n in ((1, "A"), (2, "B"), (3, "C"))]
+
+
+def mock_providers(material=0.91):
+    answers = {**GOOD, "answers": {**GOOD["answers"], "material": {"type": "noul", "noul": material}}}
+    return {
+        "jev": respx.post(JEV).mock(return_value=httpx.Response(200, json=answers)),
+        "chat": respx.post(CHAT).mock(return_value=httpx.Response(200, json={"choices": [{"message": {"content": SUMMARY}}]})),
+        "embed": respx.post(EMBED).mock(return_value=httpx.Response(200, json={"data": [{"values": [0.1] * 1024}]})),
+        "query": respx.post(QUERY).mock(return_value=httpx.Response(200, json={"matches": [
+            {"id": "chg-9", "score": 0.83, "metadata": {"service": "Spotify", "heading": "Disputes"}},
             {"id": "chg-8", "score": 0.2, "metadata": {"service": "Weak"}},
-        ]})
-    )
-    upsert = respx.post("https://pinecone.test/indexes/fine-print/vectors/upsert").mock(
-        return_value=httpx.Response(200, json={"upsertedCount": 1})
-    )
+        ]})),
+        "upsert": respx.post(UPSERT).mock(return_value=httpx.Response(200, json={"upsertedCount": 1})),
+    }
 
+
+@pytest.fixture
+def history(monkeypatch):
+    """Backfill returns OLD then NEW versions; the live page is NEW (unchanged since)."""
+    from app.history import Version
+
+    calls = []
+
+    async def fake_backfill(name, url, days=365):
+        calls.append(name)
+        now = datetime.now(UTC)
+        return [Version(taken_at=now - timedelta(days=200), text=text(OLD_HTML), origin="wayback"),
+                Version(taken_at=now - timedelta(days=1), text=text(NEW_HTML), origin="wayback")]
+
+    async def fake_page_text(cl, url):
+        return text(NEW_HTML)
+
+    async def no_grade(q, client=None):
+        return None
+
+    monkeypatch.setattr(agent, "backfill", fake_backfill)
+    monkeypatch.setattr(agent, "page_text", fake_page_text)
+    monkeypatch.setattr(agent.tosdr, "lookup", no_grade)
+    return calls
+
+
+@respx.mock
+async def test_first_subscriber_gets_judged_history_with_their_deadline(conn, members, history):
+    m = mock_providers()
+    a = members[0]
     cl = agent.Clients()
-    svc = agent.add_service(conn, "Acme", "https://acme.test/terms")
-    effective = datetime.now(UTC) - timedelta(days=1)
-
-    assert await agent.record_version(conn, cl, svc, text(OLD_HTML), effective - timedelta(days=200), "wayback") == []
-    reports = await agent.record_version(conn, cl, svc, text(NEW_HTML), effective, "live")
+    svc, reports = await agent.subscribe(conn, cl, a, "Acme", "https://acme.test/terms")
     await cl.aclose()
 
     assert {r.heading for r in reports} == {"2. Payments", "3. Arbitration"}
     arb = next(r for r in reports if r.heading == "3. Arbitration")
-    assert arb.summary.startswith("Disputes now go to arbitration")
-    assert [p.service for p in arb.precedents] == ["Spotify"]  # low-score hit filtered out
-    assert arb.deadline == (effective + timedelta(days=30)).date()
-    assert "Opt out: Acme" in ledger.upcoming(conn)[0].title
-    assert "Spotify" in arb.to_html()
-
-    # Pinecone: vectors go to the named index and namespace, with the clause in metadata.
-    sent = json.loads(upsert.calls[0].request.content)
-    assert sent["namespace"] == "clauses" and len(sent["vectors"][0]["values"]) == 1024
-    assert sent["vectors"][0]["metadata"]["service"] == "Acme"
-    # Direct mode sends provider-specific auth.
-    assert jev.calls[0].request.headers["authorization"] == "Bearer oc-key"
-    assert json.loads(jev.calls[0].request.content)["model"] == "jev-1.14"
-    assert json.loads(chat.calls[0].request.content)["model"] == "glm-5.3-flash"
-    assert search.calls[0].request.headers["api-key"] == "pc-key"
-    assert chat.called
+    assert arb.summary == SUMMARY and arb.verdict.favours == "company"
+    assert arb.deadline == (datetime.now(UTC) - timedelta(days=1)).date() + timedelta(days=30)
+    assert [e.title for e in ledger.upcoming(conn, a.id)] == ["Opt out: Acme — 3. Arbitration"]
+    assert [s.name for s in agent.services_for(conn, a.id)] == ["Acme"]
+    assert m["jev"].call_count == 2  # one per changed section
+    assert json.loads(m["jev"].calls[0].request.content)["model"] == "jev-1.14"
+    assert json.loads(m["upsert"].calls[0].request.content)["vectors"][0]["metadata"]["service"] == "Acme"
+    assert not m["query"].called  # A watches nothing else, so there is nothing to compare with
 
 
 @respx.mock
-async def test_unchanged_text_does_no_work(conn):
-    jev = respx.post(JEV).mock(return_value=httpx.Response(200, json=GOOD))
+async def test_second_subscriber_gets_replay_without_new_judging(conn, members, history):
+    m = mock_providers()
+    a, b, _ = members
     cl = agent.Clients()
-    svc = agent.add_service(conn, "Acme", "https://acme.test/terms")
-    now = datetime.now(UTC)
-    await agent.record_version(conn, cl, svc, text(OLD_HTML), now - timedelta(days=1), "live")
-    assert await agent.record_version(conn, cl, svc, text(OLD_HTML), now, "live") == []
+    await agent.subscribe(conn, cl, a, "Acme", "https://acme.test/terms")
+    judged = m["jev"].call_count
+    _, replay = await agent.subscribe(conn, cl, b, "Acme", "https://acme.test/terms")
     await cl.aclose()
-    assert not jev.called
+
+    assert m["jev"].call_count == judged and history == ["Acme"]  # no new judging, no second backfill
+    assert {r.heading for r in replay} == {"2. Payments", "3. Arbitration"}
+    assert [e.title for e in ledger.upcoming(conn, b.id)] == ["Opt out: Acme — 3. Arbitration"]
+    assert next(r for r in replay if r.heading == "3. Arbitration").verdict.category == "arbitration"
 
 
 @respx.mock
-async def test_immaterial_change_is_stored_but_not_reported(conn):
-    quiet = {**GOOD, "answers": {**GOOD["answers"], "material": {"type": "noul", "noul": 0.05}}}
-    respx.post(JEV).mock(return_value=httpx.Response(200, json=quiet))
-    chat = respx.post(CHAT)
+async def test_concurrent_first_watches_backfill_once(conn, members, history):
+    mock_providers()
+    a, b, _ = members
     cl = agent.Clients()
-    svc = agent.add_service(conn, "Acme", "https://acme.test/terms")
-    now = datetime.now(UTC)
-    await agent.record_version(conn, cl, svc, text(OLD_HTML), now - timedelta(days=1), "live")
-    assert await agent.record_version(conn, cl, svc, text(NEW_HTML), now, "live") == []
+    (_, ra), (_, rb) = await asyncio.gather(
+        agent.subscribe(conn, cl, a, "Acme", "https://acme.test/terms"),
+        agent.subscribe(conn, cl, b, "Acme", "https://acme.test/terms"),
+    )
     await cl.aclose()
+    assert history == ["Acme"] and len(ra) == len(rb) == 2
+
+
+@respx.mock
+async def test_precedents_only_from_the_members_own_services(conn, members, history):
+    m = mock_providers()
+    a, b, _ = members
+    cl = agent.Clients()
+    agent.add_service(conn, "Spotify", "https://spotify.test/terms")
+    spotify = agent.add_service(conn, "Spotify", "https://spotify.test/terms")
+    conn.execute("INSERT INTO subscriptions (user_id, service_id, created_at) VALUES (?, ?, ?)", (a.id, spotify.id, db.now()))
+    _, reports_a = await agent.subscribe(conn, cl, a, "Acme", "https://acme.test/terms")
+    m["query"].reset()
+    _, reports_b = await agent.subscribe(conn, cl, b, "Acme", "https://acme.test/terms")
+    await cl.aclose()
+
+    assert any(p.service == "Spotify" for r in reports_a for p in r.precedents)
+    assert all(not r.precedents for r in reports_b)  # B doesn't watch Spotify
+    assert not m["query"].called  # B watches only Acme: no query at all
+
+
+@respx.mock
+async def test_precedent_query_filters_to_member_services(conn, members, history):
+    m = mock_providers()
+    a = members[0]
+    cl = agent.Clients()
+    for name in ("Spotify", "Uber"):
+        svc = agent.add_service(conn, name, f"https://{name.lower()}.test/terms")
+        conn.execute("INSERT INTO subscriptions (user_id, service_id, created_at) VALUES (?, ?, ?)", (a.id, svc.id, db.now()))
+    await agent.subscribe(conn, cl, a, "Acme", "https://acme.test/terms")
+    await cl.aclose()
+    body = json.loads(m["query"].calls[0].request.content)
+    assert body["filter"] == {"service": {"$in": ["Spotify", "Uber"]}}
+
+
+@respx.mock
+async def test_tick_fans_out_one_judgment_to_each_subscriber_only(conn, members, history, monkeypatch):
+    m = mock_providers()
+    a, b, c = members
+    cl = agent.Clients()
+    await agent.subscribe(conn, cl, a, "Acme", "https://acme.test/terms")
+    await agent.subscribe(conn, cl, b, "Acme", "https://acme.test/terms")
+    judged = m["jev"].call_count
+
+    changed = text(NEW_HTML).replace("individual arbitration", "individual arbitration in Texas, with no right to appeal")
+
+    async def page(cl_, url):
+        return changed
+
+    monkeypatch.setattr(agent, "page_text", page)
+    result = await agent.tick(conn, cl)
+    await cl.aclose()
+
+    assert result.checked == 1 and result.changes == 1
+    assert m["jev"].call_count == judged + 1  # judged once for two watchers
+    assert set(result.deliveries) == {a.id, b.id} and c.id not in result.deliveries
+    assert all("Acme" in msgs[0] for msgs in result.deliveries.values())
+
+
+@respx.mock
+async def test_tick_skips_services_whose_watchers_were_removed(conn, members, history):
+    mock_providers()
+    a = members[0]
+    cl = agent.Clients()
+    await agent.subscribe(conn, cl, a, "Acme", "https://acme.test/terms")
+    users.remove(conn, a.id)
+    result = await agent.tick(conn, cl)
+    await cl.aclose()
+    assert result.checked == 0 and result.deliveries == {}
+
+
+@respx.mock
+async def test_tick_nudges_each_member_separately(conn, members):
+    a, b, _ = members
+    ledger.add(conn, a.id, "A trial ends", date.today() + timedelta(days=1), "trial")
+    ledger.add(conn, b.id, "B notice", date.today() + timedelta(days=2), "notice")
+    cl = agent.Clients()
+    result = await agent.tick(conn, cl)
+    await cl.aclose()
+    assert "A trial ends" in result.deliveries[a.id][0] and "B notice" not in result.deliveries[a.id][0]
+    assert "B notice" in result.deliveries[b.id][0] and result.nudges == 2
+
+
+@respx.mock
+async def test_immaterial_change_is_stored_but_not_reported(conn, members, history):
+    m = mock_providers(material=0.05)
+    cl = agent.Clients()
+    _, reports = await agent.subscribe(conn, cl, members[0], "Acme", "https://acme.test/terms")
+    await cl.aclose()
+    assert reports == [] and not m["chat"].called
     assert conn.execute("SELECT COUNT(*) FROM changes").fetchone()[0] == 2
-    assert not chat.called
+
+
+@respx.mock
+async def test_wrapped_counts_only_the_members_services(conn, members, history):
+    mock_providers()
+    a, b, _ = members
+    cl = agent.Clients()
+    await agent.subscribe(conn, cl, a, "Acme", "https://acme.test/terms")
+    wa = await agent.wrapped(conn, cl, a)
+    wb = await agent.wrapped(conn, cl, b)
+    await cl.aclose()
+    assert "2 material changes you accepted" in wa
+    assert "Suspiciously quiet" in wb
 
 
 @respx.mock
@@ -109,34 +236,3 @@ async def test_verdict_card_survives_writer_failure():
     card = await agent.verdict_card(cl, "Lease", "Some lease text")
     await cl.aclose()
     assert "🔴 arbitration (90%)" in card and "not legal advice" in card
-
-
-@respx.mock
-async def test_archive_to_box_uploads_file_and_verdict_and_marks_seen(conn, monkeypatch):
-    from app import box
-    from app.config import settings
-
-    monkeypatch.setattr(box, "settings", settings.model_copy(update={"box_folder_id": "42"}))
-    upload = respx.post("https://box.test/upload/files/content").mock(side_effect=[
-        httpx.Response(409, json={"code": "item_name_in_use"}),  # original name taken
-        httpx.Response(201, json={"entries": [{"id": "f1", "name": "lease (x).pdf", "type": "file"}]}),
-        httpx.Response(201, json={"entries": [{"id": "f2", "name": "Fine Print report - lease.md", "type": "file"}]}),
-    ])
-    cl = agent.Clients()
-    cl.box = agent.Gateway(settings.model_copy(update={"box_base": "https://box.test"}).box)
-    file_id = await agent.archive_to_box(conn, cl, "lease.pdf", b"%PDF", "<b>Lease</b>\n\n🔴 arbitration (90%) &amp; more")
-    await cl.aclose()
-
-    assert file_id == "f1"
-    assert '"f1"' in db.get_kv(conn, "box_seen")
-    retried = upload.calls[1].request.content
-    assert b'"parent": {"id": "42"}' in retried and b"lease (" in retried
-    report = upload.calls[2].request.content
-    assert b"**Lease**" in report and b"& more" in report and b"<b>" not in report
-
-
-async def test_archive_without_box_is_a_no_op(conn):
-    cl = agent.Clients()
-    cl.box = None
-    assert await agent.archive_to_box(conn, cl, "x.pdf", b"", "") is None
-    await cl.aclose()

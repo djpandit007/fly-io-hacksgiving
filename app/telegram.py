@@ -96,6 +96,18 @@ class Chat(BaseModel):
     id: int
 
 
+class Sender(BaseModel):
+    id: int
+    first_name: str = ""
+    last_name: str = ""
+    username: str | None = None
+
+    @property
+    def display(self) -> str:
+        name = " ".join(p for p in (self.first_name, self.last_name) if p)
+        return f"{name} (@{self.username})" if self.username and name else name or (f"@{self.username}" if self.username else "")
+
+
 class Document(BaseModel):
     file_id: str
     file_name: str | None = None
@@ -109,8 +121,11 @@ class PhotoSize(BaseModel):
 
 
 class Message(BaseModel):
+    model_config = {"populate_by_name": True}
+
     message_id: int
     chat: Chat
+    sender: Sender | None = Field(default=None, alias="from")
     text: str | None = None
     caption: str | None = None
     document: Document | None = None
@@ -133,6 +148,7 @@ class _Result(BaseModel):
 
 class Incoming(BaseModel):
     chat_id: int
+    name: str = ""
     text: str = ""
     file_id: str | None = None
     file_name: str | None = None
@@ -144,9 +160,10 @@ def parse_update(payload: dict) -> Incoming | None:
     if not msg:
         return None
     text = msg.text or msg.caption or ""
+    name = msg.sender.display if msg.sender else ""
     if msg.document:
-        return Incoming(chat_id=msg.chat.id, text=text, file_id=msg.document.file_id, file_name=msg.document.file_name)
+        return Incoming(chat_id=msg.chat.id, name=name, text=text, file_id=msg.document.file_id, file_name=msg.document.file_name)
     if msg.photo:
         largest = max(msg.photo, key=lambda p: p.width * p.height)
-        return Incoming(chat_id=msg.chat.id, text=text, file_id=largest.file_id, file_name="screenshot.jpg")
-    return Incoming(chat_id=msg.chat.id, text=text)
+        return Incoming(chat_id=msg.chat.id, name=name, text=text, file_id=largest.file_id, file_name="screenshot.jpg")
+    return Incoming(chat_id=msg.chat.id, name=name, text=text)
