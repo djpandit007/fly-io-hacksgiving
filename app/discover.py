@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urljoin, urlparse
 
 import httpx
+import tldextract
 from bs4 import BeautifulSoup
 
 from app import exa
@@ -45,35 +46,70 @@ def terms_link(html: str, base_url: str) -> str | None:
     return best[1] if best else None
 
 
-# Hosts where anyone can publish a page that looks like a terms page.
-USER_CONTENT_HOSTS = (
-    "github.io", "githubusercontent.com", "gitlab.io", "medium.com", "substack.com", "notion.site",
-    "sites.google.com", "docs.google.com", "drive.google.com", "wordpress.com", "blogspot.com",
-    "tumblr.com", "wixsite.com", "weebly.com", "squarespace.com", "pages.dev", "netlify.app",
-    "vercel.app", "herokuapp.com", "fly.dev", "sprites.app", "carrd.co", "linktr.ee", "scribd.com",
-    "dropbox.com", "box.com", "pastebin.com", "reddit.com", "linkedin.com/pulse",
+# Where anyone can publish a page that looks like a terms page: (host suffix, path prefix).
+# An empty prefix means the whole host.
+USER_CONTENT: tuple[tuple[str, str], ...] = (
+    ("github.io", ""), ("githubusercontent.com", ""), ("gitlab.io", ""), ("medium.com", ""),
+    ("substack.com", ""), ("notion.site", ""), ("sites.google.com", ""), ("docs.google.com", ""),
+    ("drive.google.com", ""), ("wordpress.com", ""), ("blogspot.com", ""), ("tumblr.com", ""),
+    ("wixsite.com", ""), ("weebly.com", ""), ("squarespace.com", ""), ("pages.dev", ""), ("netlify.app", ""),
+    ("vercel.app", ""), ("herokuapp.com", ""), ("fly.dev", ""), ("sprites.app", ""), ("carrd.co", ""),
+    ("linktr.ee", ""), ("scribd.com", ""), ("dropbox.com", ""), ("box.com", ""), ("pastebin.com", ""),
+    ("reddit.com", ""), ("linkedin.com", "/pulse"), ("linkedin.com", "/posts"),
 )
-TWO_PART_TLDS = {"co.uk", "com.au", "co.in", "co.jp", "com.br", "co.nz", "org.uk", "ac.uk"}
+# Shared hosts where every path is user content except the operator's own policy pages.
+USER_PATH_HOSTS: dict[str, tuple[str, ...]] = {
+    "github.com": ("/site-policy", "/customer-terms", "/github/site-policy"),
+    "gitlab.com": ("/handbook/legal", "/terms"),
+    "x.com": ("/en/tos", "/tos", "/en/privacy", "/privacy"),
+    "twitter.com": ("/en/tos", "/tos", "/en/privacy", "/privacy"),
+}
+
+_PSL = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None)  # bundled Public Suffix List, no network
 
 
 def registrable_domain(host: str) -> str:
-    parts = host.lower().strip(".").split(".")
-    if len(parts) >= 3 and ".".join(parts[-2:]) in TWO_PART_TLDS:
-        return ".".join(parts[-3:])
-    return ".".join(parts[-2:])
+    parts = _PSL(host.lower().strip("."))
+    return parts.top_domain_under_public_suffix or host.lower().strip(".")
+
+
+def _host_is(host: str, suffix: str) -> bool:
+    return host == suffix or host.endswith("." + suffix)
 
 
 def is_user_content(url: str) -> bool:
     u = urlparse(url)
-    host = (u.hostname or "").lower()
-    hp = f"{host}{u.path}".lower()
-    return any(host == h or host.endswith("." + h) or hp.startswith(h) for h in USER_CONTENT_HOSTS)
+    host = (u.hostname or "").lower().removeprefix("www.")
+    path = u.path or "/"
+    if any(_host_is(host, h) and path.lower().startswith(prefix) for h, prefix in USER_CONTENT):
+        return True
+    for h, official in USER_PATH_HOSTS.items():
+        if host == h and not any(path.lower().startswith(p) for p in official):
+            return True
+    return False
 
 
-def _name_matches(url: str, name: str) -> bool:
-    """For a name-only query, the result must be on that name's own domain (youtube -> youtube.com)."""
-    label = registrable_domain(urlparse(url).hostname or "").split(".")[0]
-    return label == re.sub(r"[^a-z0-9-]", "", name.lower())
+async def official_domain(name: str, client: httpx.AsyncClient | None = None) -> str | None:
+    """The brand's own registrable domain: where https://<name>.com finally lands (public hosts only).
+
+    A search result whose domain merely *contains* the name (youtube.co, notion-terms.io) proves
+    nothing; the .com redirect chain is controlled by the brand.
+    """
+    label = re.sub(r"[^a-z0-9-]", "", name.lower())
+    if not label:
+        return None
+    own = client is None
+    client = client or safe_client(timeout=15)
+    try:
+        resp = await client.get(f"https://{label}.com/")
+        if resp.status_code >= 400:
+            return None
+        return registrable_domain(resp.url.host or "") or None
+    except httpx.HTTPError:
+        return None
+    finally:
+        if own:
+            await client.aclose()
 
 
 def _domain_of(query: str) -> str | None:
@@ -81,19 +117,13 @@ def _domain_of(query: str) -> str | None:
     return q.removeprefix("www.") if "." in q else None
 
 
-def pick_terms_result(results: list[exa.Result], domain: str | None, name: str | None = None) -> str | None:
-    """First search result that looks like a terms page on the service's own domain.
-
-    With a domain, results must be on it. With only a name, the result's registrable domain must be
-    that name (`notion` -> notion.so / notion.com). User-content hosts are never accepted.
-    """
+def pick_terms_result(results: list[exa.Result], domain: str | None) -> str | None:
+    """First search result that looks like a terms page on `domain` (required). User content is rejected."""
     def ok(r: exa.Result) -> bool:
-        host = (urlparse(r.url).hostname or "").removeprefix("www.")
-        if urlparse(r.url).scheme not in ("http", "https") or is_user_content(r.url):
+        host = (urlparse(r.url).hostname or "").lower().removeprefix("www.")
+        if not domain or urlparse(r.url).scheme not in ("http", "https") or is_user_content(r.url):
             return False
-        if domain and not (host == domain or host.endswith("." + domain)):
-            return False
-        if not domain and (not name or not _name_matches(r.url, name)):
+        if not _host_is(host, domain):
             return False
         path = urlparse(r.url).path
         if NEVER_TERMS.search(path) or (OTHER_POLICY.search(path) and not TERMS_PATH.search(path)):
@@ -104,17 +134,26 @@ def pick_terms_result(results: list[exa.Result], domain: str | None, name: str |
 
 
 async def find_terms_url(query: str, cl: "Clients | None" = None, client: httpx.AsyncClient | None = None) -> str | None:
+    """A terms URL on the service's own domain, or None (then the member is asked for the URL).
+
+    A domain query searches that domain. A name query first establishes the brand's official domain
+    from https://<name>.com; without one, no search result is trusted.
+    """
     domain = _domain_of(query)
-    name = query.strip() if domain is None else domain.split(".")[0]
+    if domain is None:
+        domain = await official_domain(query, client)
+        if domain is None:
+            return None
+    else:
+        domain = registrable_domain(domain)  # subdomains (docs.github.com) still match below
+    name = domain.split(".")[0]
     if cl is not None and cl.exa is not None:
         try:
-            found = pick_terms_result(await exa.search(cl.exa, f"{name} terms of service", domain=domain), domain, name)
+            found = pick_terms_result(await exa.search(cl.exa, f"{name} terms of service", domain=domain), domain)
             if found:
                 return found
         except Exception as exc:
             log.warning("exa search failed for %s: %s", query, exc)
-    if domain is None:
-        domain = f"{name.replace(' ', '').lower()}.com"  # best guess for the scraper fallback
     return await _scrape_terms_url(domain, client)
 
 

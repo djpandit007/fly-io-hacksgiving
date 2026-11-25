@@ -23,33 +23,71 @@ def test_pick_prefers_terms_pages_on_the_domain():
     assert discover.pick_terms_result(results[1:2], "notion.so") is None  # off-domain rejected
 
 
-def test_name_only_results_must_be_on_the_names_own_domain():
+def test_results_must_be_on_the_domain_and_not_user_content():
     results = [
         Result(url="https://youtube-terms.evil.test/terms", title="YouTube Terms of Service"),
         Result(url="https://someone.github.io/youtube/terms", title="YouTube terms"),
         Result(url="https://www.youtube.com/t/terms", title="Terms of Service - YouTube"),
     ]
-    assert discover.pick_terms_result(results, None, "youtube") == "https://www.youtube.com/t/terms"
-    assert discover.pick_terms_result(results[:2], None, "youtube") is None
-    assert discover.pick_terms_result(results, None, None) is None  # no name, no domain: accept nothing
+    assert discover.pick_terms_result(results, "youtube.com") == "https://www.youtube.com/t/terms"
+    assert discover.pick_terms_result(results[:2], "youtube.com") is None
+    assert discover.pick_terms_result(results, None) is None  # no domain: accept nothing
 
 
-def test_user_content_hosts_are_rejected_even_on_matching_domain():
+def test_user_content_rules():
     assert discover.is_user_content("https://acme.github.io/terms")
     assert discover.is_user_content("https://medium.com/@x/acme-terms")
+    assert discover.is_user_content("https://www.linkedin.com/pulse/acme-terms")  # www. no longer bypasses
+    assert discover.is_user_content("https://github.com/attacker/terms")
+    assert not discover.is_user_content("https://github.com/site-policy/github-terms")
     assert not discover.is_user_content("https://docs.github.com/en/site-policy/github-terms")
+    assert not discover.is_user_content("https://www.linkedin.com/legal/user-agreement")
+    assert not discover.is_user_content("https://x.com/en/tos")      # X's own terms
+    assert discover.is_user_content("https://x.com/someone/status/1")  # a post
+
+
+def test_registrable_domain_uses_the_public_suffix_list():
+    assert discover.registrable_domain("a.b.bbc.co.uk") == "bbc.co.uk"
+    assert discover.registrable_domain("www.youtube.com") == "youtube.com"
+
+
+async def _official_notion(name, client=None):
+    return "notion.com"
 
 
 @respx.mock
-async def test_name_only_discovery_uses_search():
+async def test_name_query_searches_only_the_brands_official_domain(monkeypatch):
+    monkeypatch.setattr(discover, "official_domain", _official_notion)
     route = respx.post(SEARCH).mock(return_value=httpx.Response(200, json={"results": [
+        {"url": "https://notion-terms.evil.test/terms", "title": "Notion terms"},
         {"url": "https://www.notion.com/notion/terms", "title": "Terms and Conditions"}]}))
     cl = agent.Clients()
     url = await discover.find_terms_url("notion", cl)
     await cl.aclose()
     assert url == "https://www.notion.com/notion/terms"
-    body = json.loads(route.calls[0].request.content)
-    assert body["query"] == "notion terms of service" and "includeDomains" not in body
+    assert json.loads(route.calls[0].request.content)["includeDomains"] == ["notion.com"]
+
+
+@respx.mock
+async def test_name_without_an_official_domain_trusts_nothing(monkeypatch):
+    async def none(name, client=None):
+        return None
+
+    monkeypatch.setattr(discover, "official_domain", none)
+    route = respx.post(SEARCH).mock(return_value=httpx.Response(200, json={"results": [
+        {"url": "https://youtube.co/terms", "title": "YouTube Terms"}]}))
+    cl = agent.Clients()
+    assert await discover.find_terms_url("youtube", cl) is None
+    await cl.aclose()
+    assert not route.called
+
+
+@respx.mock
+async def test_official_domain_follows_the_dot_com_redirect():
+    respx.get("https://notion.com/").mock(return_value=httpx.Response(301, headers={"Location": "https://www.notion.so/"}))
+    respx.get("https://www.notion.so/").mock(return_value=httpx.Response(200, text="ok"))
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        assert await discover.official_domain("notion", client) == "notion.so"
 
 
 @respx.mock
@@ -77,6 +115,7 @@ async def test_search_failure_falls_back_to_scraper(monkeypatch):
         return f"https://{domain}/tos"
 
     monkeypatch.setattr(discover, "_scrape_terms_url", fake_scrape)
+    monkeypatch.setattr(discover, "official_domain", _official_notion)
     cl = agent.Clients()
     assert await discover.find_terms_url("notion", cl) == "https://notion.com/tos"
     await cl.aclose()
