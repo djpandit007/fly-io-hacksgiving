@@ -85,8 +85,7 @@ membership changes, adoption) use `db.transaction()`. Task holds remain per job,
 - Verification: the secret is the base64 part after `whsec_`; the signed content is
   `"{svix-id}.{svix-timestamp}.{raw body}"`; HMAC-SHA256, base64. Any `v1,<sig>` in the space-separated
   `svix-signature` header must match (constant time). The timestamp must be within ±300s.
-- Only `event_type == "message.received"` is accepted. The "unauthenticated" and "spam" variants are not
-  subscribed.
+- Only `event_type == "message.received"` is accepted, and only for our inbox.
 - The handler dedupes on `message_id` (`mail_seen`), takes a task hold, answers 200, and processes in the
   background.
 - *Alternative:* polling. Rejected: the Sprite is asleep between requests and polling would need a frequent
@@ -94,24 +93,35 @@ membership changes, adoption) use `db.transaction()`. Task holds remain per job,
   hold inbound secrets.
 
 ### D7. Processing a forwarded email
-1. Identify the sender with `parseaddr(from)`, lower-cased.
+1. Fetch the message **through its thread** (`GET …/threads/{thread_id}`, id from the webhook). The
+   connector refuses message-scoped endpoints for many real Message-IDs (Gmail's contain `+` and `=`);
+   thread ids are UUIDs. (Found live; the original design used `GET …/messages/{id}`.)
+2. Require **sender authentication**: AgentMail's `authentication_results` must show a DMARC, DKIM or SPF
+   pass whose domain is the From address's registrable domain; otherwise ignore (fail closed when absent).
+   Mail labelled spam/unauthenticated/blocked is also ignored.
+3. Identify the sender with `parseaddr(from)`, lower-cased.
    - A verified member: continue.
-   - The subject contains the join code: create an email-only member with this address verified, then
-     continue.
+   - A pending email-only address whose reply carries its code: confirm the member; act on nothing else.
+   - The join code in the subject from an unknown address: create a *pending* member and send a
+     confirmation code to the address (see the email-intake spec); act on nothing else.
    - Otherwise: stop silently.
-2. Fetch the full message (text, html, attachments). Download each attachment via its `download_url` with
-   `netguard.safe_client`, which refuses private addresses; skip anything over 8 MB.
-3. Classify:
+4. Download attachments via the thread attachment path (message path as fallback) and their
+   `download_url` with `netguard.safe_client`; skip anything over 8 MB or unreachable (the member is told
+   to use Telegram).
+5. Classify:
    - **Attachments** (PDF or image) → `intake_file` for each; deadlines go into the member's ledger.
-   - **Terms-update notice**: the subject matches the existing update pattern (update/change + terms/policy).
-     The original sender domain is the forwarded `From:` line in the body when present, else the sender's
-     domain. Discover and subscribe that domain's terms, then check it now.
+   - **Terms-update notice**: the subject matches update/change/revise/new + a term/policy/agreement/
+     condition stem (so "Policies" matches). Forwards nest, so collect every forwarded `From:` domain
+     (parsed line by line); prefer the one named in the subject, else the deepest (the original sender),
+     else the sender's own non-mailbox domain. Discover and subscribe that domain's terms, check it now,
+     and fan new changes out to every watcher.
    - **Link**: the body contains a URL whose path looks like terms, legal, privacy or agreement →
      `check_url`.
    - **Body text**: at least 300 characters → `verdict_card` on the text.
    - **Otherwise**: a short help reply.
-4. Reply in Telegram if a chat is linked (HTML card) and by email (`messages/{id}/reply`, plain-text
-   rendering of the same card). Bodies and attachments are discarded after processing.
+6. Reply in Telegram if a chat is linked (HTML card) and by email as a new `Re: <subject>` message via
+   `…/messages/send` (the reply endpoint is message-scoped and refused, as above), with a plain-text
+   rendering of the same card. Bodies and attachments are discarded after processing.
 
 ### D8. Exa for discovery and text fallback
 - Discovery: `POST /search` with `query = "<name> terms of service"`, `numResults = 5`, and
@@ -145,12 +155,12 @@ member and returns their ledger. The legacy `FP_CALENDAR_TOKEN` resolves to the 
 - **AgentMail 100 emails/day** (verification codes, replies, digests): one digest per member per run;
   failed sends are logged and Telegram still delivers. Upgrade the plan if usage grows.
 - **The connector may block inbox or webhook creation:** create the inbox and webhook once in the AgentMail
-  console; the app only needs send, reply and message read, which the connector does allow.
+  console (confirmed: the connector refuses webhook creation); the app only needs send and thread read,
+  which the connector allows.
 - **Forwarded-mail formats vary**, so the original-sender heuristic can miss: fall back to the sender's
   domain, then to a body-text verdict. The member still gets an answer.
-- **A spoofed `From` of a verified member:** only `message.received` (authenticated) is accepted. Worst
-  case, the verdict is emailed to the real owner of that address and deadlines are added to their ledger.
-  No data leaks to the spoofer.
+- **A spoofed `From` of a verified member:** mail must carry a DMARC/DKIM/SPF pass aligned with the From
+  domain, so forged senders are ignored. Email-only joining needs a reply proving the mailbox.
 - **A leaked join code** lets strangers in, and they spend the operator's credits: rotate `FP_JOIN_CODE`
   and `/remove` the affected members. Usage limits are a follow-up if needed.
 - **No usage limits:** watch OpenCode and LlamaCloud spend during judging.
