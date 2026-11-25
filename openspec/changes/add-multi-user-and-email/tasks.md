@@ -21,7 +21,7 @@
 
 ## 4. Exa terms discovery and page text
 
-- [ ] 4.1 Probe the Exa connector from the Sprite (`/search` and `/contents` through the gateway) and add `FP_EXA_BASE` to config and `.env.example`. Verify one live search returns a terms URL for "notion".
+- [x] 4.1 Probe the Exa connector from the Sprite (`/search` and `/contents` through the gateway) and add `FP_EXA_BASE` to config and `.env.example`. Verify one live search returns a terms URL for "notion".
 - [x] 4.2 Use Exa search in `discover.find_terms_url` (name or domain, `includeDomains` when known, terms-pattern pick, scraper fallback) and Exa `/contents` in `agent.page_text` when a direct fetch fails or is under 400 characters. Verify with respx tests for name-only discovery, the fallback to scraping, a blocked page served by `/contents`, and that netguard still refuses a private URL returned by search.
 
 ## 5. AgentMail email intake

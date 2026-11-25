@@ -374,3 +374,26 @@ async def test_deliver_uses_telegram_for_chats_and_one_digest_for_email_only(con
     assert tg.to(7) == ["<b>one</b>", "two"] and send.call_count == 1 and sent == 3
     body = json.loads(send.calls[0].request.content)
     assert body["to"] == ["judge@example.com"] and "**a**" in body["text"] and "b" in body["text"]
+
+
+@respx.mock
+async def test_locked_pending_address_stays_locked_across_new_join_emails(conn, tg):
+    send = respx.post(f"{AM}/messages/send").mock(return_value=httpx.Response(200, json={}))
+    mock_message(**{"from": "target@example.com", "subject": "join-code", "text": "x"})
+    await process(conn, tg)
+    pending = users.pending_by_address(conn, "target@example.com")
+    conn.execute("UPDATE users SET email_failures = 9 WHERE id = ?", (pending.id,))
+    # Make the next guess certainly wrong, whatever code was issued.
+    conn.execute("UPDATE users SET email_code_hash = 'not-a-real-hash' WHERE id = ?", (pending.id,))
+    assert users.confirm_email_only(conn, "target@example.com", "000000") == "locked"
+    locked = users.by_id(conn, pending.id)
+    assert locked.email_locked_until is not None
+
+    respx.reset()
+    send = respx.post(f"{AM}/messages/send").mock(return_value=httpx.Response(200, json={}))
+    conn.execute("DELETE FROM email_codes")  # even with the daily caps out of the way
+    mock_message(**{"from": "target@example.com", "subject": "join-code again", "text": "x"})
+    await process(conn, tg)
+    assert not send.called  # no new code for a locked address
+    rows = conn.execute("SELECT COUNT(*) FROM users WHERE email_pending = 'target@example.com'").fetchone()[0]
+    assert rows == 1  # the same pending row, not a fresh one

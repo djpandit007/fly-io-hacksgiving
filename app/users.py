@@ -230,10 +230,13 @@ def verify_email(conn: sqlite3.Connection, user: User, code: str) -> VerifyResul
         return "none"
 
     def clear() -> None:
+        # A pending email-only member keeps its address, so the same row (and its failure count and
+        # lockout) is reused by the next join-code email instead of a fresh row resetting them.
+        keep_address = fresh.status == "pending"
         conn.execute(
-            "UPDATE users SET email_pending = NULL, email_code_hash = NULL, email_code_expires = NULL, "
-            "email_code_attempts = 0 WHERE id = ?",
-            (user.id,),
+            "UPDATE users SET email_pending = CASE WHEN ? THEN email_pending ELSE NULL END, email_code_hash = NULL, "
+            "email_code_expires = NULL, email_code_attempts = 0 WHERE id = ?",
+            (keep_address, user.id),
         )
 
     if fresh.email_code_expires and fresh.email_code_expires < datetime.now(UTC):
@@ -260,8 +263,12 @@ def verify_email(conn: sqlite3.Connection, user: User, code: str) -> VerifyResul
         clear()
         return "in_use"
     address = fresh.email_pending
-    clear()
-    conn.execute("UPDATE users SET email = ?, email_failures = 0, status = CASE WHEN status = 'pending' THEN 'active' ELSE status END WHERE id = ?", (address, user.id))
+    conn.execute(
+        "UPDATE users SET email = ?, email_pending = NULL, email_code_hash = NULL, email_code_expires = NULL, "
+        "email_code_attempts = 0, email_failures = 0, "
+        "status = CASE WHEN status = 'pending' THEN 'active' ELSE status END WHERE id = ?",
+        (address, user.id),
+    )
     return "ok"
 
 
