@@ -47,7 +47,7 @@ def sent_code(route) -> str:
 
 @respx.mock
 async def test_email_then_verify_links_the_address(conn, tg):
-    send = respx.post(f"{AM}/messages/send").mock(return_value=httpx.Response(200, json={"message_id": "m1"}))
+    send = respx.post(f"{AM}/messages/send", name="send").mock(return_value=httpx.Response(200, json={"message_id": "m1"}))
     await say(conn, tg, 2, "/start join-code")
     await run(conn, tg, 2, "/email Me@Example.com")
     assert json.loads(send.calls[0].request.content)["to"] == ["me@example.com"]
@@ -58,7 +58,7 @@ async def test_email_then_verify_links_the_address(conn, tg):
 
 @respx.mock
 async def test_wrong_expired_and_too_many(conn, tg):
-    send = respx.post(f"{AM}/messages/send").mock(return_value=httpx.Response(200, json={}))
+    send = respx.post(f"{AM}/messages/send", name="send").mock(return_value=httpx.Response(200, json={}))
     await say(conn, tg, 2, "/start join-code")
     await run(conn, tg, 2, "/email me@example.com")
     await run(conn, tg, 2, "/verify 000000" if sent_code(send) != "000000" else "/verify 111111")
@@ -82,7 +82,7 @@ async def test_wrong_expired_and_too_many(conn, tg):
 
 @respx.mock
 async def test_address_in_use_is_refused(conn, tg):
-    respx.post(f"{AM}/messages/send").mock(return_value=httpx.Response(200, json={}))
+    respx.post(f"{AM}/messages/send", name="send").mock(return_value=httpx.Response(200, json={}))
     await say(conn, tg, 2, "/start join-code")
     await say(conn, tg, 3, "/start join-code")
     users.join_member(conn, "join-code", email="taken@example.com")
@@ -120,7 +120,7 @@ def test_webhook_accepts_signed_once_and_rejects_forged_or_stale(monkeypatch):
 
     processed = []
 
-    async def fake_process(conn, cl, tg, message_id):
+    async def fake_process(conn, cl, tg, message_id, thread_id=None):
         processed.append(message_id)
 
     monkeypatch.setattr(intake, "process", fake_process)
@@ -144,9 +144,13 @@ def test_webhook_accepts_signed_once_and_rejects_forged_or_stale(monkeypatch):
 # --- 5.4 processing ------------------------------------------------------------------------------
 
 def message(**kw):
-    base = {"message_id": "<m1@mail>", "inbox_id": "inbox_1", "from": "Member <member@example.com>",
-            "subject": "Fwd: something", "text": "", "attachments": []}
-    return {**base, **kw}
+    base = {"message_id": "<m1+x==@mail>", "thread_id": "t1", "inbox_id": "inbox_1",
+            "from": "Member <member@example.com>", "subject": "Fwd: something", "text": "", "attachments": []}
+    msg = {**base, **kw}
+    if "authentication_results" not in kw:
+        domain = msg["from"].rsplit("@", 1)[1].rstrip(">").strip()
+        msg["authentication_results"] = {"spf": "pass", "dkim": "pass", "dmarc": "pass", "dmarc_domain": domain}
+    return msg
 
 
 @pytest.fixture
@@ -156,15 +160,24 @@ def member(conn):
     return users.by_id(conn, m.id)
 
 
+def outbox():
+    """The shared send route: replies are sent as new "Re:" emails."""
+    try:
+        return respx.routes["send"]
+    except KeyError:
+        return respx.post(f"{AM}/messages/send", name="send").mock(return_value=httpx.Response(200, json={}))
+
+
 def mock_message(**kw):
-    respx.get(f"{AM}/messages/%3Cm1%40mail%3E").mock(return_value=httpx.Response(200, json=message(**kw)))
-    return respx.post(f"{AM}/messages/%3Cm1%40mail%3E/reply").mock(return_value=httpx.Response(200, json={}))
+    """Serve one received message through its thread (message endpoints are refused by the connector)."""
+    respx.get(f"{AM}/threads/t1").mock(return_value=httpx.Response(200, json={"thread_id": "t1", "messages": [message(**kw)]}))
+    return outbox()
 
 
 async def process(conn, tg):
     cl = agent.Clients()
     try:
-        await intake.process(conn, cl, tg, "<m1@mail>")
+        await intake.process(conn, cl, tg, "<m1+x==@mail>", "t1")
     finally:
         await cl.aclose()
 
@@ -178,7 +191,7 @@ async def test_unknown_sender_is_ignored_silently(conn, tg):
 
 @respx.mock
 async def test_join_code_email_needs_a_reply_proving_the_mailbox(conn, tg, monkeypatch):
-    send = respx.post(f"{AM}/messages/send").mock(return_value=httpx.Response(200, json={}))
+    send = respx.post(f"{AM}/messages/send", name="send").mock(return_value=httpx.Response(200, json={}))
     reply = mock_message(**{"from": "Judge <judge@example.com>", "subject": "Fine Print join-code please",
                             "text": "Terms text. " * 60})
     checked = []
@@ -189,15 +202,17 @@ async def test_join_code_email_needs_a_reply_proving_the_mailbox(conn, tg, monke
 
     monkeypatch.setattr(agent, "verdict_card", fake_card)
     await process(conn, tg)
-    # Not a member yet, address not verified, nothing processed: a confirmation went to the address.
-    assert users.by_email(conn, "judge@example.com") is None and checked == [] and not reply.called
+    # Not a member yet, address not verified, nothing processed: only a confirmation went to the address.
+    assert users.by_email(conn, "judge@example.com") is None and checked == []
+    [only] = [json.loads(c.request.content) for c in reply.calls]
+    assert only["to"] == ["judge@example.com"] and only["subject"] == "Confirm your email for Fine Print"
     pending = users.pending_by_address(conn, "judge@example.com")
     assert pending and pending.status == "pending" and pending not in users.members(conn)
     import re
     code = re.search(r"\b(\d{6})\b", json.loads(send.calls[0].request.content)["text"]).group(1)
 
     respx.reset()
-    send = respx.post(f"{AM}/messages/send").mock(return_value=httpx.Response(200, json={}))
+    send = respx.post(f"{AM}/messages/send", name="send").mock(return_value=httpx.Response(200, json={}))
     confirm = mock_message(**{"from": "judge@example.com", "subject": "Re: Confirm your email for Fine Print",
                               "text": f"Yes it's me. {code}"})
     await process(conn, tg)
@@ -213,7 +228,7 @@ async def test_join_code_email_needs_a_reply_proving_the_mailbox(conn, tg, monke
 
 @respx.mock
 async def test_spoofed_join_does_not_take_over_a_strangers_address(conn, tg):
-    respx.post(f"{AM}/messages/send").mock(return_value=httpx.Response(200, json={}))
+    respx.post(f"{AM}/messages/send", name="send").mock(return_value=httpx.Response(200, json={}))
     mock_message(**{"from": "victim@example.com", "subject": "join-code", "text": "x"})
     await process(conn, tg)
     # The victim's address is not verified for anyone, so they can still link it themselves.
@@ -232,7 +247,7 @@ async def test_mail_flagged_by_agentmail_is_ignored(conn, tg, member):
 
 @respx.mock
 async def test_email_code_rate_limits_and_lockout(conn, tg):
-    send = respx.post(f"{AM}/messages/send").mock(return_value=httpx.Response(200, json={}))
+    send = respx.post(f"{AM}/messages/send", name="send").mock(return_value=httpx.Response(200, json={}))
     await say(conn, tg, 2, "/start join-code")
     await run(conn, tg, 2, "/email a@example.com")
     await run(conn, tg, 2, "/email a@example.com")
@@ -267,7 +282,7 @@ def test_forwarded_from_parsing_is_bounded_and_ignores_long_lines():
 @respx.mock
 async def test_attachment_goes_to_intake_and_replies_on_both_channels(conn, tg, member, monkeypatch):
     reply = mock_message(attachments=[{"attachment_id": "a1", "filename": "lease.pdf", "content_type": "application/pdf", "size": 10}])
-    respx.get(f"{AM}/messages/%3Cm1%40mail%3E/attachments/a1").mock(
+    respx.get(f"{AM}/threads/t1/attachments/a1").mock(
         return_value=httpx.Response(200, json={"download_url": "https://files.agentmail.test/a1"}))
     respx.get("https://files.agentmail.test/a1").mock(return_value=httpx.Response(200, content=b"%PDF-1.4"))
     seen = []
@@ -365,7 +380,7 @@ async def test_email_contents_are_not_stored(conn, tg, member, monkeypatch):
 async def test_deliver_uses_telegram_for_chats_and_one_digest_for_email_only(conn, tg):
     from app import notify
 
-    send = respx.post(f"{AM}/messages/send").mock(return_value=httpx.Response(200, json={}))
+    send = respx.post(f"{AM}/messages/send", name="send").mock(return_value=httpx.Response(200, json={}))
     chat_member = users.join_member(conn, "join-code", chat_id=7)
     email_member = users.join_member(conn, "join-code", email="judge@example.com")
     cl = agent.Clients()
@@ -378,7 +393,7 @@ async def test_deliver_uses_telegram_for_chats_and_one_digest_for_email_only(con
 
 @respx.mock
 async def test_locked_pending_address_stays_locked_across_new_join_emails(conn, tg):
-    send = respx.post(f"{AM}/messages/send").mock(return_value=httpx.Response(200, json={}))
+    send = respx.post(f"{AM}/messages/send", name="send").mock(return_value=httpx.Response(200, json={}))
     mock_message(**{"from": "target@example.com", "subject": "join-code", "text": "x"})
     await process(conn, tg)
     pending = users.pending_by_address(conn, "target@example.com")
@@ -390,10 +405,44 @@ async def test_locked_pending_address_stays_locked_across_new_join_emails(conn, 
     assert locked.email_locked_until is not None
 
     respx.reset()
-    send = respx.post(f"{AM}/messages/send").mock(return_value=httpx.Response(200, json={}))
+    send = respx.post(f"{AM}/messages/send", name="send").mock(return_value=httpx.Response(200, json={}))
     conn.execute("DELETE FROM email_codes")  # even with the daily caps out of the way
     mock_message(**{"from": "target@example.com", "subject": "join-code again", "text": "x"})
     await process(conn, tg)
     assert not send.called  # no new code for a locked address
     rows = conn.execute("SELECT COUNT(*) FROM users WHERE email_pending = 'target@example.com'").fetchone()[0]
     assert rows == 1  # the same pending row, not a fresh one
+
+
+def test_nested_forward_picks_the_company_named_in_the_subject():
+    text = ("Regards,\n\n---------- Forwarded message ---------\nFrom: Dhananjay <dvpandit@asu.edu>\n"
+            "Subject: Fwd: Updates to Discord's Policies\n\n---------- Forwarded message ---------\n"
+            "From: Discord <notifications@discord.com>\nWe're updating our Terms.")
+    msg = mail.Message(message_id="m", subject="Fwd: Updates to Discord’s Policies", **{"from": "me@gmail.com"})
+    assert intake.original_sender_domain(msg, text) == "discord.com"
+    # Without a name in the subject, the deepest forwarded sender (the original) wins.
+    msg2 = mail.Message(message_id="m", subject="Fwd: Fwd: policy update", **{"from": "me@gmail.com"})
+    assert intake.original_sender_domain(msg2, text) == "discord.com"
+
+
+@pytest.mark.parametrize("auth", [
+    None,                                                                     # no results: fail closed
+    {"spf": "fail", "dkim": "fail", "dmarc": "fail", "dmarc_domain": "example.com"},
+    {"spf": "pass", "dkim": "pass", "dmarc": "pass", "dmarc_domain": "attacker.test",
+     "dkim_domain": "attacker.test", "spf_domain": "attacker.test"},          # passes, but not for the From domain
+])
+@respx.mock
+async def test_unauthenticated_or_misaligned_mail_is_ignored(conn, tg, member, auth):
+    send = mock_message(authentication_results=auth, text="x" * 500)
+    await process(conn, tg)
+    assert not send.called and tg.sent == []
+
+
+@respx.mock
+async def test_unreachable_attachment_points_to_telegram(conn, tg, member):
+    send = mock_message(attachments=[{"attachment_id": "a1", "filename": "lease.pdf", "size": 10}])
+    respx.get(f"{AM}/threads/t1/attachments/a1").mock(return_value=httpx.Response(403, json={"error": "not supported"}))
+    respx.get(url__regex=rf"{AM}/messages/.*/attachments/a1").mock(return_value=httpx.Response(403, json={}))
+    await process(conn, tg)
+    assert "Send it to the Fine Print bot in Telegram" in tg.to(7)[0]
+    assert json.loads(send.calls[0].request.content)["subject"].startswith("Re: ")

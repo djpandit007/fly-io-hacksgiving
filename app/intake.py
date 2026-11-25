@@ -59,15 +59,32 @@ def _forwarded_from_addresses(text: str):
             yield address
 
 
+def _letters(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
 def original_sender_domain(msg: mail.Message, text: str) -> str | None:
-    """The company that sent the notice: the forwarded `From:` line, else the sender (if not a mailbox)."""
+    """The company that sent the notice.
+
+    Forwards nest (your work address forwarded to your personal one, then to us), so collect every
+    forwarded `From:` domain; prefer the one the subject names ("Updates to Discord's Policies"),
+    else the deepest, which is the original sender. Fall back to the sender if it isn't a mailbox.
+    """
     ours = _registrable(settings.agentmail_address.rsplit("@", 1)[-1]) if "@" in settings.agentmail_address else ""
+    own = _registrable(msg.sender.rsplit("@", 1)[-1]) if "@" in msg.sender else ""
+    candidates: list[str] = []
     for address in _forwarded_from_addresses(text):
         domain = _registrable(address.rsplit("@", 1)[1])
-        if domain not in MAILBOX_PROVIDERS and domain != ours:
+        if domain not in MAILBOX_PROVIDERS and domain not in (ours, own) and domain not in candidates:
+            candidates.append(domain)
+    subject = _letters(msg.subject or "")
+    for domain in candidates:
+        label = domain.split(".")[0]
+        if len(label) >= 2 and _letters(label) in subject:
             return domain
-    domain = _registrable(msg.sender.rsplit("@", 1)[-1]) if "@" in msg.sender else ""
-    return domain if domain and domain not in MAILBOX_PROVIDERS else None
+    if candidates:
+        return candidates[-1]
+    return own if own and own not in MAILBOX_PROVIDERS and own != ours else None
 
 
 CONFIRM_SUBJECT = "Confirm your email for Fine Print"
@@ -99,7 +116,7 @@ async def resolve_sender(conn: sqlite3.Connection, cl: Clients, msg: mail.Messag
     confirmed = users.confirm_email_only(conn, msg.sender, f"{msg.subject or ''}\n{text[:5000]}")
     if confirmed is not None:
         if confirmed == "ok":
-            await mail.reply(cl.mail, msg.message_id, CONFIRMED_TEXT + FOOTER)
+            await mail.respond(cl.mail, msg, CONFIRMED_TEXT + FOOTER)
         return None
     code = settings.join_code.get_secret_value()
     if code and code in (msg.subject or ""):
@@ -116,9 +133,12 @@ async def resolve_sender(conn: sqlite3.Connection, cl: Clients, msg: mail.Messag
 async def _attachments(conn: sqlite3.Connection, cl: Clients, user: User, msg: mail.Message) -> list[str]:
     cards = []
     for att in [a for a in msg.attachments if (a.filename or "").lower().endswith(PARSEABLE)][:MAX_ATTACHMENTS]:
-        content = await mail.download_attachment(cl.mail, msg.message_id, att)
+        content = await mail.download_attachment(cl.mail, msg, att)
         if content is None:
-            cards.append(f"<b>{esc(att.filename or 'attachment')}</b> is too large to read (8 MB limit).")
+            cards.append(
+                f"I couldn't open <b>{esc(att.filename or 'the attachment')}</b> from email (too large or not "
+                "reachable). Send it to the Fine Print bot in Telegram instead."
+            )
             continue
         cards.append(await agent.intake_file(conn, cl, user, att.filename or "document", content))
     return cards
@@ -145,13 +165,15 @@ async def _terms_update(conn: sqlite3.Connection, cl: Clients, tg: Sender | None
     return cards
 
 
-async def process(conn: sqlite3.Connection, cl: Clients, tg: Sender | None, message_id: str) -> None:
+async def process(
+    conn: sqlite3.Connection, cl: Clients, tg: Sender | None, message_id: str, thread_id: str | None = None
+) -> None:
     """Handle one received message end to end. Bodies and attachments are not stored."""
     if cl.mail is None:
         return
-    msg = await mail.get_message(cl.mail, message_id)
-    if msg.suspicious:
-        log.info("ignoring mail labelled %s", msg.labels)
+    msg = await mail.get_message(cl.mail, message_id, thread_id)
+    if msg.suspicious or not msg.authenticated:
+        log.info("ignoring mail that failed sender authentication or was flagged (%s)", msg.labels)
         return
     text = body_text(msg)[:200_000]
     user = await resolve_sender(conn, cl, msg, text)
@@ -178,4 +200,4 @@ async def process(conn: sqlite3.Connection, cl: Clients, tg: Sender | None, mess
         for card in cards or [esc(HELP)]:
             await tg.send(user.chat_id, card)
     reply_text = "\n\n---\n\n".join(plain(c) for c in cards) if cards else HELP
-    await mail.reply(cl.mail, msg.message_id, reply_text + FOOTER)
+    await mail.respond(cl.mail, msg, reply_text + FOOTER)

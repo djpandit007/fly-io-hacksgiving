@@ -110,11 +110,11 @@ async def telegram_webhook(
     return {"ok": True}
 
 
-async def _handle_mail(app_: FastAPI, message_id: str, sender: str, task: str) -> None:
+async def _handle_mail(app_: FastAPI, message_id: str, thread_id: str | None, sender: str, task: str) -> None:
     st = app_.state
     try:
         async with stay_awake(task, expire="5m"), locks.hold(f"email:{sender}"):
-            await intake.process(st.conn, st.clients, st.tg, message_id)
+            await intake.process(st.conn, st.clients, st.tg, message_id, thread_id)
     except Exception as exc:
         log.warning("mail %s failed: %s", task, exc)
     finally:
@@ -146,7 +146,7 @@ async def agentmail_webhook(
         return {"ok": True}  # a retried delivery: processed already
     task = "mail-" + hashlib.sha256(msg.message_id.encode()).hexdigest()[:16]
     await sprite.hold(task, expire="5m")
-    background.add_task(_handle_mail, request.app, msg.message_id, msg.sender, task)
+    background.add_task(_handle_mail, request.app, msg.message_id, msg.thread_id, msg.sender, task)
     return {"ok": True}
 
 
