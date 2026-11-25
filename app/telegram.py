@@ -1,0 +1,121 @@
+"""Telegram Bot API: nudges out; links, files, photos and commands in."""
+
+from __future__ import annotations
+
+import html
+
+import httpx
+from pydantic import BaseModel, Field
+
+from app.config import settings
+
+API = "https://api.telegram.org"
+MAX_LEN = 4000
+
+
+def esc(text: str) -> str:
+    return html.escape(text, quote=False)
+
+
+class Telegram:
+    def __init__(self, token: str | None = None, client: httpx.AsyncClient | None = None):
+        self.token = token or settings.telegram_token.get_secret_value()
+        self.client = client or httpx.AsyncClient(timeout=30)
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.token)
+
+    async def call(self, method: str, **params) -> dict:
+        resp = await self.client.post(f"{API}/bot{self.token}/{method}", json=params)
+        data = _Result.model_validate(resp.json())
+        if not data.ok:
+            raise RuntimeError(f"Telegram {method} failed: {data.description}")
+        return data.result  # type: ignore[return-value]
+
+    async def send(self, chat_id: int | str, text: str) -> None:
+        for start in range(0, len(text), MAX_LEN):
+            await self.call(
+                "sendMessage",
+                chat_id=chat_id,
+                text=text[start : start + MAX_LEN],
+                parse_mode="HTML",
+                link_preview_options={"is_disabled": True},
+            )
+
+    async def download(self, file_id: str) -> tuple[str, bytes]:
+        info = await self.call("getFile", file_id=file_id)
+        path = info["file_path"]
+        resp = await self.client.get(f"{API}/file/bot{self.token}/{path}")
+        resp.raise_for_status()
+        return path.rsplit("/", 1)[-1], resp.content
+
+    async def set_webhook(self, url: str, secret: str) -> dict:
+        return await self.call(
+            "setWebhook", url=url, secret_token=secret, allowed_updates=["message"], drop_pending_updates=True
+        )
+
+    async def aclose(self) -> None:
+        await self.client.aclose()
+
+
+# --- Bot API wire models (only the fields we use) ------------------------------------------------
+
+class Chat(BaseModel):
+    id: int
+
+
+class Document(BaseModel):
+    file_id: str
+    file_name: str | None = None
+    mime_type: str | None = None
+
+
+class PhotoSize(BaseModel):
+    file_id: str
+    width: int
+    height: int
+
+
+class Message(BaseModel):
+    message_id: int
+    chat: Chat
+    text: str | None = None
+    caption: str | None = None
+    document: Document | None = None
+    photo: list[PhotoSize] = Field(default_factory=list)
+
+
+class Update(BaseModel):
+    update_id: int
+    message: Message | None = None
+    edited_message: Message | None = None
+
+
+class _Result(BaseModel):
+    ok: bool
+    description: str | None = None
+    result: object | None = None
+
+
+# --- What the agent acts on ----------------------------------------------------------------------
+
+class Incoming(BaseModel):
+    chat_id: int
+    text: str = ""
+    file_id: str | None = None
+    file_name: str | None = None
+
+
+def parse_update(payload: dict) -> Incoming | None:
+    update = Update.model_validate(payload)
+    msg = update.message or update.edited_message
+    if not msg:
+        return None
+    text = msg.text or msg.caption or ""
+    if msg.document:
+        return Incoming(chat_id=msg.chat.id, text=text, file_id=msg.document.file_id, file_name=msg.document.file_name)
+    if msg.photo:
+        largest = max(msg.photo, key=lambda p: p.width * p.height)
+        return Incoming(chat_id=msg.chat.id, text=text, file_id=largest.file_id, file_name="screenshot.jpg")
+    return Incoming(chat_id=msg.chat.id, text=text)
