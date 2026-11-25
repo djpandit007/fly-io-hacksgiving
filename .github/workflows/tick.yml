@@ -1,0 +1,21 @@
+# Sprites can't wake themselves on a schedule, so this cron wakes Fine Print once a day.
+# Repository secrets: FINE_PRINT_URL (the Sprite's public URL) and FINE_PRINT_SECRET (FP_SHARED_SECRET).
+name: daily-terms-watch
+
+on:
+  schedule:
+    - cron: "17 14 * * *"   # 06:17 Pacific / 14:17 UTC
+  workflow_dispatch: {}
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Wake the Sprite and run the watch
+        env:
+          URL: ${{ secrets.FINE_PRINT_URL }}
+          SECRET: ${{ secrets.FINE_PRINT_SECRET }}
+        run: |
+          curl -fsS --retry 3 --retry-delay 5 --max-time 1500 \
+            -X POST "$URL/tick" -H "X-Fine-Print-Secret: $SECRET"
