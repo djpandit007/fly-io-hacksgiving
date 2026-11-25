@@ -49,3 +49,12 @@ def test_questions_respect_api_limits():
             assert 2 <= len(q["criteria"]) <= 10
         if q["type"] == "choice":
             assert 1 <= len(q["criteria"]) <= 255
+
+
+def test_huge_sections_are_clipped_to_fit_jev_limits():
+    from app.judge import MAX_SECTION_CHARS, state_for
+    from app.watch import SectionChange
+
+    state = state_for("Snapchat", SectionChange(heading="", kind="added", before="", after="x " * 60_000))
+    assert len(state["after"]) <= MAX_SECTION_CHARS + 20 and state["after"].endswith("[…truncated]")
+    assert state["before"] == "(this section did not exist)"

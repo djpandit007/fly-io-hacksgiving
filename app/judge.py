@@ -15,8 +15,10 @@ from app.gateway import Gateway
 from app.watch import SectionChange
 
 SYSTEMONE_PATH = "systemone/v1/systemone"
-# Jev's default context is 64k tokens per request; keep whole-document checks well inside it.
-MAX_DOCUMENT_CHARS = 150_000
+# Jev allows 32k tokens per question (state + question). Legal English runs ~0.25-0.3 tokens per
+# character, so whole documents are capped at ~25k tokens and each side of a change at ~5k.
+MAX_DOCUMENT_CHARS = 90_000
+MAX_SECTION_CHARS = 20_000
 
 CATEGORIES: dict[str, str] = {
     "arbitration": "How disputes are resolved: arbitration, class-action waivers, jury waivers, governing law or venue.",
@@ -153,13 +155,17 @@ class Verdict(BaseModel):
         return self.opt_out >= 0.7
 
 
+def _clip(text: str) -> str:
+    return text if len(text) <= MAX_SECTION_CHARS else text[:MAX_SECTION_CHARS] + " […truncated]"
+
+
 def state_for(service: str, change: SectionChange) -> dict[str, Any]:
     return {
         "service": service,
         "section": change.heading or "(untitled section)",
         "change_kind": change.kind,
-        "before": change.before or "(this section did not exist)",
-        "after": change.after or "(this section was removed)",
+        "before": _clip(change.before) or "(this section did not exist)",
+        "after": _clip(change.after) or "(this section was removed)",
     }
 
 
