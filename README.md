@@ -106,6 +106,29 @@ uv run uvicorn app.main:app --reload --port 8080
 The database upgrades itself on start-up (`PRAGMA user_version`); a `fineprint.db.v1.bak` copy is kept
 when a single-owner database is migrated.
 
+## Email intake
+
+One shared [AgentMail](https://agentmail.to) inbox serves every member.
+
+1. In the AgentMail console, create the inbox (e.g. `you-hacksgiving@agentmail.to`) and an **inbox-scoped**
+   API key; add that key as the **AgentMail** connector in Fly.io (name prefix `fly-io-hacksgiving`).
+2. Set `FP_AGENTMAIL_BASE` (the connector's gateway base), `FP_AGENTMAIL_INBOX_ID` and
+   `FP_AGENTMAIL_ADDRESS` (both the inbox address) in `.env.sprite`.
+3. The connector cannot create webhooks, so in the AgentMail console create a webhook:
+   URL `https://<your-sprite>.sprites.app/agentmail`, event **`message.received`** only, inbox: the one
+   above. Copy its signing secret (`whsec_…`) into `.env.sprite` as `FP_AGENTMAIL_WEBHOOK_SECRET`.
+4. Redeploy (`./scripts/setup_sprite.sh`) and run `./scripts/check_agentmail.sh`.
+
+How members use it:
+
+- **Telegram members:** `/email you@example.com`, then `/verify <code>` from the email. Afterwards, forward
+  terms-update notices, receipts and contracts (as attachments) to the inbox; replies arrive in Telegram
+  and by email.
+- **Email-only members:** email the inbox with the join code in the subject, then reply to the
+  confirmation email with its code. Forwarding works the same way, with replies by email.
+- Mail from unknown addresses, and mail AgentMail marks as spam or failing sender authentication, is
+  ignored without a reply. Codes are rate-limited and repeated wrong codes pause linking for 24 hours.
+
 ## Privacy and limits
 
 - Provider credentials stay in Fly.io connectors, not on the Sprite. The Telegram token and the AgentMail
