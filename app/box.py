@@ -42,10 +42,12 @@ async def download(gw: Gateway, file_id: str) -> bytes:
     return resp.content
 
 
-async def upload_report(upload_gw: Gateway, name: str, markdown: str) -> str:
+async def upload_report(gw: Gateway, name: str, markdown: str) -> str:
+    # The Sprites Box connector serves uploads on the same gateway under /upload/...
+    # Attributes must come before the file part.
     attributes = json.dumps({"name": name, "parent": {"id": settings.box_folder_id}})
-    data = await upload_gw.post(
-        "api/2.0/files/content",
+    data = await gw.post(
+        "upload/files/content",
         files={"attributes": (None, attributes), "file": (name, markdown.encode(), "text/markdown")},
     )
     return BoxItems.model_validate(data).entries[0].id

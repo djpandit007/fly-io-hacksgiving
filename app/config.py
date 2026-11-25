@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     # judgments, a chat model for writing. Free OpenCode models refuse calls from outside OpenCode.
     judge_model: str = "jev-1.14"
     writer_model: str = "glm-5.3-flash"
+    pinecone_index: str = "fine-print"
     pinecone_namespace: str = "clauses"
     box_folder_id: str = "0"
     llama_project_id: str = ""
@@ -63,14 +64,11 @@ class Settings(BaseSettings):
     # On a Sprite: a Custom API connector's gateway base for https://opencode.ai/inference.
     opencode_base: str = "https://opencode.ai/inference"
     opencode_key: SecretStr = SecretStr("")
-    # Pinecone's data plane lives on a per-index host: this is that host (direct) or the gateway
-    # path that forwards to it.
+    # The Sprites Pinecone connector routes by index name, so this is the connector's gateway base.
     pinecone_base: str = ""
     pinecone_key: SecretStr = SecretStr("")
     box_base: str = ""
     box_key: SecretStr = SecretStr("")
-    box_upload_base: str = ""
-    box_upload_key: SecretStr = SecretStr("")
     llama_base: str = "https://api.cloud.llamaindex.ai"
     llama_key: SecretStr = SecretStr("")
 
@@ -105,10 +103,6 @@ class Settings(BaseSettings):
     @property
     def box(self) -> Provider:
         return Provider(name="box", base_url=self.box_base, key=self.box_key)
-
-    @property
-    def box_upload(self) -> Provider:
-        return Provider(name="box_upload", base_url=self.box_upload_base, key=self.box_upload_key)
 
     @property
     def llama(self) -> Provider:

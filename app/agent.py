@@ -21,7 +21,7 @@ from app.gateway import Gateway
 from app.history import backfill
 from app.judge import Verdict
 from app.memory import Precedent
-from app.telegram import esc
+from app.telegram import esc, rich
 from app.watch import SectionChange, diff, fetch, html_to_markdown, markdown_to_canonical, normalise, opt_out_days, redline, sha
 
 log = logging.getLogger(__name__)
@@ -43,13 +43,12 @@ class Clients:
         self.ai = Gateway(oc) if oc.key.get_secret_value() or "sprites.dev" in oc.base_url else None
         self.pinecone = make(settings.pinecone)
         self.box = make(settings.box)
-        self.box_upload = make(settings.box_upload)
         # LlamaCloud has a default direct URL, so it counts as configured only with a key or a gateway URL.
         llama = settings.llama
         self.llama = Gateway(llama) if llama.key.get_secret_value() or "sprites.dev" in llama.base_url else None
 
     async def aclose(self) -> None:
-        for gw in (self.ai, self.pinecone, self.box, self.box_upload, self.llama):
+        for gw in (self.ai, self.pinecone, self.box, self.llama):
             if gw:
                 await gw.aclose()
 
@@ -72,7 +71,7 @@ class ChangeReport(BaseModel):
         lines = [
             f"<b>{esc(self.service)}</b> changed <i>{esc(self.heading or 'its terms')}</i> ({self.effective_at:%d %b %Y})",
             f"<code>{esc(badge)}</code>",
-            esc(self.summary),
+            rich(self.summary),
         ]
         if self.deadline:
             lines.append(f"⏰ Opt-out window closes <b>{self.deadline:%a %d %b %Y}</b> (added to your calendar)")
@@ -172,7 +171,7 @@ async def record_version(
         precedents: list[Precedent] = []
         if cl.pinecone and change.after:
             try:
-                precedents = await memory.similar(cl.pinecone, change.after, exclude_service=svc.name, min_score=0.6)
+                precedents = await memory.similar(cl.pinecone, change.after, exclude_service=svc.name, min_score=0.45)
                 await memory.remember(
                     cl.pinecone, f"chg-{change_id}", svc.name, change.heading, change.after,
                     verdict.category if verdict else "other",
@@ -241,7 +240,7 @@ async def verdict_card(cl: Clients, title: str, text: str, domain: str | None = 
         card = await writer.verdict_card(cl.ai, title, flags, text)
     lines = [f"<b>{esc(title)}</b>"]
     if card:
-        lines.append(esc(card))
+        lines.append(rich(card))
     if flags:
         lines.append(
             "\n".join(f"{'🔴' if p >= 0.7 else '🟡' if p >= 0.3 else '🟢'} {k.replace('_', ' ')} ({p:.0%})" for k, p in flags.items())
@@ -338,12 +337,12 @@ async def tick(conn: sqlite3.Connection, cl: Clients, gmail=None) -> TickResult:
     except Exception as exc:
         log.warning("box inbox failed: %s", exc)
 
-    if result.reports and cl.box_upload:
+    if result.reports and cl.box:
         try:
             md = "\n\n".join(
                 f"## {r.service}: {r.heading}\n\n{r.summary}\n\n```\n{r.redline}\n```" for r in result.reports
             )
-            await box.upload_report(cl.box_upload, f"Fine Print report {date.today():%Y-%m-%d}.md", md)
+            await box.upload_report(cl.box, f"Fine Print report {date.today():%Y-%m-%d}.md", md)
         except Exception as exc:
             log.warning("box upload failed: %s", exc)
     return result
@@ -378,4 +377,4 @@ async def wrapped(conn: sqlite3.Connection, cl: Clients) -> str:
     )
     total = sum(r["n"] for r in stats)
     body = await writer.wrapped(cl.ai, facts) if cl.ai else facts
-    return f"<b>Agreed Wrapped {date.today():%Y}</b>\n{total} material changes you accepted by carrying on.\n\n{esc(body)}"
+    return f"<b>Agreed Wrapped {date.today():%Y}</b>\n{total} material changes you accepted by carrying on.\n\n{rich(body)}"

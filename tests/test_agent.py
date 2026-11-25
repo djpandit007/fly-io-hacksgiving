@@ -31,13 +31,18 @@ async def test_change_is_judged_summarised_remembered_and_deadlined(conn):
     chat = respx.post(CHAT).mock(
         return_value=httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "Disputes now go to arbitration; opt out within 30 days."}}]})
     )
-    search = respx.post("https://pinecone.test/records/namespaces/clauses/search").mock(
-        return_value=httpx.Response(200, json={"result": {"hits": [
-            {"_id": "chg-9", "_score": 0.83, "fields": {"service": "Spotify", "heading": "Disputes", "chunk_text": "..."}},
-            {"_id": "chg-8", "_score": 0.2, "fields": {"service": "Weak", "heading": "", "chunk_text": ""}},
-        ]}})
+    respx.post("https://pinecone.test/embed").mock(
+        return_value=httpx.Response(200, json={"model": "llama-text-embed-v2", "data": [{"values": [0.1] * 1024}]})
     )
-    upsert = respx.post("https://pinecone.test/records/namespaces/clauses/upsert").mock(return_value=httpx.Response(201))
+    search = respx.post("https://pinecone.test/indexes/fine-print/query").mock(
+        return_value=httpx.Response(200, json={"matches": [
+            {"id": "chg-9", "score": 0.83, "metadata": {"service": "Spotify", "heading": "Disputes", "text": "..."}},
+            {"id": "chg-8", "score": 0.2, "metadata": {"service": "Weak"}},
+        ]})
+    )
+    upsert = respx.post("https://pinecone.test/indexes/fine-print/vectors/upsert").mock(
+        return_value=httpx.Response(200, json={"upsertedCount": 1})
+    )
 
     cl = agent.Clients()
     svc = agent.add_service(conn, "Acme", "https://acme.test/terms")
@@ -55,9 +60,10 @@ async def test_change_is_judged_summarised_remembered_and_deadlined(conn):
     assert "Opt out: Acme" in ledger.upcoming(conn)[0].title
     assert "Spotify" in arb.to_html()
 
-    # Pinecone upsert is NDJSON with integrated-embedding field name.
-    assert upsert.calls[0].request.headers["content-type"] == "application/x-ndjson"
-    assert b'"chunk_text"' in upsert.calls[0].request.content
+    # Pinecone: vectors go to the named index and namespace, with the clause in metadata.
+    sent = json.loads(upsert.calls[0].request.content)
+    assert sent["namespace"] == "clauses" and len(sent["vectors"][0]["values"]) == 1024
+    assert sent["vectors"][0]["metadata"]["service"] == "Acme"
     # Direct mode sends provider-specific auth.
     assert jev.calls[0].request.headers["authorization"] == "Bearer oc-key"
     assert json.loads(jev.calls[0].request.content)["model"] == "jev-1.14"

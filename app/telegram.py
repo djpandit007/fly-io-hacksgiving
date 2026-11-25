@@ -18,6 +18,18 @@ def esc(text: str) -> str:
     return html.escape(text, quote=False)
 
 
+_BOLD = re.compile(r"\*\*(.+?)\*\*|__(.+?)__")
+_CODE = re.compile(r"`([^`]+)`")
+
+
+def rich(text: str) -> str:
+    """Model output (light Markdown) to Telegram HTML: escape first, then bold, code and bullets."""
+    out = esc(text)
+    out = _BOLD.sub(lambda m: f"<b>{m.group(1) or m.group(2)}</b>", out)
+    out = _CODE.sub(r"<code>\1</code>", out)
+    return re.sub(r"^\s*[-*]\s+", "• ", out, flags=re.M)
+
+
 _TOKEN_IN_URL = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
 
 

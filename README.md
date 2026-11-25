@@ -39,7 +39,7 @@ Built for [Fly.io Hacksgiving](https://fly.io/hacksgiving), Nov 23–29, 2026.
 | **Sprite** | The agent's home: SQLite, snapshots, a service on :8080; holds a task while it works |
 | **OpenCode → Jev** | TypeSafe's decision model, served by OpenCode: typed judgments per change — material (Noul), category and who it favours (Choice), opt-out (Noul), severity (Score) |
 | **OpenCode → chat model** | Plain-language summaries, verdict cards, Wrapped (`glm-5.3-flash` by default) |
-| **Pinecone** | Clause memory: "you already accepted similar wording from Spotify and Uber" |
+| **Pinecone** | Embeddings (Pinecone Inference) and clause memory: "you already accepted similar wording from Spotify and Uber" |
 | **Box** | Drop folder for your own documents; archive of change reports |
 | **LlamaParse / LlamaExtract** | PDFs, scans, screenshots and JS-heavy pages → per-page Markdown; dated obligations with page citations |
 | **ToS;DR** | Community A–E grade beside the agent's own verdict |
@@ -61,7 +61,8 @@ uv run uvicorn app.main:app --reload --port 8080
 1. In the Fly.io dashboard → Sprites → Connectors, add **Pinecone**, **Box**, and two **Custom API**
    connectors with bearer tokens: OpenCode (`https://opencode.ai/inference`) and LlamaCloud
    (`https://api.cloud.llamaindex.ai`). Restrict each to Sprite name prefix `fly-io-hacksgiving`.
-2. `PINECONE_API_KEY=… ./scripts/setup_pinecone.sh` creates the index.
+2. Create the Pinecone index once (the connector can't): in the Pinecone console, a dense index named
+   `fine-print`, 1024 dimensions, cosine, serverless — or `PINECONE_API_KEY=… ./scripts/setup_pinecone.sh`.
 3. `cp .env.example .env.sprite`, fill in secrets and Telegram token, then `./scripts/setup_sprite.sh`.
 4. `./scripts/connectors.sh`, copy each gateway base into `.env.sprite`, set `FP_PUBLIC_URL`, redeploy.
 5. Register the Telegram webhook (command printed by the setup script), then send `/start <FP_OWNER_CLAIM_CODE>` to your bot.

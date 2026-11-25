@@ -35,7 +35,7 @@ async def chat(gw: Gateway, prompt: str, system: str = SYSTEM) -> str:
         CHAT_PATH,
         json={
             "model": settings.writer_model,
-            "max_tokens": 600,
+            "max_tokens": 1500,  # reasoning models spend part of this before answering
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
         },
     )
