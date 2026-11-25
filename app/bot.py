@@ -118,6 +118,10 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
         log.info("bot claimed by chat %s", msg.chat_id)
     if current is None or msg.chat_id != current:
         log.info("ignoring chat %s (not the owner)", msg.chat_id)
+        if msg.text.startswith("/start"):
+            # Say so instead of staying silent; reveals nothing beyond "this bot is taken".
+            hint = "send /start followed by your claim code" if current is None else "it already has an owner"
+            await tg.send(msg.chat_id, f"This is a private Fine Print bot: {hint}.")
         return
 
     chat = msg.chat_id

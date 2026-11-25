@@ -147,10 +147,11 @@ def conn(tmp_path):
     return db.connect(tmp_path / "b.db")
 
 
-async def test_bare_start_does_not_claim(conn, claim):
+async def test_bare_start_does_not_claim_but_explains(conn, claim):
     tg = FakeTelegram()
     await bot.handle(conn, None, tg, Incoming(chat_id=7, text="/start"))
-    assert bot.owner(conn) is None and tg.sent == []
+    assert bot.owner(conn) is None
+    assert tg.sent == [(7, "This is a private Fine Print bot: send /start followed by your claim code.")]
 
 
 async def test_wrong_code_does_not_claim(conn, claim):
@@ -162,8 +163,12 @@ async def test_right_code_claims_and_then_others_are_ignored(conn, claim):
     tg = FakeTelegram()
     await bot.handle(conn, None, tg, Incoming(chat_id=7, text="/start s3cret-code"))
     assert bot.owner(conn) == 7 and tg.sent[0][0] == 7
+    before = len(tg.sent)
     await bot.handle(conn, None, tg, Incoming(chat_id=8, text="/start s3cret-code"))
-    assert bot.owner(conn) == 7 and all(chat == 7 for chat, _ in tg.sent)
+    assert bot.owner(conn) == 7
+    assert tg.sent[before:] == [(8, "This is a private Fine Print bot: it already has an owner.")]
+    await bot.handle(conn, None, tg, Incoming(chat_id=8, text="/list"))
+    assert len(tg.sent) == before + 1  # non-/start messages from strangers get no reply at all
 
 
 # --- Token redaction -------------------------------------------------------------------------------

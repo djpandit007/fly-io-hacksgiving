@@ -17,6 +17,7 @@ from app import agent, bot, db, ledger
 from app.agent import Clients
 from app.config import settings
 from app.gmail import Gmail
+from app import sprite
 from app.sprite import stay_awake
 from app.telegram import Telegram, parse_update
 
@@ -87,13 +88,17 @@ async def tick(request: Request) -> TickSummary:
     )
 
 
-async def _handle_message(app_: FastAPI, payload: dict) -> None:
+async def _handle_message(app_: FastAPI, payload: dict, task: str) -> None:
     st = app_.state
-    msg = parse_update(payload)
-    if not msg:
-        return
-    async with work_lock, stay_awake("telegram", expire="5m"):
-        await bot.handle(st.conn, st.clients, st.tg, msg)
+    try:
+        msg = parse_update(payload)
+        if not msg:
+            return
+        # The hold was taken before the webhook answered; keep refreshing it while queued and working.
+        async with stay_awake(task, expire="5m"), work_lock:
+            await bot.handle(st.conn, st.clients, st.tg, msg)
+    finally:
+        await sprite.release(task)
 
 
 @app.post("/telegram")
@@ -104,8 +109,12 @@ async def telegram_webhook(
 ) -> dict[str, bool]:
     if not _same(x_telegram_bot_api_secret_token, settings.shared_secret.get_secret_value()):
         raise HTTPException(status_code=401)
-    # Answer Telegram straight away; the work continues under a task hold.
-    background.add_task(_handle_message, request.app, await request.json())
+    payload = await request.json()
+    # Take the hold while this request still keeps the Sprite active, then answer Telegram quickly;
+    # the work continues in the background under that hold.
+    task = f"telegram-{payload.get('update_id', 'x')}"
+    await sprite.hold(task, expire="5m")
+    background.add_task(_handle_message, request.app, payload, task)
     return {"ok": True}
 
 
