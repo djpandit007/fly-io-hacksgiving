@@ -37,7 +37,9 @@ class Provider(BaseModel):
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="FP_", env_file=".env", extra="ignore", frozen=True)
+    model_config = SettingsConfigDict(
+        env_prefix="FP_", env_file=".env", extra="ignore", frozen=True, env_ignore_empty=True
+    )
 
     data_dir: Path = Path.home() / ".fineprint"
     shared_secret: SecretStr = SecretStr("")

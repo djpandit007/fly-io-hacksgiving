@@ -184,3 +184,12 @@ async def test_download_errors_do_not_contain_token():
         await tg.download("f1")
     await tg.aclose()
     assert TOKEN not in str(exc.value) and exc.value.__cause__ is None
+
+
+def test_empty_settings_in_env_file_mean_unset(monkeypatch):
+    from app.config import Settings
+
+    monkeypatch.setenv("FP_OWNER_CHAT_ID", "")
+    monkeypatch.setenv("FP_LLAMA_BASE", "")
+    s = Settings()
+    assert s.owner_chat_id is None and s.llama_base == "https://api.cloud.llamaindex.ai"
