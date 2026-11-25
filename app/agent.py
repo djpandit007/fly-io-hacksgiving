@@ -53,12 +53,13 @@ class Clients:
         self.ai = Gateway(oc) if oc.key.get_secret_value() or "sprites.dev" in oc.base_url else None
         self.pinecone = make(settings.pinecone)
         self.exa = make(settings.exa)
+        self.mail = make(settings.agentmail) if settings.agentmail_inbox_id else None
         # LlamaCloud has a default direct URL, so it counts as configured only with a key or a gateway URL.
         llama = settings.llama
         self.llama = Gateway(llama) if llama.key.get_secret_value() or "sprites.dev" in llama.base_url else None
 
     async def aclose(self) -> None:
-        for gw in (self.ai, self.pinecone, self.exa, self.llama):
+        for gw in (self.ai, self.pinecone, self.exa, self.mail, self.llama):
             if gw:
                 await gw.aclose()
 
@@ -103,6 +104,18 @@ def normalise_url(url: str) -> str:
     return f"{host}{port}{u.path.rstrip('/')}"
 
 
+def canonical_url(url: str) -> str:
+    """What a shared service fetches: https, host and path only (no credentials, query or fragment).
+
+    Storing the first watcher's raw URL would let them choose a different fetch target (scheme
+    downgrade, credentials, query tricks) for everyone who later matches the same identity.
+    """
+    u = urlparse(url.strip())
+    host = (u.hostname or "").lower()
+    port = f":{u.port}" if u.port and u.port not in (80, 443) else ""
+    return f"https://{host}{port}{u.path.rstrip('/') or '/'}"
+
+
 def find_service(conn: sqlite3.Connection, url: str) -> Service | None:
     key = normalise_url(url)
     for svc in rows(Service, conn.execute("SELECT * FROM services")):
@@ -119,6 +132,7 @@ def add_service(conn: sqlite3.Connection, name: str, url: str) -> Service:
     control (look-alike domain, or a user-generated page on a shared host) and push fake changes to all
     of its watchers. A display name already used by a different URL is disambiguated with the host.
     """
+    url = canonical_url(url)
     existing = find_service(conn, url)
     if existing:
         return existing

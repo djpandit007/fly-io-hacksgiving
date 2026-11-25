@@ -23,6 +23,23 @@ def test_pick_prefers_terms_pages_on_the_domain():
     assert discover.pick_terms_result(results[1:2], "notion.so") is None  # off-domain rejected
 
 
+def test_name_only_results_must_be_on_the_names_own_domain():
+    results = [
+        Result(url="https://youtube-terms.evil.test/terms", title="YouTube Terms of Service"),
+        Result(url="https://someone.github.io/youtube/terms", title="YouTube terms"),
+        Result(url="https://www.youtube.com/t/terms", title="Terms of Service - YouTube"),
+    ]
+    assert discover.pick_terms_result(results, None, "youtube") == "https://www.youtube.com/t/terms"
+    assert discover.pick_terms_result(results[:2], None, "youtube") is None
+    assert discover.pick_terms_result(results, None, None) is None  # no name, no domain: accept nothing
+
+
+def test_user_content_hosts_are_rejected_even_on_matching_domain():
+    assert discover.is_user_content("https://acme.github.io/terms")
+    assert discover.is_user_content("https://medium.com/@x/acme-terms")
+    assert not discover.is_user_content("https://docs.github.com/en/site-policy/github-terms")
+
+
 @respx.mock
 async def test_name_only_discovery_uses_search():
     route = respx.post(SEARCH).mock(return_value=httpx.Response(200, json={"results": [

@@ -253,3 +253,10 @@ def test_user_generated_page_on_shared_host_is_its_own_service(conn):
     real = agent.add_service(conn, "Github", "https://docs.github.com/en/site-policy/github-terms/github-terms-of-service")
     fake = agent.add_service(conn, "Github", "https://github.com/attacker/terms")
     assert fake.id != real.id and fake.name == "Github (github.com)"
+
+
+def test_shared_service_stores_a_canonical_https_url(conn):
+    svc = agent.add_service(conn, "Acme", "http://user:pw@WWW.Acme.test/Terms/?ref=evil#top")
+    assert svc.terms_url == "https://www.acme.test/Terms"
+    again = agent.add_service(conn, "Acme", "https://acme.test/Terms")
+    assert again.id == svc.id and again.terms_url == "https://www.acme.test/Terms"
