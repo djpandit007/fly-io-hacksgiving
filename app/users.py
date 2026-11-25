@@ -6,10 +6,14 @@ multi-user support (services, deadlines, the old owner chat) is adopted by the o
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import logging
+import re
 import secrets
 import sqlite3
+from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from app.config import settings
 from app.db import User, get_kv, now, one, rows, transaction
@@ -144,3 +148,74 @@ def remove(conn: sqlite3.Connection, user_id: int) -> bool:
 def set_name(conn: sqlite3.Connection, user: User, name: str) -> None:
     if name and name != user.name:
         conn.execute("UPDATE users SET name = ? WHERE id = ?", (name[:64], user.id))
+
+
+# --- Linking an email address ----------------------------------------------------------------------
+
+EMAIL = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
+CODE_TTL = timedelta(minutes=15)
+MAX_ATTEMPTS = 5
+
+VerifyResult = Literal["ok", "wrong", "expired", "none", "too_many", "in_use"]
+
+
+class EmailInUse(Exception):
+    pass
+
+
+def _code_hash(user_id: int, code: str) -> str:
+    return hashlib.sha256(f"{user_id}:{code}".encode()).hexdigest()
+
+
+def start_email_link(conn: sqlite3.Connection, user: User, address: str) -> str:
+    """Begin linking `address` to `user`; returns the 6-digit code to email to that address.
+
+    Raises ValueError for a malformed address and EmailInUse when another member has verified it.
+    """
+    address = address.strip().lower()
+    if not EMAIL.match(address):
+        raise ValueError("not an email address")
+    holder = by_email(conn, address)
+    if holder and holder.id != user.id:
+        raise EmailInUse(address)
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    conn.execute(
+        """UPDATE users SET email_pending = ?, email_code_hash = ?, email_code_expires = ?, email_code_attempts = 0
+           WHERE id = ?""",
+        (address, _code_hash(user.id, code), (datetime.now(UTC) + CODE_TTL).isoformat(), user.id),
+    )
+    return code
+
+
+def verify_email(conn: sqlite3.Connection, user: User, code: str) -> VerifyResult:
+    fresh = by_id(conn, user.id)
+    if not fresh or not fresh.email_pending or not fresh.email_code_hash:
+        return "none"
+
+    def clear() -> None:
+        conn.execute(
+            "UPDATE users SET email_pending = NULL, email_code_hash = NULL, email_code_expires = NULL, "
+            "email_code_attempts = 0 WHERE id = ?",
+            (user.id,),
+        )
+
+    if fresh.email_code_expires and fresh.email_code_expires < datetime.now(UTC):
+        clear()
+        return "expired"
+    if fresh.email_code_attempts >= MAX_ATTEMPTS:
+        clear()
+        return "too_many"
+    if not hmac.compare_digest(_code_hash(user.id, code.strip()), fresh.email_code_hash):
+        conn.execute("UPDATE users SET email_code_attempts = email_code_attempts + 1 WHERE id = ?", (user.id,))
+        if fresh.email_code_attempts + 1 >= MAX_ATTEMPTS:
+            clear()
+            return "too_many"
+        return "wrong"
+    holder = by_email(conn, fresh.email_pending)
+    if holder and holder.id != user.id:
+        clear()
+        return "in_use"
+    address = fresh.email_pending
+    clear()
+    conn.execute("UPDATE users SET email = ? WHERE id = ?", (address, user.id))
+    return "ok"

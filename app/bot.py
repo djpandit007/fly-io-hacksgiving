@@ -11,7 +11,7 @@ import re
 import sqlite3
 from urllib.parse import urlparse
 
-from app import agent, ledger, users
+from app import agent, ledger, mail, users
 from app.agent import Clients
 from app.config import settings
 from app.db import User
@@ -118,6 +118,46 @@ async def _remove(conn: sqlite3.Connection, tg: Telegram, user: User, arg: str) 
     await tg.send(user.chat_id, f"Removed member {arg}." if ok else f"No member {esc(arg)} to remove.")
 
 
+VERIFY_REPLIES = {
+    "ok": "✅ Linked {email}. Forward terms emails, receipts and contracts to {inbox} and I'll reply here and by email.",
+    "wrong": "That code isn't right. Check the email and try /verify again.",
+    "expired": "That code has expired. Send /email again for a new one.",
+    "none": "There's no email waiting to be verified. Start with /email you@example.com",
+    "too_many": "Too many wrong codes. Send /email again for a new one.",
+    "in_use": "That address was just linked to another member, so I can't link it to you.",
+}
+
+
+async def _email(conn: sqlite3.Connection, cl: Clients | None, tg: Telegram, user: User, arg: str) -> None:
+    if cl is None or cl.mail is None or not settings.agentmail_address:
+        await tg.send(user.chat_id, "Email isn't set up on this bot yet.")
+        return
+    try:
+        code = users.start_email_link(conn, user, arg)
+    except users.EmailInUse:
+        await tg.send(user.chat_id, "That address is already linked to another member.")
+        return
+    except ValueError:
+        await tg.send(user.chat_id, "Usage: /email you@example.com")
+        return
+    address = arg.strip().lower()
+    await mail.send(
+        cl.mail, address, "Your Fine Print code",
+        f"Your Fine Print code is {code}.\n\nSend /verify {code} to the bot within 15 minutes to link this address. "
+        "If you didn't ask for this, ignore this email.",
+    )
+    await tg.send(user.chat_id, f"I've emailed a 6-digit code to {esc(address)}. Send /verify <i>code</i> here.")
+
+
+async def _verify(conn: sqlite3.Connection, tg: Telegram, user: User, arg: str) -> None:
+    pending = users.by_id(conn, user.id)
+    result = users.verify_email(conn, user, arg)
+    text = VERIFY_REPLIES[result].format(
+        email=esc(pending.email_pending or "") if pending else "", inbox=esc(settings.agentmail_address)
+    )
+    await tg.send(user.chat_id, text)
+
+
 async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incoming) -> None:
     cmd, _, arg = msg.text.strip().partition(" ")
     cmd, arg = cmd.lower().split("@")[0], arg.strip()
@@ -163,6 +203,10 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
                 if settings.public_url else ""
             )
             await tg.send(chat, ("\n".join(lines) or "No upcoming deadlines.") + feed)
+        elif cmd == "/email":
+            await _email(conn, cl, tg, user, arg)
+        elif cmd == "/verify":
+            await _verify(conn, tg, user, arg)
         elif cmd == "/wrapped":
             await tg.send(chat, await agent.wrapped(conn, cl, user))
         elif cmd in ("/members", "/remove"):

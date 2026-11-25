@@ -3,7 +3,7 @@ route except /health is guarded by a secret."""
 
 from __future__ import annotations
 
-import asyncio
+import hashlib
 import hmac
 import logging
 from contextlib import asynccontextmanager
@@ -13,7 +13,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Qu
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 
-from app import agent, bot, db, ledger, users
+from app import agent, bot, db, intake, ledger, mail, notify, users
 from app.locks import locks
 from app.agent import Clients
 from app.config import settings
@@ -73,30 +73,11 @@ async def tick(request: Request) -> TickSummary:
     st = request.app.state
     async with locks.hold("tick"), stay_awake("tick", expire="10m"):
         result = await agent.tick(st.conn, st.clients)
-        sent = await deliver(request.app, result.deliveries)
+        sent = await notify.deliver(st.conn, st.tg, st.clients, result.deliveries, "Fine Print: changes to terms you accepted")
     return TickSummary(
         checked=result.checked, failed=result.failed, changes=result.changes,
         nudges=result.nudges, members_notified=len(result.deliveries), sent=sent,
     )
-
-
-async def deliver(app_: FastAPI, deliveries: dict[int, list[str]]) -> int:
-    """Send each member their own messages, by Telegram. Returns how many messages went out."""
-    st = app_.state
-    sent = 0
-    for user_id, messages in deliveries.items():
-        user = users.active(users.by_id(st.conn, user_id))
-        if not user or not user.chat_id or not st.tg.configured:
-            continue
-        for text in messages:
-            try:
-                await st.tg.send(user.chat_id, text)
-                sent += 1
-            except Exception as exc:  # one blocked chat must not stop the others
-                log.warning("delivery to member %s failed: %s", user_id, exc)
-                break
-            await asyncio.sleep(0.05)  # stay well inside Telegram's per-bot rate limit
-    return sent
 
 
 async def _handle_message(app_: FastAPI, payload: dict, task: str) -> None:
@@ -126,6 +107,46 @@ async def telegram_webhook(
     task = f"telegram-{payload.get('update_id', 'x')}"
     await sprite.hold(task, expire="5m")
     background.add_task(_handle_message, request.app, payload, task)
+    return {"ok": True}
+
+
+async def _handle_mail(app_: FastAPI, message_id: str, sender: str, task: str) -> None:
+    st = app_.state
+    try:
+        async with stay_awake(task, expire="5m"), locks.hold(f"email:{sender}"):
+            await intake.process(st.conn, st.clients, st.tg, message_id)
+    except Exception as exc:
+        log.warning("mail %s failed: %s", task, exc)
+    finally:
+        await sprite.release(task)
+
+
+@app.post("/agentmail")
+async def agentmail_webhook(
+    request: Request,
+    background: BackgroundTasks,
+    svix_id: Annotated[str | None, Header(alias="svix-id")] = None,
+    svix_timestamp: Annotated[str | None, Header(alias="svix-timestamp")] = None,
+    svix_signature: Annotated[str | None, Header(alias="svix-signature")] = None,
+) -> dict[str, bool]:
+    """Inbound mail from AgentMail (Svix-signed). Accepts only message.received for our inbox."""
+    body = await request.body()
+    secret = settings.agentmail_webhook_secret.get_secret_value()
+    if not mail.verify_signature(secret, svix_id or "", svix_timestamp or "", body, svix_signature or ""):
+        raise HTTPException(status_code=401)
+    event = mail.Event.model_validate_json(body)
+    kind = event.event_type or event.type or ""
+    msg = event.message
+    if kind != "message.received" or msg is None:
+        return {"ok": True}
+    if msg.inbox_id and settings.agentmail_inbox_id and msg.inbox_id != settings.agentmail_inbox_id:
+        return {"ok": True}
+    conn = request.app.state.conn
+    if conn.execute("INSERT OR IGNORE INTO mail_seen (message_id, seen_at) VALUES (?, ?)", (msg.message_id, db.now())).rowcount == 0:
+        return {"ok": True}  # a retried delivery: processed already
+    task = "mail-" + hashlib.sha256(msg.message_id.encode()).hexdigest()[:16]
+    await sprite.hold(task, expire="5m")
+    background.add_task(_handle_mail, request.app, msg.message_id, msg.sender, task)
     return {"ok": True}
 
 

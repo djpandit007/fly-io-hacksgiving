@@ -59,8 +59,13 @@ class Settings(BaseSettings):
     pinecone_index: str = "fine-print"
     pinecone_namespace: str = "clauses"
     llama_project_id: str = ""
-    # Shared inbox members forward mail to (AgentMail).
+    # Shared inbox members forward mail to (AgentMail): its address, id, the connector's gateway base,
+    # and the webhook signing secret (whsec_...), which has no connector and lives in the env file.
     agentmail_address: str = ""
+    agentmail_inbox_id: str = ""
+    agentmail_base: str = ""
+    agentmail_key: SecretStr = SecretStr("")
+    agentmail_webhook_secret: SecretStr = SecretStr("")
     material_threshold: float = Field(0.7, ge=0, le=1)
 
     # On a Sprite: a Custom API connector's gateway base for https://opencode.ai/inference.
@@ -98,6 +103,10 @@ class Settings(BaseSettings):
             auth_header="Api-Key",
             auth_prefix="",
         )
+
+    @property
+    def agentmail(self) -> Provider:
+        return Provider(name="agentmail", base_url=self.agentmail_base, key=self.agentmail_key)
 
     @property
     def exa(self) -> Provider:

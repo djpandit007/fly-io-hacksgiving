@@ -17,3 +17,7 @@ os.environ.update(
 os.environ.setdefault("FP_OWNER_CLAIM_CODE", "owner-code")
 os.environ.setdefault("FP_JOIN_CODE", "join-code")
 os.environ.setdefault("FP_EXA_BASE", "https://exa.test")
+os.environ.setdefault("FP_AGENTMAIL_BASE", "https://agentmail.test")
+os.environ.setdefault("FP_AGENTMAIL_INBOX_ID", "inbox_1")
+os.environ.setdefault("FP_AGENTMAIL_ADDRESS", "fineprint@agentmail.to")
+os.environ.setdefault("FP_AGENTMAIL_WEBHOOK_SECRET", "whsec_dGVzdC1zZWNyZXQta2V5LWZvci1zdml4")  # base64("test-secret-key-for-svix")

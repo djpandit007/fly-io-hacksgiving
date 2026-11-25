@@ -24,12 +24,16 @@ members watch it.
 - **THEN** each changed section is judged once, not three times
 
 ### Requirement: Fan-out of material changes
-The system SHALL send each material change to every member who watches that service, on each channel
-the member has (Telegram and/or a verified email address).
+The system SHALL send each material change to every member who watches that service: by Telegram when
+the member has a linked chat, otherwise as one email digest per run to their verified address.
 
 #### Scenario: Daily check finds a change
 - **WHEN** the daily check finds a material change to a service watched by members A and B
 - **THEN** A and B each receive a report of the change, and members who do not watch the service receive nothing
+
+#### Scenario: Email-only watcher
+- **WHEN** a member without Telegram watches a service that changes materially
+- **THEN** they receive the report in a single email digest for that run
 
 ### Requirement: Replay of past changes to new subscribers
 The system SHALL, when a member starts watching a service that is already watched, send that member the
