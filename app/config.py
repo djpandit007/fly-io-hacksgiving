@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     public_url: str = ""
     calendar_token: SecretStr = SecretStr("")
     telegram_token: SecretStr = SecretStr("")
+    # The bot answers one chat. Either fix it here, or claim it once with `/start <claim code>`.
+    owner_chat_id: int | None = None
+    owner_claim_code: SecretStr = SecretStr("")
     gmail_token_file: Path | None = None
 
     jev_model: str = "jev-latest"

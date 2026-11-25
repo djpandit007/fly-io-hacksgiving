@@ -22,6 +22,8 @@ from app.telegram import Telegram, parse_update
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("fineprint")
+# httpx logs every request URL at INFO, and Telegram URLs contain the bot token.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # One worker, one event loop: a single SQLite connection is safe; the lock keeps long jobs in order.
 work_lock = asyncio.Lock()

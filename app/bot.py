@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import logging
 import re
 import sqlite3
@@ -13,7 +14,7 @@ from app.config import settings
 from app.db import get_kv, set_kv
 from app.discover import find_terms_url
 from app.gmail import Gmail
-from app.telegram import Incoming, Telegram, esc
+from app.telegram import Incoming, Telegram, esc, redact
 
 log = logging.getLogger(__name__)
 
@@ -32,8 +33,17 @@ Send me a link or a file (PDF, screenshot, photo) to check it <b>before you agre
 
 
 def owner(conn: sqlite3.Connection) -> int | None:
+    if settings.owner_chat_id:
+        return settings.owner_chat_id
     value = get_kv(conn, "owner_chat")
     return int(value) if value else None
+
+
+def _claims(text: str) -> bool:
+    """`/start <code>` with the FP_OWNER_CLAIM_CODE secret claims an unowned bot."""
+    expected = settings.owner_claim_code.get_secret_value()
+    cmd, _, code = text.strip().partition(" ")
+    return bool(expected) and cmd.split("@")[0] == "/start" and hmac.compare_digest(code.strip(), expected)
 
 
 def _name_for(host: str) -> str:
@@ -73,7 +83,9 @@ async def _scan(conn: sqlite3.Connection, tg: Telegram, chat: int) -> None:
             url = await find_terms_url(stat.domain)
             if url:
                 agent.add_service(conn, _name_for(stat.domain), url, source="gmail", status="proposed")
-                proposed.append(f"• <b>{esc(_name_for(stat.domain))}</b> ({stat.count} emails, e.g. “{esc(stat.sample_subject[:60])}”)")
+                proposed.append(
+                    f"• <b>{esc(_name_for(stat.domain))}</b> ({stat.count} emails, e.g. “{esc(stat.sample_subject[:60])}”)\n  {esc(url)}"
+                )
         if proposed:
             await tg.send(chat, "Found these services:\n" + "\n".join(proposed) + "\n\n/approve all — or /approve <i>name</i>")
         else:
@@ -100,10 +112,11 @@ async def _approve(conn: sqlite3.Connection, cl: Clients, tg: Telegram, chat: in
 
 async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incoming) -> None:
     current = owner(conn)
-    if current is None and msg.text.startswith("/start"):
+    if current is None and _claims(msg.text):
         set_kv(conn, "owner_chat", str(msg.chat_id))
         current = msg.chat_id
-    if msg.chat_id != current:
+        log.info("bot claimed by chat %s", msg.chat_id)
+    if current is None or msg.chat_id != current:
         log.info("ignoring chat %s (not the owner)", msg.chat_id)
         return
 
@@ -142,5 +155,5 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
         else:
             await tg.send(chat, HELP)
     except Exception as exc:
-        log.exception("handling message failed")
-        await tg.send(chat, f"Something went wrong: {esc(str(exc)[:300])}")
+        log.error("handling message failed: %s", redact(f"{type(exc).__name__}: {exc}"))
+        await tg.send(chat, f"Something went wrong: {esc(redact(str(exc))[:300])}")

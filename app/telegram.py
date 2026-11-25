@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import re
 
 import httpx
 from pydantic import BaseModel, Field
@@ -17,6 +18,18 @@ def esc(text: str) -> str:
     return html.escape(text, quote=False)
 
 
+_TOKEN_IN_URL = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
+
+
+def redact(text: str) -> str:
+    """Bot API URLs carry the token (/bot<token>/...); strip it from anything logged or shown."""
+    return _TOKEN_IN_URL.sub("bot<redacted>", text)
+
+
+class TelegramError(RuntimeError):
+    pass
+
+
 class Telegram:
     def __init__(self, token: str | None = None, client: httpx.AsyncClient | None = None):
         self.token = token or settings.telegram_token.get_secret_value()
@@ -27,10 +40,13 @@ class Telegram:
         return bool(self.token)
 
     async def call(self, method: str, **params) -> dict:
-        resp = await self.client.post(f"{API}/bot{self.token}/{method}", json=params)
-        data = _Result.model_validate(resp.json())
+        try:
+            resp = await self.client.post(f"{API}/bot{self.token}/{method}", json=params)
+            data = _Result.model_validate(resp.json())
+        except (httpx.HTTPError, ValueError) as exc:
+            raise TelegramError(f"Telegram {method} failed: {type(exc).__name__}") from None
         if not data.ok:
-            raise RuntimeError(f"Telegram {method} failed: {data.description}")
+            raise TelegramError(f"Telegram {method} failed: {data.description}")
         return data.result  # type: ignore[return-value]
 
     async def send(self, chat_id: int | str, text: str) -> None:
@@ -46,8 +62,11 @@ class Telegram:
     async def download(self, file_id: str) -> tuple[str, bytes]:
         info = await self.call("getFile", file_id=file_id)
         path = info["file_path"]
-        resp = await self.client.get(f"{API}/file/bot{self.token}/{path}")
-        resp.raise_for_status()
+        try:
+            resp = await self.client.get(f"{API}/file/bot{self.token}/{path}")
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise TelegramError(f"Telegram file download failed: {type(exc).__name__}") from None
         return path.rsplit("/", 1)[-1], resp.content
 
     async def set_webhook(self, url: str, secret: str) -> dict:

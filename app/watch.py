@@ -51,7 +51,10 @@ class SectionChange(BaseModel):
 async def fetch(url: str, client: httpx.AsyncClient | None = None) -> tuple[str, str]:
     """Return (content_type, body) for a URL."""
     own = client is None
-    client = client or httpx.AsyncClient(follow_redirects=True, timeout=30)
+    if client is None:
+        from app.netguard import safe_client  # untrusted URLs: block non-public addresses
+
+        client = safe_client()
     try:
         resp = await client.get(url, headers={"User-Agent": USER_AGENT})
         resp.raise_for_status()

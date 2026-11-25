@@ -8,7 +8,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
-from app.watch import USER_AGENT
+from app.netguard import safe_client
 
 LINK_TEXT = re.compile(r"\b(terms(\s+of\s+(service|use))?|user\s+agreement|conditions\s+of\s+use|legal\s+terms)\b", re.I)
 GUESSES = ("/terms", "/terms-of-service", "/legal/terms", "/tos", "/terms-of-use", "/legal")
@@ -32,7 +32,7 @@ def terms_link(html: str, base_url: str) -> str | None:
 
 async def find_terms_url(domain: str, client: httpx.AsyncClient | None = None) -> str | None:
     own = client is None
-    client = client or httpx.AsyncClient(follow_redirects=True, timeout=20, headers={"User-Agent": USER_AGENT})
+    client = client or safe_client(timeout=20)
     try:
         for home in (f"https://{domain}/", f"https://www.{domain}/"):
             try:

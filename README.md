@@ -64,7 +64,7 @@ uv run uvicorn app.main:app --reload --port 8080
 2. `PINECONE_API_KEY=… ./scripts/setup_pinecone.sh` creates the index.
 3. `cp .env.example .env.sprite`, fill in secrets and Telegram token, then `./scripts/setup_sprite.sh`.
 4. `./scripts/connectors.sh`, copy each gateway base into `.env.sprite`, set `FP_PUBLIC_URL`, redeploy.
-5. Register the Telegram webhook (command printed by the setup script), then send `/start` to your bot.
+5. Register the Telegram webhook (command printed by the setup script), then send `/start <FP_OWNER_CLAIM_CODE>` to your bot.
 6. Optional: `uv run python scripts/gmail_auth.py CLIENT_ID CLIENT_SECRET` and push `gmail.json`.
 7. Add repo secrets `FINE_PRINT_URL` and `FINE_PRINT_SECRET`; the workflow in
    `.github/workflows/tick.yml` wakes the Sprite daily (Sprites cannot wake themselves on a schedule).
@@ -78,5 +78,7 @@ or just send a link, PDF or photo.
 
 - Gmail scope is `gmail.readonly`; only `From` and `Subject` headers are read; nothing from mail is stored but sender domains.
 - Provider credentials stay in Fly.io connectors, not on the Sprite. The Telegram token and Gmail refresh token have no connector and live in `0600` files on the Sprite.
-- One owner: the first chat to send `/start` owns the bot; other chats are ignored.
+- One owner: the chat that sends `/start <claim code>` (or `FP_OWNER_CHAT_ID`) owns the bot; all other chats are ignored.
+- Links you send and links found on pages or in email are fetched only if every redirect hop resolves to a public address.
+- The Telegram token is redacted from errors, and request URLs are not logged.
 - **Information, not legal advice.**
