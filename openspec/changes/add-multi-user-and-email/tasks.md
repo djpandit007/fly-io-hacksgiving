@@ -30,7 +30,7 @@
 - [x] 5.2 Create `app/mail.py` with send, reply, get message and attachment download (through `netguard`), and `/email` and `/verify` in the bot (6-digit hashed code, 15-minute expiry, 5 attempts, refusal of an address verified by someone else). Verify with tests for the happy path, wrong code, expired code, too many attempts, and an address in use.
 - [x] 5.3 Add `POST /agentmail` with Svix signature verification (±300s), `message.received` only, `mail_seen` dedupe, task hold, and background processing. Verify with tests for valid, invalid and stale signatures, other event types, and duplicate delivery.
 - [x] 5.4 Implement email processing per design D7: sender resolution (verified member, join-code subject creates an email-only member, else silent), then attachments → `intake_file`, terms-update notice → subscribe and check, terms link → `check_url`, long body → verdict, else help. Replies go to Telegram and by email, with one email digest per member per tick. Verify with tests for each branch, unknown-sender silence, and that no body or attachment is persisted.
-- [ ] 5.5 Write `scripts/setup_agentmail.sh` (or README console steps if the connector blocks creation) for the inbox and webhook, plus a README section on email intake. Verify by following it once for the live inbox.
+- [x] 5.5 Write `scripts/setup_agentmail.sh` (or README console steps if the connector blocks creation) for the inbox and webhook, plus a README section on email intake. Verify by following it once for the live inbox.
 
 ## 6. Deploy and live verification
 
