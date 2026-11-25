@@ -43,8 +43,14 @@ class Message(BaseModel):
     text: str | None = None
     html: str | None = None
     attachments: list[Attachment] = Field(default_factory=list)
+    labels: list[str] = Field(default_factory=list)
 
     model_config = {"populate_by_name": True}
+
+    @property
+    def suspicious(self) -> bool:
+        """AgentMail marks mail that failed sender authentication or looks like spam."""
+        return any(l.lower() in {"spam", "unauthenticated", "blocked", "suspicious"} for l in self.labels)
 
     @property
     def sender(self) -> str:

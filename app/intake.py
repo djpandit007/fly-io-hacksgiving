@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
+from email.utils import parseaddr
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
@@ -22,10 +23,11 @@ log = logging.getLogger(__name__)
 UPDATE_SUBJECT = re.compile(r"(updat|chang|revis|new).{0,40}(terms|privacy|policy|agreement|conditions)", re.I)
 URL = re.compile(r"https?://[^\s<>\"')\]]+")
 TERMS_LINK = re.compile(r"(terms|tos\b|legal|agreement|conditions|privacy|policy)", re.I)
-FORWARDED_FROM = re.compile(r"^\s*(?:>\s*)?From:\s*.*?<?([\w.+-]+@([\w-]+\.)+[\w-]+)>?\s*$", re.I | re.M)
+MAX_HEADER_LINE = 300  # forwarded "From:" lines longer than this are ignored (no regex on long input)
 MAILBOX_PROVIDERS = {"gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "yahoo.com",
                      "icloud.com", "me.com", "proton.me", "protonmail.com", "fastmail.com", "aol.com"}
 PARSEABLE = (".pdf", ".png", ".jpg", ".jpeg", ".webp", ".heic", ".docx", ".doc", ".html", ".htm", ".txt")
+EMAIL_ADDRESS = users.EMAIL
 MIN_BODY_CHARS = 300
 MAX_ATTACHMENTS = 3
 
@@ -44,26 +46,70 @@ def body_text(msg: mail.Message) -> str:
     return ""
 
 
+def _forwarded_from_addresses(text: str):
+    """Addresses on forwarded `From:` lines, parsed line by line (bounded work, no backtracking)."""
+    for line in text.splitlines():
+        if len(line) > MAX_HEADER_LINE:
+            continue
+        stripped = line.lstrip("> \t")
+        if stripped[:5].lower() != "from:":
+            continue
+        address = parseaddr(stripped[5:].strip())[1].lower()
+        if "@" in address and EMAIL_ADDRESS.match(address):
+            yield address
+
+
 def original_sender_domain(msg: mail.Message, text: str) -> str | None:
     """The company that sent the notice: the forwarded `From:` line, else the sender (if not a mailbox)."""
-    for match in FORWARDED_FROM.finditer(text):
-        domain = _registrable(match.group(1).rsplit("@", 1)[1])
-        if domain not in MAILBOX_PROVIDERS and domain != _registrable(settings.agentmail_address.rsplit("@", 1)[-1] or "x"):
+    ours = _registrable(settings.agentmail_address.rsplit("@", 1)[-1]) if "@" in settings.agentmail_address else ""
+    for address in _forwarded_from_addresses(text):
+        domain = _registrable(address.rsplit("@", 1)[1])
+        if domain not in MAILBOX_PROVIDERS and domain != ours:
             return domain
     domain = _registrable(msg.sender.rsplit("@", 1)[-1]) if "@" in msg.sender else ""
     return domain if domain and domain not in MAILBOX_PROVIDERS else None
 
 
-async def resolve_sender(conn: sqlite3.Connection, msg: mail.Message) -> User | None:
-    """A verified member, or a new email-only member if the subject carries the join code. Else None."""
+CONFIRM_SUBJECT = "Confirm your email for Fine Print"
+CONFIRM_TEXT = (
+    "Someone (hopefully you) asked to use Fine Print with this address.\n\n"
+    "To confirm, reply to this email and keep this code in your reply: {code}\n\n"
+    "If it wasn't you, ignore this email and nothing happens."
+)
+CONFIRMED_TEXT = (
+    "Confirmed — welcome to Fine Print. Forward \"we've updated our terms\" emails, receipts and contracts "
+    "(as attachments) to this address and I'll reply with what matters. Information, not legal advice."
+)
+
+
+async def resolve_sender(conn: sqlite3.Connection, cl: Clients, msg: mail.Message, text: str) -> User | None:
+    """The member this mail may act for, or None (after any join/confirmation handling).
+
+    - A verified member address: that member.
+    - A pending email-only address whose reply carries its code: confirm, acknowledge, act on nothing else.
+    - The join code in the subject from an unknown address: start a confirmation (no member yet).
+    - Anything else: ignored without a reply.
+    The From line can be forged, so an address only becomes trusted after a reply proves the mailbox.
+    """
     if not msg.sender or msg.sender == settings.agentmail_address.lower():
         return None
     member = users.active(users.by_email(conn, msg.sender))
     if member:
         return member
+    confirmed = users.confirm_email_only(conn, msg.sender, f"{msg.subject or ''}\n{text[:5000]}")
+    if confirmed is not None:
+        if confirmed == "ok":
+            await mail.reply(cl.mail, msg.message_id, CONFIRMED_TEXT + FOOTER)
+        return None
     code = settings.join_code.get_secret_value()
     if code and code in (msg.subject or ""):
-        return users.join_member(conn, code, email=msg.sender, name=msg.sender_name)
+        try:
+            issued = users.start_email_only_join(conn, code, msg.sender, msg.sender_name)
+        except users.RateLimited as exc:
+            log.info("email-only join rate-limited: %s", exc)
+            return None
+        if issued:
+            await mail.send(cl.mail, msg.sender, CONFIRM_SUBJECT, CONFIRM_TEXT.format(code=issued) + FOOTER)
     return None
 
 
@@ -104,11 +150,13 @@ async def process(conn: sqlite3.Connection, cl: Clients, tg: Sender | None, mess
     if cl.mail is None:
         return
     msg = await mail.get_message(cl.mail, message_id)
-    user = await resolve_sender(conn, msg)
-    if user is None:
-        log.info("ignoring mail from an unknown sender")
+    if msg.suspicious:
+        log.info("ignoring mail labelled %s", msg.labels)
         return
     text = body_text(msg)[:200_000]
+    user = await resolve_sender(conn, cl, msg, text)
+    if user is None:
+        return
     subject = (msg.subject or "").strip()
 
     try:

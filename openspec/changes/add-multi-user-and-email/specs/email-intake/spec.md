@@ -24,21 +24,44 @@ from the Fine Print inbox to that address. The address SHALL be linked only afte
 - **WHEN** a member tries to link an address that is verified for another member
 - **THEN** the address stays with its current member and the requester is told it is in use
 
+### Requirement: Limits on verification codes
+The system SHALL send at most one code per minute and five per day to a member, and three per day to any
+address. It SHALL pause linking for 24 hours after ten wrong codes in total, a count that requesting a new
+code does not reset.
+
+#### Scenario: Asking again too soon
+- **WHEN** a member sends `/email` twice within a minute
+- **THEN** only one code is sent and the member is asked to wait
+
+#### Scenario: Repeated wrong codes
+- **WHEN** a member enters ten wrong codes in total, across any number of requested codes
+- **THEN** linking is paused for 24 hours
+
 ### Requirement: Only verified or joining senders are served
-The system SHALL act on inbound mail only from a verified member address, or from a sender whose subject
-contains the join code. All other mail SHALL be ignored without any reply.
+The system SHALL act on inbound mail only from a verified member address, apart from the join and
+confirmation exchange below. All other mail, and any mail the inbox provider marks as spam or failing
+sender authentication, SHALL be ignored without a reply.
 
 #### Scenario: Unknown sender
 - **WHEN** mail arrives from an address that is not verified and its subject lacks the join code
 - **THEN** nothing is processed and no reply is sent
 
+#### Scenario: Mail failing sender authentication
+- **WHEN** mail from a verified member's address is marked as failing sender authentication
+- **THEN** it is ignored
+
 ### Requirement: Email-only members
-The system SHALL make a sender an email-only member when their subject contains the join code, link that
-sender's address to the new member, and process the same message.
+The system SHALL answer mail whose subject contains the join code, from an unknown address, by sending that
+address a confirmation code. The address SHALL become an email-only member only when a reply from it
+carries the code, because a From line can be forged. The join message itself SHALL NOT be processed.
 
 #### Scenario: Judge emails with the join code
-- **WHEN** someone without Telegram emails a contract with the join code in the subject
-- **THEN** they become a member and receive a verdict by email
+- **WHEN** someone without Telegram emails the inbox with the join code in the subject, and then replies to the confirmation email with its code
+- **THEN** they become a member, and documents they forward afterwards get verdicts by email
+
+#### Scenario: Forged join on someone else's address
+- **WHEN** mail with the join code arrives with a forged From address
+- **THEN** no member is created and that address can still be linked later by its real owner
 
 ### Requirement: Processing forwarded mail
 The system SHALL process each accepted message as follows:

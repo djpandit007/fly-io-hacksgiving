@@ -125,6 +125,7 @@ VERIFY_REPLIES = {
     "none": "There's no email waiting to be verified. Start with /email you@example.com",
     "too_many": "Too many wrong codes. Send /email again for a new one.",
     "in_use": "That address was just linked to another member, so I can't link it to you.",
+    "locked": "Too many wrong codes. Email linking is paused for 24 hours.",
 }
 
 
@@ -134,6 +135,9 @@ async def _email(conn: sqlite3.Connection, cl: Clients | None, tg: Telegram, use
         return
     try:
         code = users.start_email_link(conn, user, arg)
+    except users.RateLimited as exc:
+        await tg.send(user.chat_id, f"Not now: {esc(str(exc))}.")
+        return
     except users.EmailInUse:
         await tg.send(user.chat_id, "That address is already linked to another member.")
         return

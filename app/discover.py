@@ -65,7 +65,9 @@ USER_PATH_HOSTS: dict[str, tuple[str, ...]] = {
     "twitter.com": ("/en/tos", "/tos", "/en/privacy", "/privacy"),
 }
 
-_PSL = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None)  # bundled Public Suffix List, no network
+# Bundled Public Suffix List, no network. Private suffixes (github.io, sprites.app, ...) are included so
+# "acme.github.io" stays its own domain instead of widening to every page on github.io.
+_PSL = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None, include_psl_private_domains=True)
 
 
 def registrable_domain(host: str) -> str:
@@ -77,14 +79,20 @@ def _host_is(host: str, suffix: str) -> bool:
     return host == suffix or host.endswith("." + suffix)
 
 
+def _path_under(path: str, prefix: str) -> bool:
+    """Whole-segment prefix match: /terms matches /terms and /terms/x, not /terms123."""
+    path, prefix = path.lower().rstrip("/") or "/", prefix.lower().rstrip("/")
+    return not prefix or path == prefix or path.startswith(prefix + "/")
+
+
 def is_user_content(url: str) -> bool:
     u = urlparse(url)
     host = (u.hostname or "").lower().removeprefix("www.")
     path = u.path or "/"
-    if any(_host_is(host, h) and path.lower().startswith(prefix) for h, prefix in USER_CONTENT):
+    if any(_host_is(host, h) and _path_under(path, prefix) for h, prefix in USER_CONTENT):
         return True
     for h, official in USER_PATH_HOSTS.items():
-        if host == h and not any(path.lower().startswith(p) for p in official):
+        if host == h and not any(_path_under(path, p) for p in official):
             return True
     return False
 

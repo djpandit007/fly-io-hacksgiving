@@ -69,6 +69,7 @@ async def test_wrong_expired_and_too_many(conn, tg):
     await run(conn, tg, 2, f"/verify {sent_code(send)}")
     assert "expired" in tg.to(2)[-1] and users.by_email(conn, "me@example.com") is None
 
+    conn.execute("UPDATE email_codes SET sent_at = '2000-01-01T00:00:00+00:00'")  # past the resend cooldown
     await run(conn, tg, 2, "/email me@example.com")
     good = sent_code(send)
     bad = "123456" if good != "123456" else "654321"
@@ -176,18 +177,91 @@ async def test_unknown_sender_is_ignored_silently(conn, tg):
 
 
 @respx.mock
-async def test_join_code_in_subject_creates_email_only_member(conn, tg, monkeypatch):
+async def test_join_code_email_needs_a_reply_proving_the_mailbox(conn, tg, monkeypatch):
+    send = respx.post(f"{AM}/messages/send").mock(return_value=httpx.Response(200, json={}))
     reply = mock_message(**{"from": "Judge <judge@example.com>", "subject": "Fine Print join-code please",
                             "text": "Terms text. " * 60})
+    checked = []
 
     async def fake_card(cl, title, text, domain=None):
+        checked.append(title)
         return "<b>Card</b>"
 
     monkeypatch.setattr(agent, "verdict_card", fake_card)
     await process(conn, tg)
+    # Not a member yet, address not verified, nothing processed: a confirmation went to the address.
+    assert users.by_email(conn, "judge@example.com") is None and checked == [] and not reply.called
+    pending = users.pending_by_address(conn, "judge@example.com")
+    assert pending and pending.status == "pending" and pending not in users.members(conn)
+    import re
+    code = re.search(r"\b(\d{6})\b", json.loads(send.calls[0].request.content)["text"]).group(1)
+
+    respx.reset()
+    send = respx.post(f"{AM}/messages/send").mock(return_value=httpx.Response(200, json={}))
+    confirm = mock_message(**{"from": "judge@example.com", "subject": "Re: Confirm your email for Fine Print",
+                              "text": f"Yes it's me. {code}"})
+    await process(conn, tg)
     judge = users.by_email(conn, "judge@example.com")
-    assert judge and judge.chat_id is None and judge.name == "Judge"
-    assert "**Card**" in json.loads(reply.calls[0].request.content)["text"]
+    assert judge and judge.status == "active" and judge.chat_id is None and judge.name == "Judge"
+    assert "Confirmed" in json.loads(confirm.calls[0].request.content)["text"] and checked == []
+
+    respx.reset()
+    reply = mock_message(**{"from": "judge@example.com", "subject": "Fwd: contract", "text": "Terms text. " * 60})
+    await process(conn, tg)
+    assert checked == ["contract"] and "**Card**" in json.loads(reply.calls[0].request.content)["text"]
+
+
+@respx.mock
+async def test_spoofed_join_does_not_take_over_a_strangers_address(conn, tg):
+    respx.post(f"{AM}/messages/send").mock(return_value=httpx.Response(200, json={}))
+    mock_message(**{"from": "victim@example.com", "subject": "join-code", "text": "x"})
+    await process(conn, tg)
+    # The victim's address is not verified for anyone, so they can still link it themselves.
+    assert users.by_email(conn, "victim@example.com") is None
+    await say(conn, tg, 5, "/start join-code")
+    await run(conn, tg, 5, "/email victim@example.com")
+    assert "already linked" not in tg.to(5)[-1]
+
+
+@respx.mock
+async def test_mail_flagged_by_agentmail_is_ignored(conn, tg, member):
+    reply = mock_message(labels=["unauthenticated"], text="x" * 500)
+    await process(conn, tg)
+    assert not reply.called and tg.sent == []
+
+
+@respx.mock
+async def test_email_code_rate_limits_and_lockout(conn, tg):
+    send = respx.post(f"{AM}/messages/send").mock(return_value=httpx.Response(200, json={}))
+    await say(conn, tg, 2, "/start join-code")
+    await run(conn, tg, 2, "/email a@example.com")
+    await run(conn, tg, 2, "/email a@example.com")
+    assert "wait a minute" in tg.to(2)[-1] and send.call_count == 1
+
+    member = users.by_chat(conn, 2)
+    for _ in range(2):  # per-address daily cap (3)
+        conn.execute("UPDATE email_codes SET sent_at = ?", ((datetime.now(UTC) - timedelta(minutes=5)).isoformat(),))
+        await run(conn, tg, 2, "/email a@example.com")
+    conn.execute("UPDATE email_codes SET sent_at = ?", ((datetime.now(UTC) - timedelta(minutes=5)).isoformat(),))
+    await run(conn, tg, 2, "/email a@example.com")
+    assert "enough codes" in tg.to(2)[-1] and send.call_count == 3
+
+    # Cumulative failures across codes lock linking for a day; /email does not reset them.
+    conn.execute("UPDATE users SET email_failures = 9 WHERE id = ?", (member.id,))
+    await run(conn, tg, 2, "/verify 999999" if sent_code(send) != "999999" else "/verify 888888")
+    assert "paused for 24 hours" in tg.to(2)[-1]
+    conn.execute("DELETE FROM email_codes")
+    await run(conn, tg, 2, "/email b@example.com")
+    assert "try again tomorrow" in tg.to(2)[-1]
+
+
+def test_forwarded_from_parsing_is_bounded_and_ignores_long_lines():
+    long_line = "From: " + "a" * 100_000 + "@evil.test"
+    text = long_line + "\n> From: Spotify <no-reply@spotify.com>\n"
+    started = time.perf_counter()
+    msg = mail.Message(message_id="m", **{"from": "member@example.com"})
+    assert intake.original_sender_domain(msg, text) == "spotify.com"
+    assert time.perf_counter() - started < 0.5
 
 
 @respx.mock

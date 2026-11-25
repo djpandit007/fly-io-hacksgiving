@@ -43,12 +43,16 @@ def test_user_content_rules():
     assert not discover.is_user_content("https://docs.github.com/en/site-policy/github-terms")
     assert not discover.is_user_content("https://www.linkedin.com/legal/user-agreement")
     assert not discover.is_user_content("https://x.com/en/tos")      # X's own terms
+    assert discover.is_user_content("https://gitlab.com/terms123/project")  # no prefix trick
+    assert not discover.is_user_content("https://gitlab.com/terms")
     assert discover.is_user_content("https://x.com/someone/status/1")  # a post
 
 
 def test_registrable_domain_uses_the_public_suffix_list():
     assert discover.registrable_domain("a.b.bbc.co.uk") == "bbc.co.uk"
     assert discover.registrable_domain("www.youtube.com") == "youtube.com"
+    assert discover.registrable_domain("acme.github.io") == "acme.github.io"  # private suffix kept
+    assert discover.registrable_domain("acme.herokuapp.com") == "acme.herokuapp.com"
 
 
 async def _official_notion(name, client=None):

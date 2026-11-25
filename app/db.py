@@ -77,7 +77,7 @@ def now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Version 2: members, per-member watchlists and deadlines, email dedupe, replayable verdicts.
 V2_MIGRATION = """
@@ -132,6 +132,23 @@ ALTER TABLE changes ADD COLUMN partial INTEGER NOT NULL DEFAULT 0;
 """
 
 
+# Version 3: rate limits and lockout for email verification codes.
+V3_MIGRATION = """
+CREATE TABLE email_codes (
+    id       INTEGER PRIMARY KEY,
+    user_id  INTEGER NOT NULL REFERENCES users(id),
+    address  TEXT NOT NULL,
+    sent_at  TEXT NOT NULL
+);
+CREATE INDEX email_codes_address ON email_codes(address, sent_at);
+CREATE INDEX email_codes_user ON email_codes(user_id, sent_at);
+ALTER TABLE users ADD COLUMN email_failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN email_locked_until TEXT;
+"""
+
+MIGRATIONS = {2: V2_MIGRATION, 3: V3_MIGRATION}
+
+
 def backup_path(path: Path, version: int) -> Path:
     return path.with_name(f"{path.name}.v{version}.bak")
 
@@ -145,13 +162,13 @@ def _migrate(conn: sqlite3.Connection, path: Path) -> None:
         # Keep a copy of the pre-migration database for rollback.
         with sqlite3.connect(backup_path(path, max(version, 1))) as bak:
             conn.backup(bak)
-    if version < 2:
+    for target in range(max(version, 1) + 1, SCHEMA_VERSION + 1):
         # executescript commits first, so run the statements one by one inside our own transaction.
-        statements = [s.strip() for s in V2_MIGRATION.split(";\n") if s.strip()]
+        statements = [s.strip() for s in MIGRATIONS[target].split(";\n") if s.strip()]
         with transaction(conn):
             for stmt in statements:
                 conn.execute(stmt)
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            conn.execute(f"PRAGMA user_version = {target}")
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -259,7 +276,9 @@ class User(Row):
     name: str = ""
     calendar_token: str
     joined_at: datetime
-    status: Literal["active", "removed"] = "active"
+    status: Literal["active", "removed", "pending"] = "active"  # pending: email-only, address unconfirmed
+    email_failures: int = 0
+    email_locked_until: datetime | None = None
 
     @property
     def is_owner(self) -> bool:
