@@ -446,3 +446,15 @@ async def test_unreachable_attachment_points_to_telegram(conn, tg, member):
     await process(conn, tg)
     assert "Send it to the Fine Print bot in Telegram" in tg.to(7)[0]
     assert json.loads(send.calls[0].request.content)["subject"].startswith("Re: ")
+
+
+@pytest.mark.parametrize("subject", [
+    "Fwd: Updates to Discord’s Policies", "We've updated our Terms of Service", "Changes to our User Agreement",
+    "Fwd: Fwd: Revised Conditions of Use", "Our new privacy policy",
+])
+def test_update_subject_matches_plurals_and_word_forms(subject):
+    assert intake.UPDATE_SUBJECT.search(subject)
+
+
+def test_update_subject_ignores_ordinary_mail():
+    assert not intake.UPDATE_SUBJECT.search("Your order has shipped")

@@ -20,7 +20,8 @@ from app.telegram import esc
 
 log = logging.getLogger(__name__)
 
-UPDATE_SUBJECT = re.compile(r"(updat|chang|revis|new).{0,40}(terms|privacy|policy|agreement|conditions)", re.I)
+# Word stems, so "Policies", "Agreements" and "Conditions" match too.
+UPDATE_SUBJECT = re.compile(r"(updat|chang|revis|new).{0,40}(term|privac|polic|agreement|condition)", re.I)
 URL = re.compile(r"https?://[^\s<>\"')\]]+")
 TERMS_LINK = re.compile(r"(terms|tos\b|legal|agreement|conditions|privacy|policy)", re.I)
 MAX_HEADER_LINE = 300  # forwarded "From:" lines longer than this are ignored (no regex on long input)
