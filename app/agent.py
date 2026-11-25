@@ -70,6 +70,8 @@ class ChangeReport(BaseModel):
     def to_html(self) -> str:
         v = self.verdict
         badge = f"{v.category} · severity {v.severity:.1f}/3 · favours {v.favours}" if v else "unjudged"
+        if v and v.partial:
+            badge += " · large change, partly judged: please skim it"
         lines = [
             f"<b>{esc(self.service)}</b> changed <i>{esc(self.heading or 'its terms')}</i> ({self.effective_at:%d %b %Y})",
             f"<code>{esc(badge)}</code>",

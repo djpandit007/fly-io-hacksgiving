@@ -19,6 +19,7 @@ SYSTEMONE_PATH = "systemone/v1/systemone"
 # character, so whole documents are capped at ~25k tokens and each side of a change at ~5k.
 MAX_DOCUMENT_CHARS = 90_000
 MAX_SECTION_CHARS = 20_000
+CONTEXT_CHARS = 2_000  # unchanged text kept around the changed region
 
 CATEGORIES: dict[str, str] = {
     "arbitration": "How disputes are resolved: arbitration, class-action waivers, jury waivers, governing law or venue.",
@@ -141,6 +142,8 @@ Favours = Literal["company", "consumer", "neutral"]
 class Verdict(BaseModel):
     model_config = ConfigDict(frozen=True)
 
+    # True when the change was too large to show the judge in full: report it regardless.
+    partial: bool = False
     material: Probability
     category: Category
     opt_out: Probability
@@ -148,6 +151,8 @@ class Verdict(BaseModel):
     severity: float = Field(ge=0, le=len(SEVERITY_LEVELS) - 1)
 
     def is_material(self, threshold: float | None = None) -> bool:
+        if self.partial:  # fail closed: never stay quiet about a change the judge only partly saw
+            return True
         return self.material >= (threshold if threshold is not None else settings.material_threshold)
 
     @property
@@ -155,23 +160,52 @@ class Verdict(BaseModel):
         return self.opt_out >= 0.7
 
 
-def _clip(text: str) -> str:
-    return text if len(text) <= MAX_SECTION_CHARS else text[:MAX_SECTION_CHARS] + " […truncated]"
+def change_window(before: str, after: str) -> tuple[str, str, bool]:
+    """The part of a long section that actually changed, with some context on either side.
+
+    Returns (before, after, partial). Clipping from the start would hide a change that sits deep in
+    a long section and make it look immaterial, so the window is centred on the differing region.
+    `partial` is True when the differing region itself is too large to show in full; callers must
+    then fail closed rather than trust a judgment made on cut-down text.
+    """
+    if len(before) <= MAX_SECTION_CHARS and len(after) <= MAX_SECTION_CHARS:
+        return before, after, False
+    prefix = 0
+    limit = min(len(before), len(after))
+    while prefix < limit and before[prefix] == after[prefix]:
+        prefix += 1
+    suffix = 0
+    while suffix < limit - prefix and before[-1 - suffix] == after[-1 - suffix]:
+        suffix += 1
+    start = max(0, prefix - CONTEXT_CHARS)
+    b_end = min(len(before), len(before) - suffix + CONTEXT_CHARS)
+    a_end = min(len(after), len(after) - suffix + CONTEXT_CHARS)
+    b, a = before[start:b_end], after[start:a_end]
+    partial = len(b) > MAX_SECTION_CHARS or len(a) > MAX_SECTION_CHARS
+
+    def frame(text: str, end: int, total: int) -> str:
+        text = text[:MAX_SECTION_CHARS]
+        return ("[…] " if start else "") + text + (" […]" if end < total or len(text) == MAX_SECTION_CHARS else "")
+
+    return frame(b, b_end, len(before)) if before else "", frame(a, a_end, len(after)) if after else "", partial
 
 
-def state_for(service: str, change: SectionChange) -> dict[str, Any]:
-    return {
+def state_for(service: str, change: SectionChange) -> tuple[dict[str, Any], bool]:
+    before, after, partial = change_window(change.before, change.after)
+    state = {
         "service": service,
         "section": change.heading or "(untitled section)",
         "change_kind": change.kind,
-        "before": _clip(change.before) or "(this section did not exist)",
-        "after": _clip(change.after) or "(this section was removed)",
+        "before": before or "(this section did not exist)",
+        "after": after or "(this section was removed)",
     }
+    return state, partial
 
 
-def parse_verdict(data: dict[str, Any]) -> Verdict:
+def parse_verdict(data: dict[str, Any], partial: bool = False) -> Verdict:
     resp = SystemOneResponse.model_validate(data)
     return Verdict(
+        partial=partial,
         material=resp.noul("material"),
         category=resp.choice("category"),
         opt_out=resp.noul("opt_out"),
@@ -181,8 +215,9 @@ def parse_verdict(data: dict[str, Any]) -> Verdict:
 
 
 async def judge(gw: Gateway, service: str, change: SectionChange) -> Verdict:
-    body = {"model": settings.judge_model, "state": state_for(service, change), "questions": QUESTIONS}
-    return parse_verdict(await gw.post(SYSTEMONE_PATH, json=body))
+    state, partial = state_for(service, change)
+    body = {"model": settings.judge_model, "state": state, "questions": QUESTIONS}
+    return parse_verdict(await gw.post(SYSTEMONE_PATH, json=body), partial=partial)
 
 
 # --- "Before you agree": judging a whole document you have not accepted yet ---------------------

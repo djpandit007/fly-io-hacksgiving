@@ -51,10 +51,25 @@ def test_questions_respect_api_limits():
             assert 1 <= len(q["criteria"]) <= 255
 
 
-def test_huge_sections_are_clipped_to_fit_jev_limits():
+def test_change_deep_in_a_long_section_is_shown_to_the_judge():
     from app.judge import MAX_SECTION_CHARS, state_for
     from app.watch import SectionChange
 
-    state = state_for("Snapchat", SectionChange(heading="", kind="added", before="", after="x " * 60_000))
-    assert len(state["after"]) <= MAX_SECTION_CHARS + 20 and state["after"].endswith("[…truncated]")
-    assert state["before"] == "(this section did not exist)"
+    filler = "Standard boilerplate sentence about the service. " * 1000  # ~50k chars
+    before = filler + "Disputes go to the courts of California." + filler
+    after = filler + "Disputes go to binding arbitration in Texas." + filler
+    state, partial = state_for("X", SectionChange(heading="General", kind="modified", before=before, after=after))
+    assert not partial
+    assert "binding arbitration in Texas" in state["after"] and "courts of California" in state["before"]
+    assert len(state["after"]) <= MAX_SECTION_CHARS + 10 and state["after"].startswith("[…] ")
+
+
+def test_change_too_large_to_show_fails_closed():
+    from app.judge import state_for
+    from app.watch import SectionChange
+
+    state, partial = state_for("Snapchat", SectionChange(heading="", kind="added", before="", after="new clause. " * 10_000))
+    assert partial and state["before"] == "(this section did not exist)"
+    quiet = {**GOOD, "answers": {**GOOD["answers"], "material": {"type": "noul", "noul": 0.02}}}
+    assert parse_verdict(quiet, partial=True).is_material()
+    assert not parse_verdict(quiet).is_material()
