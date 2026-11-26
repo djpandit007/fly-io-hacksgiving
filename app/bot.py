@@ -71,7 +71,10 @@ HOW_CHECKS_WORK = (
 )
 WATCH_PROMPT = "Which service should I watch? Reply with a name, a domain or a link to its terms."
 WATCH_PLACEHOLDER = "e.g. notion or youtube.com"
-POINTER = "Not sure what you mean. Try one of these, or send me a link or a document to check."
+POINTER = (
+    "Not sure what you mean. Try one of these, or send me a link or a document to check. "
+    "To ask about the terms you watch, use /ask."
+)
 # Single words that are conversation, not service names.
 NOT_SERVICES = frozenset({"hi", "hello", "hey", "thanks", "thank", "thx", "ok", "okay", "yes", "no", "help", "start"})
 
@@ -97,12 +100,15 @@ WELCOME = """Welcome to <b>Fine Print</b>, {name}! 👋
 
 I read the terms you agree to and tell you when something that matters changes.
 {forward}
-Documents and links you send are read by AI providers on the operator's accounts; I keep only the
-deadlines I extract and your watchlist. I give information, not legal advice."""
+Documents, links and questions you send are read by AI providers on the operator's accounts; I keep
+only the deadlines I extract and your watchlist. I give information, not legal advice."""
 
 PRIVATE = "This is a private Fine Print bot: {hint}."
 
-ASK_USAGE = "Ask me about the terms you watch, for example: /ask can Spotify raise my price?"
+ASK_USAGE = (
+    "Ask me about the terms you watch, for example: /ask can Spotify raise my price?\n"
+    "Your questions are read by the AI providers and not stored."
+)
 # Never the exception's text: it could carry the member's question.
 ASK_FAILED = "Something went wrong answering that. Please try again."
 ASK_RATED = frozenset({"answered", "quotes_only"})

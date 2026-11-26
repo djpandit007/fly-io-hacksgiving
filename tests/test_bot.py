@@ -79,6 +79,14 @@ async def test_owner_claims_then_members_join(conn, tg):
     assert any("not legal advice" in t for t in tg.to(2))
 
 
+def test_welcome_says_questions_go_to_ai_providers():
+    assert "questions you send are read by AI providers" in " ".join(bot.WELCOME.split())
+
+
+def test_pointer_mentions_ask():
+    assert "/ask" in bot.POINTER
+
+
 async def test_stranger_start_is_explained_and_other_messages_ignored(conn, tg):
     await say(conn, tg, 9, "/start")
     await say(conn, tg, 9, "/start wrong-code")
@@ -747,7 +755,10 @@ async def test_bare_ask_explains_usage(conn, tg, monkeypatch):
     asked = fake_ask(monkeypatch)
     await say(conn, tg, 2, "/start join-code")
     await say(conn, tg, 2, "/ask")
-    assert tg.to(2)[-1] == "Ask me about the terms you watch, for example: /ask can Spotify raise my price?"
+    assert tg.to(2)[-1] == (
+        "Ask me about the terms you watch, for example: /ask can Spotify raise my price?\n"
+        "Your questions are read by the AI providers and not stored."
+    )
     assert asked == []
 
 
