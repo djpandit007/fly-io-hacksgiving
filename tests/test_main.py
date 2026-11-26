@@ -39,3 +39,43 @@ def test_telegram_from_stranger_is_ignored():
             json={"update_id": 1, "message": {"message_id": 1, "chat": {"id": 99}, "text": "hello"}},
         )
         assert resp.json() == {"ok": True}  # accepted, but no owner yet and not /start: nothing sent
+
+
+async def test_quick_tap_is_not_queued_behind_a_long_job_in_the_same_chat(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+
+    from app import db, main, users
+    from app.locks import locks
+    from tests.test_bot import FakeTelegram
+
+    conn = db.connect(tmp_path / "m.db")
+    users.join_member(conn, "join-code", chat_id=2)
+    tg = FakeTelegram()
+    app_ = SimpleNamespace(state=SimpleNamespace(conn=conn, clients=None, tg=tg))
+    tap = {"update_id": 5, "callback_query": {"id": "cb", "from": {"id": 2}, "data": "v1:n",
+                                              "message": {"message_id": 7, "chat": {"id": 2}, "date": 0}}}
+    async with locks.hold("chat:2"):  # a long check is running in this chat
+        await asyncio.wait_for(main._handle_message(app_, tap, "telegram-5"), timeout=1)
+    assert tg.called("answer") == [("answer", "cb", "OK", False)]
+
+
+async def test_slow_tap_is_answered_before_it_queues(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+
+    from app import db, main, users
+    from app.locks import locks
+    from tests.test_bot import FakeTelegram
+
+    conn = db.connect(tmp_path / "m.db")
+    users.join_member(conn, "join-code", chat_id=2)
+    tg = FakeTelegram()
+    app_ = SimpleNamespace(state=SimpleNamespace(conn=conn, clients=None, tg=tg))
+    tap = {"update_id": 6, "callback_query": {"id": "cb", "from": {"id": 2}, "data": "v1:w:notion",
+                                              "message": {"message_id": 7, "chat": {"id": 2}, "date": 0}}}
+    async with locks.hold("chat:2"):
+        job = asyncio.create_task(main._handle_message(app_, tap, "telegram-6"))
+        await asyncio.sleep(0.05)
+        assert tg.called("answer") == [("answer", "cb", "On it…", False)] and not job.done()
+    job.cancel()

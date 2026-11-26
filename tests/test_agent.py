@@ -177,7 +177,8 @@ async def test_tick_fans_out_one_judgment_to_each_subscriber_only(conn, members,
     assert result.checked == 1 and result.changes == 1
     assert m["jev"].call_count == judged + 1  # judged once for two watchers
     assert set(result.deliveries) == {a.id, b.id} and c.id not in result.deliveries
-    assert all("Acme" in msgs[0] for msgs in result.deliveries.values())
+    assert all("Acme" in msgs[0].text for msgs in result.deliveries.values())
+    assert all(msgs[0].buttons[0][0][0] == "🗑 Unwatch Acme" for msgs in result.deliveries.values())
 
 
 @respx.mock
@@ -200,8 +201,8 @@ async def test_tick_nudges_each_member_separately(conn, members):
     cl = agent.Clients()
     result = await agent.tick(conn, cl)
     await cl.aclose()
-    assert "A trial ends" in result.deliveries[a.id][0] and "B notice" not in result.deliveries[a.id][0]
-    assert "B notice" in result.deliveries[b.id][0] and result.nudges == 2
+    assert "A trial ends" in result.deliveries[a.id][0].text and "B notice" not in result.deliveries[a.id][0].text
+    assert "B notice" in result.deliveries[b.id][0].text and result.nudges == 2
 
 
 @respx.mock
@@ -223,8 +224,8 @@ async def test_wrapped_counts_only_the_members_services(conn, members, history):
     wa = await agent.wrapped(conn, cl, a)
     wb = await agent.wrapped(conn, cl, b)
     await cl.aclose()
-    assert "2 material changes you accepted" in wa
-    assert "Suspiciously quiet" in wb
+    assert "2 material changes you accepted" in wa.text and wa.rate.kind == "wrapped"
+    assert "Suspiciously quiet" in wb.text and wb.rate is None  # nothing written, nothing to rate
 
 
 @respx.mock
@@ -234,9 +235,11 @@ async def test_verdict_card_survives_writer_failure():
     respx.post(JEV).mock(return_value=httpx.Response(200, json=flags))
     respx.post(CHAT).mock(return_value=httpx.Response(200, json={"choices": [{"message": {"content": None}, "finish_reason": "length"}]}))
     cl = agent.Clients()
-    card = await agent.verdict_card(cl, "Lease", "Some lease text")
+    out = await agent.verdict_card(cl, "Lease", "Some lease text")
+    card = out.text
     await cl.aclose()
-    assert "What I checked for:" in card and "🔴 Found (90% sure): arbitration" in card
+    assert out.rate is None  # the writer wrote nothing, so there is nothing to rate
+    assert "<b>What I checked for</b>" in card and "🔴 Found (90% sure): arbitration" in card
     assert "not legal advice" in card
 
 
@@ -306,7 +309,8 @@ async def test_watch_messages_overview_first(conn):
     msgs = await agent.watch_messages(cl, svc, [report(1), report(2)])
     await cl.aclose()
     assert len(msgs) == 1
-    m = msgs[0]
+    m = msgs[0].text
+    assert msgs[0].rate.kind == "overview" and msgs[0].rate.change_id == 2  # the latest change
     assert m.startswith("<b>Svc</b> — past year (2 changes)")
     assert m.index("Arbitration &lt;now&gt; &amp; more") < m.index("Section 1") < m.index("Section 2")
 
@@ -318,7 +322,8 @@ async def test_watch_messages_without_overview_when_writer_fails(conn):
     cl = agent.Clients()
     msgs = await agent.watch_messages(cl, svc, [report(1), report(2)])
     await cl.aclose()
-    joined = "\n".join(msgs)
+    joined = "\n".join(m.text for m in msgs)
+    assert all(m.rate is None for m in msgs)  # no overview written: nothing to rate
     assert "past year (2 changes)" in joined and "Section 1" in joined and "Section 2" in joined
     assert "wrong" not in joined.lower() and "no text" not in joined
 
@@ -373,3 +378,143 @@ async def test_failed_overview_is_not_cached(conn):
     assert await agent.overview(cl, svc, [report(1)]) == "Now it works"
     await cl.aclose()
     assert route.call_count == 3
+
+
+@respx.mock
+async def test_check_url_reports_its_stages(monkeypatch):
+    flags = {"model": "jev-1.14", "answers": {k: {"type": "noul", "noul": 0.1} for k in
+             ("auto_renews", "arbitration", "data_sharing", "unilateral_changes", "content_licence", "hard_to_cancel")}}
+    respx.post(JEV).mock(return_value=httpx.Response(200, json=flags))
+    respx.post(CHAT).mock(return_value=httpx.Response(200, json={"choices": [{"message": {"content": "SIGN"}}]}))
+
+    async def page(cl_, url):
+        return "Terms text"
+
+    async def no_grade(q, client=None):
+        return None
+
+    monkeypatch.setattr(agent, "page_text", page)
+    monkeypatch.setattr(agent.tosdr, "lookup", no_grade)
+    stages: list[str] = []
+    cl = agent.Clients()
+    await agent.check_url(cl, "https://acme.test/terms", on_stage=stages.append)
+    await cl.aclose()
+    assert stages == ["Fetching the page…", "Checking for red flags…", "Writing it up…"]
+
+
+# --- Unwatch and undo -----------------------------------------------------------------------------
+
+def _watch(conn, user, svc):
+    conn.execute("INSERT INTO subscriptions (user_id, service_id, created_at) VALUES (?, ?, ?)", (user.id, svc.id, db.now()))
+
+
+def test_unwatch_removes_only_that_members_row(conn, members):
+    a, b, _ = members
+    svc = agent.add_service(conn, "Notion", "https://notion.test/terms")
+    _watch(conn, a, svc)
+    _watch(conn, b, svc)
+    assert agent.unsubscribe(conn, a, svc.id).name == "Notion"
+    assert [s.name for s in agent.services_for(conn, a.id)] == []
+    assert [s.name for s in agent.services_for(conn, b.id)] == ["Notion"]
+    assert agent.unsubscribe(conn, a, svc.id) is None  # already stopped
+
+
+def test_unwatch_of_another_members_service_changes_nothing(conn, members):
+    a, b, _ = members
+    svc = agent.add_service(conn, "Only B", "https://b.test/terms")
+    _watch(conn, b, svc)
+    assert agent.unsubscribe(conn, a, svc.id) is None
+    assert agent.unsubscribe(conn, a, 999_999) is None
+    assert [s.name for s in agent.services_for(conn, b.id)] == ["Only B"]
+
+
+def test_last_watcher_leaving_stops_checks_but_keeps_history(conn, members):
+    a = members[0]
+    svc = agent.add_service(conn, "Lonely", "https://lonely.test/terms")
+    _watch(conn, a, svc)
+    conn.execute("INSERT INTO snapshots (service_id, taken_at, sha, text, origin) VALUES (?, ?, ?, ?, ?)",
+                 (svc.id, db.now(), "abc", "terms", "live"))
+    agent.unsubscribe(conn, a, svc.id)
+    assert svc.id not in [s.id for s in agent.watched_services(conn)]
+    assert conn.execute("SELECT COUNT(*) FROM snapshots WHERE service_id = ?", (svc.id,)).fetchone()[0] == 1
+
+
+@respx.mock
+def test_resubscribe_restores_an_unwatch_once_with_no_provider_calls(conn, members):
+    a = members[0]
+    svc = agent.add_service(conn, "Notion", "https://notion.test/terms")
+    _watch(conn, a, svc)
+    agent.unsubscribe(conn, a, svc.id)
+    assert agent.resubscribe(conn, a, svc.id).id == svc.id
+    assert [s.name for s in agent.services_for(conn, a.id)] == ["Notion"]
+    assert agent.resubscribe(conn, a, svc.id) is None  # already restored
+    assert agent.resubscribe(conn, a, 999_999) is None
+    assert not respx.calls  # nothing fetched, judged or replayed
+
+
+def test_forged_undo_cannot_add_or_reveal_another_members_service(conn, members):
+    a, b, _ = members
+    svc = agent.add_service(conn, "Only B", "https://b.test/terms")
+    _watch(conn, b, svc)
+    assert agent.resubscribe(conn, a, svc.id) is None  # A never watched it
+    assert agent.services_for(conn, a.id) == []
+    agent.unsubscribe(conn, b, svc.id)
+    assert agent.resubscribe(conn, a, svc.id) is None  # B's unwatch is not A's to undo
+
+
+# --- Verdict cards: quotes and explain buttons -----------------------------------------------------
+
+DOC = "Section 9. Binding arbitration applies to any dispute arising from these terms. You may opt out by mail."
+
+
+def _flags(**found):
+    keys = ("auto_renews", "arbitration", "data_sharing", "unilateral_changes", "content_licence", "hard_to_cancel")
+    return {"model": "jev-1.14", "answers": {k: {"type": "noul", "noul": found.get(k, 0.05)} for k in keys}}
+
+
+@respx.mock
+async def test_verified_quote_is_shown_and_invented_one_is_not():
+    respx.post(JEV).mock(return_value=httpx.Response(200, json=_flags(arbitration=0.92, data_sharing=0.8, auto_renews=0.4)))
+    reply = ("PUSH BACK\n- **Arbitration:** no court\n"
+             "QUOTE arbitration: Binding arbitration applies to any dispute arising from these terms.\n"
+             "QUOTE data_sharing: We share your data with every advertiser we can find.")
+    chat = respx.post(CHAT).mock(return_value=httpx.Response(200, json={"choices": [{"message": {"content": reply}}]}))
+    cl = agent.Clients()
+    card = await agent.verdict_card(cl, "Lease", DOC)
+    await cl.aclose()
+    assert "QUOTE" not in card.text
+    assert "<blockquote expandable><b>What the document says</b>\n<b>arbitration</b>: “Binding arbitration" in card.text
+    assert "every advertiser" not in card.text
+    assert (card.rate.kind, card.rate.prompt_version, card.rate.quotes_ok) == ("verdict", "v2", False)  # one dropped
+    assert card.buttons == [[("💡 auto renews", "v1:fx:auto_renews"), ("💡 arbitration", "v1:fx:arbitration")],
+                            [("💡 data sharing", "v1:fx:data_sharing")]]
+    prompt = json.loads(chat.calls[0].request.content)["messages"][1]["content"]
+    assert "QUOTE <key>:" in prompt and "arbitration, data_sharing" in prompt
+
+
+@respx.mock
+async def test_no_found_flags_means_no_quotes_asked():
+    respx.post(JEV).mock(return_value=httpx.Response(200, json=_flags()))
+    chat = respx.post(CHAT).mock(return_value=httpx.Response(200, json={"choices": [{"message": {"content": "SIGN"}}]}))
+    cl = agent.Clients()
+    card = await agent.verdict_card(cl, "Lease", DOC)
+    await cl.aclose()
+    assert "QUOTE" not in json.loads(chat.calls[0].request.content)["messages"][1]["content"]
+    assert "What the document says" not in card.text and card.buttons == []
+    assert card.rate.quotes_ok is None  # no flag found, so no quotes were asked for
+
+
+@respx.mock
+async def test_long_card_never_splits_a_blockquote():
+    from app.telegram import split
+
+    respx.post(JEV).mock(return_value=httpx.Response(200, json=_flags(arbitration=0.92)))
+    long_card = "PUSH BACK\n" + "\n\n".join("- " + "word " * 150 for _ in range(6))
+    reply = long_card + "\nQUOTE arbitration: Binding arbitration applies to any dispute arising from these terms."
+    respx.post(CHAT).mock(return_value=httpx.Response(200, json={"choices": [{"message": {"content": reply}}]}))
+    cl = agent.Clients()
+    card = await agent.verdict_card(cl, "Lease", DOC)
+    await cl.aclose()
+    chunks = split(card.text)
+    assert len(chunks) > 1
+    assert all(c.count("<blockquote") == c.count("</blockquote>") for c in chunks)

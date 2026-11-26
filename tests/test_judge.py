@@ -82,3 +82,10 @@ def test_change_too_large_to_show_fails_closed():
 )
 def test_severity_label(score, label):
     assert severity_label(score) == label
+
+
+def test_every_red_flag_has_a_short_explanation():
+    from app.judge import FLAG_EXPLANATIONS, RED_FLAGS
+
+    assert FLAG_EXPLANATIONS.keys() == RED_FLAGS.keys()
+    assert all(0 < len(text) <= 200 for text in FLAG_EXPLANATIONS.values())

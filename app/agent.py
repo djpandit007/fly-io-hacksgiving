@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import BaseModel, Field
 
-from app import exa, judge, ledger, memory, parse, tosdr, writer
+from app import exa, judge, ledger, memory, parse, quotes, taps, tosdr, writer
 from app.config import settings
 from app.db import Change, Service, Snapshot, User, now, one, rows
 from app.gateway import Gateway, Recorder
@@ -31,7 +31,9 @@ from app.judge import Verdict
 from app.locks import locks
 from app.memory import Precedent
 from app.netguard import BlockedURL
-from app.telegram import MAX_LEN, esc, rich
+from app.outgoing import Answer, AnswerKind, Outgoing
+from app.progress import Stage, no_stage
+from app.telegram import MAX_LEN, Buttons, esc, rich
 from app.watch import (
     SectionChange,
     diff,
@@ -84,12 +86,15 @@ class Clients:
 FAVOURS_TEXT = {"company": "favours the company", "consumer": "favours you", "neutral": "neutral"}
 
 
+FOUND, UNCLEAR = 0.7, 0.3  # how sure the judge must be to call a red flag found, or unclear
+
+
 def flag_line(key: str, p: float) -> str:
     """One red flag in words; the number is how sure the judge is of the word shown."""
     name = key.replace("_", " ")
-    if p >= 0.7:
+    if p >= FOUND:
         return f"🔴 Found ({p:.0%} sure): {name}"
-    if p >= 0.3:
+    if p >= UNCLEAR:
         return f"🟡 Unclear ({p:.0%} likely): {name}"
     return f"🟢 Not found ({1 - p:.0%} sure): {name}"
 
@@ -427,7 +432,7 @@ async def onboard_service(conn: sqlite3.Connection, cl: Clients, svc: Service) -
 
 
 async def subscribe(
-    conn: sqlite3.Connection, cl: Clients, user: User, name: str, url: str
+    conn: sqlite3.Connection, cl: Clients, user: User, name: str, url: str, on_stage: Stage = no_stage
 ) -> tuple[Service, list[ChangeReport]]:
     """Add a service to a member's watchlist and show them its past year of material changes.
 
@@ -437,6 +442,7 @@ async def subscribe(
     async with locks.hold(f"service-url:{normalise_url(url)}"):
         svc = add_service(conn, name, url)
         if not _has_history(conn, svc.id):
+            on_stage("Looking up a year of past versions…")
             async with locks.hold(f"service:{svc.id}"):
                 await onboard_service(conn, cl, svc)
         svc = one(Service, conn.execute("SELECT * FROM services WHERE id = ?", (svc.id,))) or svc
@@ -444,9 +450,69 @@ async def subscribe(
         "INSERT OR IGNORE INTO subscriptions (user_id, service_id, created_at) VALUES (?, ?, ?)",
         (user.id, svc.id, now()),
     )
+    on_stage("Collecting the changes that matter…")
     vectors: dict[int, list[float]] = {}
     reports = [await report_for(conn, cl, c, svc, user, vectors) for c in past_material_changes(conn, svc.id)]
     return svc, reports
+
+
+def unsubscribe(conn: sqlite3.Connection, user: User, service_id: int) -> Service | None:
+    """Take a service off this member's watchlist. None when they weren't watching it (nothing changes).
+
+    The service's snapshots and judged changes stay; it drops out of the daily run once nobody watches it.
+    """
+    svc = one(Service, conn.execute("SELECT * FROM services WHERE id = ?", (service_id,)))
+    if svc is None:
+        return None
+    gone = conn.execute(
+        "DELETE FROM subscriptions WHERE user_id = ? AND service_id = ?", (user.id, service_id)
+    ).rowcount
+    if not gone:
+        return None
+    conn.execute(
+        "INSERT OR REPLACE INTO unwatched (user_id, service_id, unwatched_at) VALUES (?, ?, ?)",
+        (user.id, service_id, now()),
+    )
+    return svc
+
+
+def resubscribe(conn: sqlite3.Connection, user: User, service_id: int) -> Service | None:
+    """Undo an unwatch: back on the watchlist, with no fetching, judging or replaying of past changes.
+
+    Only a service this member unwatched can be restored. Undo buttons carry a bare service id, which a
+    client can forge; without this check, trying ids would add (and so reveal) services other members watch.
+    """
+    svc = one(Service, conn.execute("SELECT * FROM services WHERE id = ?", (service_id,)))
+    if svc is None:
+        return None
+    if not conn.execute(
+        "DELETE FROM unwatched WHERE user_id = ? AND service_id = ?", (user.id, service_id)
+    ).rowcount:
+        return None
+    conn.execute(
+        "INSERT OR IGNORE INTO subscriptions (user_id, service_id, created_at) VALUES (?, ?, ?)",
+        (user.id, service_id, now()),
+    )
+    return svc
+
+
+def unwatch_button(svc: Service) -> tuple[str, str]:
+    return (f"🗑 Unwatch {svc.name}", taps.build("u", str(svc.id)))
+
+
+def undo_button(svc: Service) -> tuple[str, str]:
+    return (f"↩ Undo: watch {svc.name}", taps.build("r", str(svc.id)))
+
+
+def rated(kind: AnswerKind, **meta) -> Answer:
+    """What answer feedback records about a written answer: kind, writer model and prompt version."""
+    return Answer(kind=kind, model=settings.writer_model, prompt_version=writer.PROMPT_VERSIONS[kind], **meta)
+
+
+def alert(report: ChangeReport, svc: Service) -> Outgoing:
+    """A material change as delivered to one watcher: the report, an unwatch button, and 👍/👎."""
+    return Outgoing(text=report.to_html(), buttons=[[unwatch_button(svc)]],
+                    rate=rated("alert", change_id=report.change_id))
 
 
 def pack(parts: list[str], limit: int = MAX_LEN, sep: str = "\n\n") -> list[str]:
@@ -492,49 +558,87 @@ async def overview(cl: Clients, svc: Service, reports: list[ChangeReport]) -> st
     return OVERVIEW_CACHE[(svc.id, facts)]
 
 
-async def watch_messages(cl: Clients, svc: Service, reports: list[ChangeReport]) -> list[str]:
-    """One /watch reply: header, overview, then every change card, packed into as few messages as fit."""
+async def watch_messages(cl: Clients, svc: Service, reports: list[ChangeReport]) -> list[Outgoing]:
+    """One /watch reply: header, overview, then every change card, packed into as few messages as fit.
+
+    When an overview was written, the last message is rated (as the overview of the latest change)."""
     n = len(reports)
     header = f"<b>{esc(svc.name)}</b> — past year ({n} change{'s' if n != 1 else ''})"
     summary = await overview(cl, svc, reports)
-    return pack([header, *([summary] if summary else []), *(r.to_html() for r in reports)])
+    messages = [Outgoing(text=t) for t in pack([header, *([summary] if summary else []), *(r.to_html() for r in reports)])]
+    if summary:
+        latest = max(reports, key=lambda r: r.effective_at)
+        messages[-1].rate = rated("overview", change_id=latest.change_id)
+    return messages
 
 
 # --- Before you agree ----------------------------------------------------------------------------
 
-async def verdict_card(cl: Clients, title: str, text: str, domain: str | None = None) -> str:
+DISCLAIMER = "<i>Information, not legal advice.</i>"
+
+
+def _explain_buttons(flags: dict[str, float]) -> Buttons:
+    """A 💡 button per flag found or unclear, two to a row."""
+    shown = [(f"💡 {k.replace('_', ' ')}", taps.build("fx", k)) for k, p in flags.items() if p >= UNCLEAR]
+    return [shown[i : i + 2] for i in range(0, len(shown), 2)]
+
+
+async def verdict_card(
+    cl: Clients, title: str, text: str, domain: str | None = None, on_stage: Stage = no_stage
+) -> Outgoing:
+    """A "before you agree" card: verdict, the clauses behind found flags (verified against `text`),
+    what was checked, the community grade, and a 💡 button per flag. Nothing of `text` is kept."""
     flags: dict[str, float] = {}
     card = ""
+    passed: list[quotes.Quote] = []
+    offered: list[quotes.Quote] = []
     if cl.ai:
+        on_stage("Checking for red flags…")
         flags = await judge.red_flags(cl.ai, title, text[: judge.MAX_DOCUMENT_CHARS])
+        on_stage("Writing it up…")
         try:
-            card = await writer.verdict_card(cl.ai, title, flags, text)
+            raw = await writer.verdict_card(cl.ai, title, flags, text)
+            card, offered = quotes.split_card(raw, {k for k, p in flags.items() if p >= FOUND})
+            passed = quotes.verify(offered, text)
+            if len(passed) < len(offered):
+                log.info("dropped %d unverified clause quote(s) for %s", len(offered) - len(passed), title)
         except Exception as exc:  # noqa: BLE001 — the flags and grade are still worth sending
             log.warning("verdict card failed for %s: %s", title, exc)
-    lines = [f"<b>{esc(title)}</b>"]
+    parts = [f"<b>{esc(title)}</b>"]
     if card:
-        lines.append(rich(card))
+        parts.append(rich(card))
+    if passed:
+        lines = "\n".join(f"<b>{esc(q.flag.replace('_', ' '))}</b>: “{esc(quotes.shown(q.text))}”" for q in passed)
+        parts.append(f"<blockquote expandable><b>What the document says</b>\n{lines}</blockquote>")
     if flags:
-        lines.append("What I checked for:\n" + "\n".join(flag_line(k, p) for k, p in flags.items()))
+        checked = "\n".join(flag_line(k, p) for k, p in flags.items())
+        parts.append(f"<blockquote expandable><b>What I checked for</b>\n{checked}</blockquote>")
     if domain and (rating := await tosdr.lookup(domain)):
         grade = rating.grade or "unrated"
-        lines.append(f"ToS;DR community grade: <b>{grade}</b> — <a href=\"{rating.url}\">details</a>")
-    lines.append("<i>Information, not legal advice.</i>")
-    return "\n\n".join(lines)
+        parts.append(f"ToS;DR community grade: <b>{grade}</b> — <a href=\"{rating.url}\">details</a>")
+    parts.append(DISCLAIMER)
+    asked = any(p >= FOUND for p in flags.values())
+    rate = rated("verdict", quotes_ok=(bool(offered) and len(passed) == len(offered)) if asked else None) if card else None
+    return Outgoing(text="\n\n".join(parts), buttons=_explain_buttons(flags), rate=rate)
 
 
-async def check_url(cl: Clients, url: str) -> str:
+async def check_url(cl: Clients, url: str, on_stage: Stage = no_stage) -> Outgoing:
+    on_stage("Fetching the page…")
     text = await page_text(cl, url)
     host = (urlparse(url).hostname or url).removeprefix("www.")
-    return await verdict_card(cl, f"Terms at {host}", text, host)
+    return await verdict_card(cl, f"Terms at {host}", text, host, on_stage)
 
 
-async def intake_file(conn: sqlite3.Connection, cl: Clients, user: User, filename: str, content: bytes) -> str:
+async def intake_file(
+    conn: sqlite3.Connection, cl: Clients, user: User, filename: str, content: bytes, on_stage: Stage = no_stage
+) -> Outgoing:
     """A personal document: verdict card plus every dated obligation into that member's ledger."""
     if not cl.llama:
-        return "LlamaParse is not configured, so I can't read files yet."
+        return Outgoing(text="LlamaParse is not configured, so I can't read files yet.")
+    on_stage("Reading the document…")
     parsed = await parse.parse_bytes(cl.llama, filename, content)
     added: list[str] = []
+    on_stage("Finding deadlines…")
     try:
         doc = await parse.extract_deadlines(cl.llama, parsed.job_id)
         for d in doc.deadlines:
@@ -548,9 +652,10 @@ async def intake_file(conn: sqlite3.Connection, cl: Clients, user: User, filenam
     except Exception as exc:  # noqa: BLE001
         log.warning("extract failed for %s: %s", filename, exc)
         title = filename
-    card = await verdict_card(cl, title, parsed.markdown)
+    card = await verdict_card(cl, title, parsed.markdown, on_stage=on_stage)
     if added:
-        card += "\n\n<b>Deadlines</b>\n" + "\n".join(added)
+        deadlines = "\n\n<b>Deadlines</b>\n" + "\n".join(added)
+        card = card.model_copy(update={"text": card.text.replace(DISCLAIMER, deadlines.lstrip() + "\n\n" + DISCLAIMER)})
     return card
 
 
@@ -568,7 +673,7 @@ class TickResult(BaseModel):
     failed: list[str] = Field(default_factory=list)
     changes: int = 0
     nudges: int = 0
-    deliveries: dict[int, list[str]] = Field(default_factory=dict)  # user id -> messages (HTML)
+    deliveries: dict[int, list[Outgoing]] = Field(default_factory=dict)  # user id -> messages (HTML + buttons)
 
 
 async def tick(conn: sqlite3.Connection, cl: Clients) -> TickResult:
@@ -587,14 +692,14 @@ async def tick(conn: sqlite3.Connection, cl: Clients) -> TickResult:
         for change in changes:
             for user in subscribers(conn, svc.id):
                 report = await report_for(conn, cl, change, svc, user, vectors)
-                result.deliveries.setdefault(user.id, []).append(report.to_html())
+                result.deliveries.setdefault(user.id, []).append(alert(report, svc))
 
     due = ledger.due_for_nudge(conn)
     by_user: dict[int, list[str]] = {}
     for e in due:
         by_user.setdefault(e.user_id, []).append(f"⏰ <b>{e.due_on:%a %d %b}</b>: {esc(e.title)}")
     for user_id, lines in by_user.items():
-        result.deliveries.setdefault(user_id, []).append("<b>Coming up</b>\n" + "\n".join(lines))
+        result.deliveries.setdefault(user_id, []).append(Outgoing(text="<b>Coming up</b>\n" + "\n".join(lines)))
     result.nudges = len(due)
     ledger.mark_nudged(conn, [e.id for e in due])
     return result
@@ -602,7 +707,7 @@ async def tick(conn: sqlite3.Connection, cl: Clients) -> TickResult:
 
 # --- Agreed Wrapped ------------------------------------------------------------------------------
 
-async def wrapped(conn: sqlite3.Connection, cl: Clients, user: User) -> str:
+async def wrapped(conn: sqlite3.Connection, cl: Clients, user: User) -> Outgoing:
     """A member's year in accepted terms: material changes to the services *they* watch."""
     since = (datetime.now(UTC) - timedelta(days=365)).isoformat()
     stats = conn.execute(
@@ -614,16 +719,17 @@ async def wrapped(conn: sqlite3.Connection, cl: Clients, user: User) -> str:
         (user.id, since, settings.material_threshold),
     ).fetchall()
     if not stats:
-        return "Nothing material changed in the terms you accepted this year. Suspiciously quiet."
+        return Outgoing(text="Nothing material changed in the terms you accepted this year. Suspiciously quiet.")
     facts = "\n".join(
         f"- {r['service']}: {r['n']} material change(s) about {r['category'] or 'other'}, worst severity {judge.severity_label(r['worst'] or 0)} ({r['worst'] or 0:.1f}/3)"
         for r in stats
     )
     total = sum(r["n"] for r in stats)
-    body = facts
+    body, rate = facts, None
     if cl.ai:
         try:
-            body = await writer.wrapped(cl.ai, facts)
+            body, rate = await writer.wrapped(cl.ai, facts), rated("wrapped")
         except Exception as exc:  # noqa: BLE001
             log.warning("wrapped failed: %s", exc)
-    return f"<b>Agreed Wrapped {date.today():%Y}</b>\n{total} material changes you accepted by carrying on.\n\n{rich(body)}"
+    text = f"<b>Agreed Wrapped {date.today():%Y}</b>\n{total} material changes you accepted by carrying on.\n\n{rich(body)}"
+    return Outgoing(text=text, rate=rate)

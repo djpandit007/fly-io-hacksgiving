@@ -1,3 +1,5 @@
+import hashlib
+import inspect
 import json
 
 import httpx
@@ -74,3 +76,33 @@ def test_prompts_treat_given_text_as_data():
 
 def test_wrapped_prompt_has_formatting_rules():
     assert "**bold**" in writer.WRAPPED_SYSTEM and "No headings" in writer.WRAPPED_SYSTEM
+
+
+# --- Prompt versions --------------------------------------------------------------------------------
+
+# (version, fingerprint of the prompt's text). When a prompt changes, this test fails: bump the version
+# in writer.PROMPT_VERSIONS, then record the new version and fingerprint here.
+PROMPTS = {
+    "verdict": ("v2", "6d6bccdd7700b696"),
+    "alert": ("v1", "c15840c092977a5a"),
+    "overview": ("v1", "ccea434018f48d20"),
+    "wrapped": ("v1", "5fc7595b7b685aa5"),
+}
+
+
+def _fingerprint(kind: str) -> str:
+    parts = {
+        "verdict": [writer.SYSTEM, inspect.getsource(writer.verdict_prompt)],
+        "alert": [writer.SYSTEM, inspect.getsource(writer.summarise_change)],
+        "overview": [writer.SYSTEM, inspect.getsource(writer.watch_overview)],
+        "wrapped": [writer.WRAPPED_SYSTEM, inspect.getsource(writer.wrapped)],
+    }[kind]
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
+
+
+def test_prompt_changes_bump_their_version():
+    assert writer.PROMPT_VERSIONS.keys() == PROMPTS.keys()
+    for kind, (version, fingerprint) in PROMPTS.items():
+        assert (writer.PROMPT_VERSIONS[kind], _fingerprint(kind)) == (version, fingerprint), (
+            f"the {kind} prompt changed: bump writer.PROMPT_VERSIONS[{kind!r}] and update PROMPTS in this test"
+        )

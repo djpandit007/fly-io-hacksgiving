@@ -392,6 +392,23 @@ async def test_deliver_uses_telegram_for_chats_and_one_digest_for_email_only(con
 
 
 @respx.mock
+async def test_deliver_sends_buttons_to_telegram_and_only_text_by_email(conn, tg):
+    from app import notify
+    from app.outgoing import Outgoing
+
+    send = respx.post(f"{AM}/messages/send", name="send").mock(return_value=httpx.Response(200, json={}))
+    chat_member = users.join_member(conn, "join-code", chat_id=7)
+    email_member = users.join_member(conn, "join-code", email="judge@example.com")
+    out = Outgoing(text="<b>alert</b>", buttons=[[("🗑 Unwatch", "v1:u:1")]])
+    cl = agent.Clients()
+    await notify.deliver(conn, tg, cl, {chat_member.id: [out], email_member.id: [out]}, "Subject")
+    await cl.aclose()
+    assert tg.last(7)["buttons"] == [[("🗑 Unwatch", "v1:u:1")]]
+    body = json.loads(send.calls[0].request.content)
+    assert "**alert**" in body["text"] and "Unwatch" not in body["text"] and "v1:u" not in body["text"]
+
+
+@respx.mock
 async def test_locked_pending_address_stays_locked_across_new_join_emails(conn, tg):
     send = respx.post(f"{AM}/messages/send", name="send").mock(return_value=httpx.Response(200, json={}))
     mock_message(**{"from": "target@example.com", "subject": "join-code", "text": "x"})

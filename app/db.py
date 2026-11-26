@@ -78,7 +78,7 @@ def now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Version 2: members, per-member watchlists and deadlines, email dedupe, replayable verdicts.
 V2_MIGRATION = """
@@ -186,7 +186,32 @@ CREATE TABLE metric_usage (
 );
 """
 
-MIGRATIONS = {2: V2_MIGRATION, 3: V3_MIGRATION, 4: V4_MIGRATION}
+# Version 5: answer feedback, and the unwatches a member may undo (Undo restores only those).
+# Answer feedback: One row per rated answer, found by an unguessable token. Metadata only:
+# never the answer's text, a URL, or which member received or rated it (see app/feedback.py).
+V5_MIGRATION = """
+CREATE TABLE answers (
+    token          TEXT PRIMARY KEY,
+    kind           TEXT NOT NULL,                 -- verdict | alert | overview | wrapped
+    model          TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    change_id      INTEGER,                       -- the public terms change an alert or overview covers
+    quotes_ok      INTEGER,                       -- verdicts: 1 all clause quotes passed, 0 some dropped, NULL none asked
+    sent_at        TEXT NOT NULL,
+    vote           TEXT,                          -- up | down
+    reason         TEXT,                          -- wrong | unclear | not_useful
+    voted_at       TEXT
+);
+CREATE INDEX answers_sent ON answers(sent_at);
+CREATE TABLE unwatched (
+    user_id      INTEGER NOT NULL REFERENCES users(id),
+    service_id   INTEGER NOT NULL REFERENCES services(id),
+    unwatched_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, service_id)
+);
+"""
+
+MIGRATIONS = {2: V2_MIGRATION, 3: V3_MIGRATION, 4: V4_MIGRATION, 5: V5_MIGRATION}
 
 
 def backup_path(path: Path, version: int) -> Path:
