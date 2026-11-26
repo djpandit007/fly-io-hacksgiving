@@ -41,4 +41,4 @@
 ## 7. Integration check
 
 - [x] 7.1 Run `uv run pytest` and `uv run ruff check`; verify both pass
-- [ ] 7.2 Deploy to the Sprite, trigger the workflow with `workflow_dispatch`, then send `/stats` as owner; verify the job summary shows the run and `/stats` shows that run, at least one provider with a response time, and a cost line
+- [x] 7.2 Deploy to the Sprite, trigger the workflow with `workflow_dispatch`, then send `/stats` as owner; verify the job summary shows the run and `/stats` shows that run, at least one provider with a response time, and a cost line
