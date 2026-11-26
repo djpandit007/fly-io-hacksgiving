@@ -107,13 +107,18 @@ def list_sections(deps: AskDeps, service: str) -> list[str]:
     return [s.heading for s in _sections_of(deps, found)] if found else []
 
 
-def _section_text(deps: AskDeps, service: str, heading: str) -> str:
-    """The whole stored text of a watched service's section (duplicate headings joined), uncapped."""
+def _section_bodies(deps: AskDeps, service: str, heading: str) -> list[str]:
+    """The stored text of each of a watched service's sections with this heading, in document order."""
     found = _watched(deps, service)
     if not found:
-        return ""
+        return []
     wanted = heading.strip().casefold()
-    return "\n\n".join(s.body for s in _sections_of(deps, found) if s.heading.strip().casefold() == wanted)
+    return [s.body for s in _sections_of(deps, found) if s.heading.strip().casefold() == wanted]
+
+
+def _section_text(deps: AskDeps, service: str, heading: str) -> str:
+    """The whole stored text of a watched service's section (duplicate headings joined), uncapped."""
+    return "\n\n".join(_section_bodies(deps, service, heading))
 
 
 def _split(text: str, limit: int = MAX_SECTION_CHARS) -> list[str]:
@@ -204,7 +209,9 @@ def _attributed(deps: AskDeps, clause: Clause) -> Clause | None:
     """The clause relabelled from the stored row its quote came from, or None if the quote is not there."""
     if clause.source == "current":
         service = _watched(deps, clause.service)
-        if service is None or not contains(clause.quote, _section_text(deps, clause.service, clause.heading)):
+        # Each same-named section on its own: a quote across two of them is not text of the terms.
+        bodies = _section_bodies(deps, clause.service, clause.heading)
+        if service is None or not any(contains(clause.quote, body) for body in bodies):
             return None
         return clause.model_copy(update={"service": service.name})
     owned = _owned_change(deps, clause.change_id) if clause.change_id is not None else None
@@ -212,6 +219,9 @@ def _attributed(deps: AskDeps, clause: Clause) -> Clause | None:
         return None
     service, change = owned
     if not contains(clause.quote, change.after_text):  # removed wording is not the terms any more
+        return None
+    latest = _latest(deps, service)
+    if latest is None or not contains(clause.quote, latest[0]):  # nor is wording a later version dropped
         return None
     return clause.model_copy(update={"service": service.name, "heading": change.heading})
 

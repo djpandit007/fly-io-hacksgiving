@@ -260,6 +260,7 @@ async def _ask(conn: sqlite3.Connection, cl: Clients, tg: Telegram, user: User, 
         return "ok"
     async with progress.working(tg, chat, reply_to) as w:
         result = await ask.answer(conn, cl, user, question, on_stage=w.stage)
+        w.failed = result.outcome == "error"  # answer() reports failures instead of raising
     rate = (
         Answer(kind="ask", model=settings.agent_model, prompt_version=ask.PROMPT_VERSION, quotes_ok=True)
         if result.outcome in ASK_RATED else None

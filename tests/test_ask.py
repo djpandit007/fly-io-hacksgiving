@@ -203,7 +203,9 @@ async def test_happy_path(world, cl, jev):
     assert PAYMENT_QUOTE in _quote_block(result.html)
     assert "Spotify · Payments" in result.html
     taken = (datetime.now(UTC) - timedelta(days=10)).date()
-    assert f"<i>Spotify · Payments · in force since {taken.day} {taken:%b %Y}</i>" in result.html
+    # "as of": the date is when the document was last stored, not when this clause began.
+    assert f"<i>Spotify · Payments · as of {taken.day} {taken:%b %Y}</i>" in result.html
+    assert "in force since" not in result.html
     assert result.html.rstrip().endswith("<i>Information, not legal advice.</i>")
     assert stages == ["Finding the clauses…", "Checking them…", "Writing…", "Verifying…"]
     assert (calls.count("research"), calls.count("write"), calls.count("check")) == (1, 1, 1)
@@ -541,6 +543,10 @@ async def test_change_clause_is_labelled_from_the_change(world, cl, jev):
            VALUES (?, NULL, ?, ?, ?, 'Price changes', 'modified', 'old', ?, 0.9, 'Summary')""",
         (spotify, snap, _ts(3), _ts(3), "We may now raise the price at any time without notice."),
     ).lastrowid
+    conn.execute(  # the terms as they stand after that change
+        "INSERT INTO snapshots (service_id, taken_at, origin, sha, text) VALUES (?, ?, 'live', 'sha-after', ?)",
+        (spotify, _ts(3), "## Price changes\nWe may now raise the price at any time without notice.\n"),
+    )
     clause = Clause(service="Notion", heading="Made up", quote="We may now raise the price at any time",
                     source="change", change_id=cid)
     with models(research=Evidence(clauses=[clause]), write=Answer(summary="Yes.", cites=[1]), check=OK):
@@ -736,7 +742,7 @@ async def test_empty_summary_gives_quotes_only(world, cl, jev):
 
 def test_escaped_quote_block_fits_one_message():
     clauses = [Clause(service=f"Svc{i}", heading=f"Heading {i}", quote="&" * 400) for i in range(6)]
-    labels = [f"Svc{i} · Heading {i} · in force since 1 Jan 2026" for i in range(6)]
+    labels = [f"Svc{i} · Heading {i} · as of 1 Jan 2026" for i in range(6)]
     for html in (ask._render_quotes_only(clauses, labels),
                  ask._render_answer(Answer(summary="s", cites=list(range(1, 7))), clauses, labels)):
         block = re.search(r"<blockquote expandable>.*?</blockquote>", html, re.DOTALL).group(0)
@@ -808,7 +814,7 @@ def test_default_deadline():
 
 def _clauses(n: int, quote_chars: int = 400) -> tuple[list[Clause], list[str]]:
     clauses = [Clause(service=f"Svc{i}", heading=f"Heading {i}", quote="q" * quote_chars) for i in range(n)]
-    return clauses, [f"Svc{i} · Heading {i} · in force since 1 Jan 2026" for i in range(n)]
+    return clauses, [f"Svc{i} · Heading {i} · as of 1 Jan 2026" for i in range(n)]
 
 
 def test_quote_block_has_no_blank_line():
@@ -868,3 +874,24 @@ def test_summary_and_points_cannot_inject_blank_lines():
     assert "- First. Second.\n- Third. Fourth." in html
     summary, points = html.split("\n\n")[:2]
     assert summary == "Yes. With notice." and points.startswith("- First.")
+
+
+def test_markdown_from_the_writer_style_is_not_shown():
+    # The writer shares a system prompt that asks for **bold** and "- " bullets; the renderer adds its own.
+    clauses, labels = _clauses(1, 50)
+    ans = Answer(summary="**Yes**, with notice.", points=["- **Price:** may rise", "* Refunds: none", "  "], cites=[1])
+    html = ask._render_answer(ans, clauses, labels)
+    summary, points = html.split("\n\n")[:2]
+    assert summary == "Yes, with notice."
+    assert points == "- Price: may rise\n- Refunds: none"
+    assert "**" not in html and "- - " not in html
+    assert ask._answer_text(ans) == "Yes, with notice.\n- Price: may rise\n- Refunds: none"
+
+
+def test_verifier_checks_the_answer_as_cut_for_display():
+    # A condition past the cut must not reach the verifier, since the member will not see it.
+    tail = " only within 14 days"
+    ans = Answer(summary="s" * 3000, points=["p" * 1000 + tail], cites=[1])
+    text = ask._answer_text(ans)
+    assert tail.strip() not in text
+    assert "s" * (ask.MAX_SUMMARY_CHARS - 1) + "…" in text and "p" * (ask.MAX_POINT_CHARS - 1) + "…" in text

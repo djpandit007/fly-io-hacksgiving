@@ -217,7 +217,8 @@ def _label(clause: Clause, on: date | None, heading_chars: int | None = None) ->
     heading = clause.heading if heading_chars is None else _cut(clause.heading, heading_chars)
     when = ""
     if on is not None:
-        verb = "changed on" if clause.source == "change" else "in force since"
+        # A current clause's date is when its whole document was last stored, not when the clause began.
+        verb = "changed on" if clause.source == "change" else "as of"
         when = f" · {verb} {on.day} {on:%b %Y}"
     return f"{clause.service} · {heading}{when}"
 
@@ -234,9 +235,20 @@ def _numbered(clauses: list[Clause], labels: list[str]) -> str:
     )
 
 
+def _shown(ans: Answer) -> tuple[str, list[str]]:
+    """The summary and points exactly as the member will see them, before escaping.
+
+    The verifier checks this text, not the draft, so a cut can never drop a condition it approved.
+    """
+    summary = _cut(_plain(ans.summary), MAX_SUMMARY_CHARS)
+    points = [_cut(_plain(p), MAX_POINT_CHARS) for p in ans.points[:MAX_POINTS] if _plain(p).strip()]
+    return summary, points
+
+
 def _answer_text(ans: Answer) -> str:
     # Flattened and without tags, like the clauses: the draft cannot add a clause of its own.
-    return "\n".join([_tag_text(ans.summary), *(f"- {_tag_text(p)}" for p in ans.points[:MAX_POINTS])])
+    summary, points = _shown(ans)
+    return "\n".join([_tag_text(summary), *(f"- {_tag_text(p)}" for p in points)])
 
 
 # --- Rendering (everything from models or terms is escaped) -----------------------------------------
@@ -252,6 +264,17 @@ def _flat(text: str) -> str:
     that crosses a paragraph break passes verification, which ignores whitespace) would break its HTML.
     """
     return " ".join(text.split())
+
+
+_BULLET = re.compile(r"^\s*(?:[-*•]\s+)+")
+
+
+def _plain(text: str) -> str:
+    """Model text without the bold markers or leading bullet that the writer's shared style may add.
+
+    The renderer escapes the text and adds its own "- ", so either would otherwise show literally.
+    """
+    return _BULLET.sub("", text.replace("**", ""))
 
 
 def _cut(text: str, limit: int = MAX_QUOTE_CHARS) -> str:
@@ -292,8 +315,9 @@ def _cited(cites: list[int], count: int) -> list[int]:
 
 def _render_answer(ans: Answer, clauses: list[Clause], labels: list[str]) -> str:
     picked = _cited(ans.cites, len(clauses))
-    parts = [_esc(_cut(ans.summary, MAX_SUMMARY_CHARS))]
-    if points := [_cut(p, MAX_POINT_CHARS) for p in ans.points[:MAX_POINTS] if p.strip()]:
+    summary, points = _shown(ans)
+    parts = [_esc(summary)]
+    if points:
         parts.append("\n".join(f"- {_esc(p)}" for p in points))
     parts.append(_quotes([clauses[i] for i in picked], [labels[i] for i in picked]))
     parts.append(DISCLAIMER)

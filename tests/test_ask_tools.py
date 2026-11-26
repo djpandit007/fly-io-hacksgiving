@@ -52,6 +52,14 @@ def _change(conn, sid, snap, heading, before, after, material=0.9, summary="Summ
     ).lastrowid
 
 
+def _now_says(conn, sid, text, days_ago=2):
+    """A newer snapshot of the service holding `text`, as after a change to it."""
+    conn.execute(
+        "INSERT INTO snapshots (service_id, taken_at, origin, sha, text) VALUES (?, ?, 'live', ?, ?)",
+        (sid, _ts(days_ago), f"sha-{sid}-{days_ago}-{len(text)}", text),
+    )
+
+
 @pytest.fixture
 def world(tmp_path):
     conn = db.connect(tmp_path / "a.db")
@@ -161,6 +169,13 @@ def test_verified_keeps_real_quote_drops_invented(world):
     assert kept == [real]
 
 
+def test_verified_quote_must_sit_inside_one_of_the_same_named_sections(world):
+    within = Clause(service="Spotify", heading="Other", quote="Second other section says we may close idle accounts")
+    across = Clause(service="Spotify", heading="Other",
+                    quote="we keep logs for ninety days. Second other section says")
+    assert ask_tools.verified(world["mine"], [within, across]) == [within]
+
+
 def test_verified_change_clause_checks_change_text_and_ownership(world):
     conn = world["conn"]
     mine = _change(
@@ -171,6 +186,8 @@ def test_verified_change_clause_checks_change_text_and_ownership(world):
         conn, world["notion"], world["notion_snap"], "Payments",
         "Guests were free before", NOTION_CHANGE_QUOTE + " from now on",
     )
+    _now_says(conn, world["spotify"], SPOTIFY_TEXT + "## Disputes\nNew wording demands binding arbitration always\n")
+    _now_says(conn, world["notion"], NOTION_TEXT + "## Payments\n" + NOTION_CHANGE_QUOTE + " from now on\n")
     own_before = Clause(service="Spotify", heading="Disputes", quote="Old wording about the small claims court",
                         source="change", change_id=mine)
     own_after = Clause(service="Spotify", heading="Disputes", quote="New wording demands binding arbitration",
@@ -208,6 +225,7 @@ def test_verified_change_clause_takes_service_and_heading_from_the_change(world)
         world["conn"], world["notion"], world["notion_snap"], "Guest seats",
         "Guests were free before", NOTION_CHANGE_QUOTE + " from now on",
     )
+    _now_says(world["conn"], world["notion"], NOTION_TEXT + "## Guest seats\n" + NOTION_CHANGE_QUOTE + " from now on\n")
     mislabelled = Clause(
         service="Spotify", heading="Disputes", quote=NOTION_CHANGE_QUOTE, source="change", change_id=cid
     )
@@ -239,6 +257,21 @@ def test_change_clause_quote_spanning_old_and_new_text_is_dropped(world):
     spanning = Clause(service="Spotify", heading="Disputes", quote="about the small claims court New wording demands",
                       source="change", change_id=cid)
     assert ask_tools.verified(world["mine"], [spanning]) == []
+
+
+def test_change_clause_wording_dropped_by_a_later_version_is_dropped(world):
+    conn = world["conn"]
+    cid = _change(
+        conn, world["spotify"], world["spotify_snap"], "Refunds",
+        "No refunds", "Refunds are given within fourteen days of purchase", days_ago=5,
+    )
+    clause = Clause(service="Spotify", heading="Refunds", quote="Refunds are given within fourteen days",
+                    source="change", change_id=cid)
+    _now_says(conn, world["spotify"], SPOTIFY_TEXT + "## Refunds\nRefunds are given within fourteen days of purchase\n",
+              days_ago=4)
+    assert ask_tools.verified(world["mine"], [clause]) == [clause]
+    _now_says(conn, world["spotify"], SPOTIFY_TEXT + "## Refunds\nNo refunds are given.\n", days_ago=1)
+    assert ask_tools.verified(world["mine"], [clause]) == []
 
 
 # --- Long sections, snippets and change lists --------------------------------------------------------

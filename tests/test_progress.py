@@ -59,6 +59,13 @@ async def test_failure_reacts_sad_and_reraises():
     assert [c[3] for c in tg.called("react")] == ["👀", "😢"]
 
 
+async def test_reported_failure_reacts_sad_without_raising():
+    tg = FakeTelegram()
+    async with progress.working(tg, 1, 7) as w:
+        w.failed = True
+    assert [c[3] for c in tg.called("react")] == ["👀", "😢"]
+
+
 async def test_draft_error_falls_back_to_typing():
     tg = FlakyTelegram(drafts=False)
     async with progress.working(tg, 1, 7, refresh=0.01, typing_every=0.01) as w:

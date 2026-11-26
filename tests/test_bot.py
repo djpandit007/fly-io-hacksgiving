@@ -843,6 +843,17 @@ async def test_ask_exception_reacts_sad(conn, tg, monkeypatch, caplog):
     assert counts(conn, "command")[("/ask", "error")] == 1
 
 
+async def test_ask_error_outcome_reacts_sad(conn, tg, monkeypatch):
+    # answer() reports a failure as an outcome rather than raising; the reaction must still say so.
+    from app import ask
+
+    fake_ask(monkeypatch, outcome="error", html=ask.ERROR)
+    await say(conn, tg, 2, "/start join-code")
+    await say(conn, tg, 2, "/ask can spotify raise prices?", message_id=93)
+    assert [c[3] for c in tg.called("react")] == ["👀", "😢"]
+    assert tg.to(2)[-1] == ask.ERROR
+
+
 async def test_ask_answers_are_rated_and_store_no_text_or_member(conn, tg, monkeypatch):
     fake_ask(monkeypatch, outcome="answered", html="<b>Yes</b>.")
     await say(conn, tg, 4242, "/start join-code", name="Secret Name")

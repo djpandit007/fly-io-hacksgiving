@@ -7,7 +7,7 @@
 On entry: a 👀 reaction on their message and a "Thinking..." draft. While working: the draft shows the
 current stage and is re-sent before Telegram drops it (~30 s), with the elapsed time once it runs long.
 If drafts are refused, Telegram's "typing…" status is repeated instead. On exit: 👌 (Telegram doesn't
-offer ✅ as a reaction) or 😢 when the work raised. Send the result *after* the block, so no refresh can
+offer ✅ as a reaction) or 😢 when the work raised or set `w.failed`. Send the result *after* the block, so no refresh can
 redraw the draft after the reply.
 
 Progress is cosmetic: every Telegram error here is logged and ignored, never raised.
@@ -60,6 +60,7 @@ class Working:
         self.started = time.monotonic()
         self.current = ""
         self.drafts_ok = True
+        self.failed = False  # set by work that reports its failure instead of raising
         self._lock = asyncio.Lock()
         self._dirty = False
         self._sender: asyncio.Task | None = None
@@ -126,4 +127,4 @@ async def working(
             await loop
         await w.stop()
         if message_id:
-            await _quiet(tg.react(chat_id, message_id, DONE if ok else FAILED), "reaction")
+            await _quiet(tg.react(chat_id, message_id, DONE if ok and not w.failed else FAILED), "reaction")
