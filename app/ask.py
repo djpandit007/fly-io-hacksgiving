@@ -37,7 +37,7 @@ from app.llm import model_for
 log = logging.getLogger(__name__)
 
 Stage = Callable[[str], None]
-Outcome = Literal["answered", "not_found", "not_watching", "quotes_only", "no_services", "error"]
+Outcome = Literal["answered", "not_found", "not_watching", "capped", "quotes_only", "no_services", "error"]
 
 MAX_QUESTION_CHARS = 500
 RESEARCH_REQUEST_LIMIT = 12
@@ -56,6 +56,9 @@ NO_SERVICES = "You're not watching any services yet. Send /watch &lt;name&gt; fi
 NOT_FOUND = (
     "I couldn't find that in the terms you watch. "
     "I read each service's terms page only, not its privacy policy or other policies."
+)
+NO_CLEAR_ANSWER = (
+    "I couldn't find a clear answer in the terms you watch. Try asking about one service and one topic at a time."
 )
 NOT_WATCHING = "You're not watching {name}, so I haven't read its terms. Watch it and ask again."
 ERROR = "I couldn't answer that just now. Please try again."
@@ -308,6 +311,17 @@ def _done(outcome: Outcome, text: str, service: str = "") -> AskResult:
     return AskResult(html=text, outcome=outcome, service=service)
 
 
+def _names_watched(name: str, watched: set[str]) -> bool:
+    """Whether `name`, or for a domain its main label (stored names come from it), is a watched service."""
+    if name.casefold() in watched:
+        return True
+    if "." not in name:
+        return False
+    host = name.casefold().removeprefix("www.")
+    labels = host.split(".")
+    return len(labels) >= 2 and labels[-2] in watched
+
+
 def _not_found(deps: AskDeps, evidence: Evidence) -> AskResult:
     """No clause survived: say the member does not watch the service asked about, if that is why.
 
@@ -315,7 +329,7 @@ def _not_found(deps: AskDeps, evidence: Evidence) -> AskResult:
     """
     name = evidence.unwatched_service.strip()
     watched = {s.casefold() for s in ask_tools.list_services(deps)}
-    if taps.SERVICE_NAME.fullmatch(name) and name.casefold() not in watched:
+    if taps.SERVICE_NAME.fullmatch(name) and not _names_watched(name, watched):
         return _done("not_watching", NOT_WATCHING.format(name=_esc(name)), service=name)
     return _done("not_found", NOT_FOUND)
 
@@ -374,9 +388,9 @@ async def _answer(cl: Clients, deps: AskDeps, question: str, on_stage: Stage, fo
             model=model_for(cl.ai, settings.agent_model),
             usage_limits=UsageLimits(request_limit=RESEARCH_REQUEST_LIMIT),
         )
-    except UsageLimitExceeded as exc:  # it searched until the cap: the terms do not cover the question
+    except UsageLimitExceeded as exc:  # the cap can come mid-way through a long section: not a clear "no"
         log.warning("ask research failed: %s", type(exc).__name__)
-        return _done("not_found", NOT_FOUND)
+        return _done("capped", NO_CLEAR_ANSWER)
     except Exception as exc:  # noqa: BLE001 — no evidence means no answer
         log.warning("ask research failed: %s", type(exc).__name__)
         return _done("error", ERROR)

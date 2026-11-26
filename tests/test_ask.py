@@ -307,8 +307,8 @@ async def test_researcher_error_gives_error_outcome(world, cl, jev):
     assert calls.count("write") == 0
 
 
-async def test_research_request_limit_gives_not_found(world, cl, jev, caplog):
-    # A researcher that keeps searching has found nothing the terms say: tell the member so.
+async def test_research_request_limit_gives_capped(world, cl, jev, caplog):
+    # The cap can be hit mid-way through a long section, so it is not a confident "not in the terms".
     caplog.set_level(logging.DEBUG)
     requests = 0
 
@@ -319,8 +319,12 @@ async def test_research_request_limit_gives_not_found(world, cl, jev, caplog):
 
     with models(research=forever) as calls:
         result = await ask.answer(world["conn"], cl, world["me"], "Does Spotify share zebra-question data?")
-    assert result.outcome == "not_found"
-    assert result.html == NOT_FOUND_COPY
+    assert result.outcome == "capped"
+    assert result.html == (
+        "I couldn't find a clear answer in the terms you watch. Try asking about one service and one topic at a time."
+    )
+    assert result.html == ask.NO_CLEAR_ANSWER
+    assert result.service == ""
     assert ask.RESEARCH_REQUEST_LIMIT == 12
     assert requests == 12
     assert calls.count("write") == 0 and jev.calls == 0
@@ -378,6 +382,16 @@ async def test_watched_service_is_never_reported_as_unwatched(world, cl, jev):
     with models(research=Evidence(answerable=False, unwatched_service="spotify")):
         result = await ask.answer(world["conn"], cl, world["me"], QUESTION)  # watches Spotify
     assert (result.outcome, result.service) == ("not_found", "")
+
+
+async def test_watched_service_named_by_domain_is_not_reported_as_unwatched(world, cl, jev):
+    for name in ("spotify.com", "www.Spotify.com", "open.spotify.com"):
+        with models(research=Evidence(answerable=False, unwatched_service=name)):
+            result = await ask.answer(world["conn"], cl, world["me"], QUESTION)  # watches Spotify
+        assert (result.outcome, result.service) == ("not_found", ""), name
+    with models(research=Evidence(answerable=False, unwatched_service="notion.so")):
+        result = await ask.answer(world["conn"], cl, world["me"], QUESTION)
+    assert (result.outcome, result.service) == ("not_watching", "notion.so")
 
 
 async def test_unwatched_service_after_irrelevant_clauses_gives_not_watching(world, cl, jev):

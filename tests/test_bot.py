@@ -862,11 +862,18 @@ async def test_ask_answers_are_rated_and_store_no_text_or_member(conn, tg, monke
 
 async def test_unanswered_asks_are_not_rated(conn, tg, monkeypatch):
     await say(conn, tg, 2, "/start join-code")
-    for outcome in ("not_found", "no_services", "error"):
+    from tests.test_metrics import counts
+
+    for outcome in ("not_found", "no_services", "error", "capped"):
         fake_ask(monkeypatch, outcome=outcome, html="Nothing.")
         await say(conn, tg, 2, "/ask can spotify raise prices?")
         assert tg.last(2)["buttons"] is None
+    # not_watching carries only the watch offer, never a rating row
+    fake_ask(monkeypatch, outcome="not_watching", html=NOT_WATCHING_SPOTIFY, service="Spotify")
+    await say(conn, tg, 2, "/ask can spotify raise prices?")
+    assert [[data for _, data in row] for row in tg.last(2)["buttons"]] == [["v1:w:Spotify", "v1:n"]]
     assert conn.execute("SELECT COUNT(*) FROM answers").fetchone()[0] == 0
+    assert counts(conn, "command")[("/ask", "capped")] == 1
 
 
 NOT_WATCHING_SPOTIFY = "You're not watching Spotify, so I haven't read its terms. Watch it and ask again."
