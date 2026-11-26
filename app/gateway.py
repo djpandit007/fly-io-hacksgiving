@@ -51,7 +51,10 @@ class Gateway:
             base_url=provider.base_url + "/", headers=headers, timeout=timeout, transport=transport
         )
 
-    async def request(self, method: str, path: str, *, retries: int = 3, **kwargs: Any) -> httpx.Response:
+    async def request(
+        self, method: str, path: str, *, retries: int = 3, log_body: bool = True, **kwargs: Any
+    ) -> httpx.Response:
+        """`log_body=False` for requests whose error bodies may echo a member's question or quotes."""
         delay = 1.0
         for attempt in range(retries + 1):
             started = time.monotonic()
@@ -62,8 +65,10 @@ class Gateway:
                 raise
             if resp.status_code not in RETRY_STATUSES or attempt == retries:
                 self._count("error" if resp.is_error else "ok", started)
-                if resp.is_error:
+                if resp.is_error and log_body:
                     log.warning("%s %s %s -> %s: %s", self.provider.name, method, path, resp.status_code, resp.text[:500])
+                elif resp.is_error:
+                    log.warning("%s %s %s -> %s", self.provider.name, method, path, resp.status_code)
                 resp.raise_for_status()
                 return resp
             self._count("retried", started)

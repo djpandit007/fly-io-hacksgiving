@@ -1,4 +1,6 @@
+import httpx
 import pytest
+import respx
 from pydantic import ValidationError
 
 from app.judge import QUESTIONS, SystemOneResponse, parse_verdict, severity_label
@@ -82,6 +84,75 @@ def test_change_too_large_to_show_fails_closed():
 )
 def test_severity_label(score, label):
     assert severity_label(score) == label
+
+
+# --- relevance of candidate clauses to a member's question ---------------------------------------
+
+RELEVANCE_URL = "https://opencode.test/inference/systemone/v1/systemone"
+
+
+def _relevance_gateway():
+    from app.config import Provider
+    from app.gateway import Gateway
+
+    return Gateway(Provider(name="opencode", base_url="https://opencode.test/inference"))
+
+
+def _noul_response(**scores):
+    return {
+        "model": "jev-1.14.0",
+        "answers": {key: {"type": "noul", "noul": p} for key, p in scores.items()},
+        "usage": {"input_tokens": 10, "output_tokens": 2},
+    }
+
+
+@respx.mock
+async def test_relevance_scores_in_order():
+    import json
+
+    from app.judge import relevance
+
+    route = respx.post(RELEVANCE_URL).mock(return_value=httpx.Response(200, json=_noul_response(c1=0.9, c2=0.1)))
+    scores = await relevance(_relevance_gateway(), "Can I get a refund?", ["Refunds are issued within 30 days.", "Contact us."])
+    assert scores == [0.9, 0.1]
+    assert route.call_count == 1
+    body = json.loads(route.calls.last.request.content)
+    assert body["state"]["question"] == "Can I get a refund?"
+    assert body["state"]["clause_1"] == "Refunds are issued within 30 days."
+    assert list(body["questions"]) == ["c1", "c2"]
+    assert all(q["type"] == "noul" for q in body["questions"].values())
+
+
+@respx.mock
+async def test_relevance_no_clauses_makes_no_call():
+    from app.judge import relevance
+
+    route = respx.post(RELEVANCE_URL).mock(return_value=httpx.Response(200, json=_noul_response()))
+    assert await relevance(_relevance_gateway(), "Anything?", []) == []
+    assert route.call_count == 0
+
+
+@respx.mock
+async def test_relevance_missing_answer_scores_zero():
+    from app.judge import relevance
+
+    respx.post(RELEVANCE_URL).mock(return_value=httpx.Response(200, json=_noul_response(c1=0.7)))
+    assert await relevance(_relevance_gateway(), "Q?", ["a", "b"]) == [0.7, 0.0]
+
+@respx.mock
+async def test_relevance_error_body_is_not_logged(caplog):
+    import logging
+
+    from app.judge import relevance
+
+    caplog.set_level(logging.DEBUG)
+    respx.post(RELEVANCE_URL).mock(
+        return_value=httpx.Response(400, json={"error": "state.question: zebra-question is invalid"})
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        await relevance(_relevance_gateway(), "zebra-question?", ["a clause"])
+    assert "zebra-question" not in caplog.text
+    assert "-> 400" in caplog.text
 
 
 def test_every_red_flag_has_a_short_explanation():

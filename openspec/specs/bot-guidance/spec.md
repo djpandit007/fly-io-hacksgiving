@@ -68,7 +68,9 @@ SHALL open a reply field with an example placeholder. A member's reply to that p
 ### Requirement: Suggestions for free text
 The system SHALL answer free text that looks like one service name or domain with "Watch <name>?" and Yes
 and No buttons. Text that looks like a service name is a single token of letters, digits, dots or hyphens.
-Other free text SHALL get a short pointer to the help buttons instead of the full help.
+Other free text that is a question (it contains "?" or starts with a question word such as "what", "can"
+or "what's") SHALL be answered from the terms the member watches, as if sent with `/ask`. Any other
+free text SHALL get a short pointer to the help buttons, which mentions `/ask`, instead of the full help.
 
 #### Scenario: Member types a service name
 - **WHEN** a member sends "notion"
@@ -82,9 +84,13 @@ Other free text SHALL get a short pointer to the help buttons instead of the ful
 - **WHEN** a member sends a service name too long to fit in a button's data
 - **THEN** the bot replies with the short pointer to help and no suggestion
 
-#### Scenario: Member types a sentence
-- **WHEN** a member sends "what does this bot do?"
-- **THEN** the bot replies with a short pointer and the help buttons, not the full help text
+#### Scenario: Member types a question
+- **WHEN** a member sends "can spotify raise my price"
+- **THEN** the bot answers it from the terms the member watches, as if they had sent `/ask can spotify raise my price`
+
+#### Scenario: Member types a statement
+- **WHEN** a member sends "my password is hunter2"
+- **THEN** the bot replies with a short pointer and the help buttons, not the full help text, and the text is not sent to any AI provider
 
 ### Requirement: Strangers stay unserved
 The guidance in this capability SHALL NOT change who is served. A non-member's messages other than `/start`

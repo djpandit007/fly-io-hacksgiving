@@ -12,12 +12,23 @@ import sqlite3
 from collections.abc import Callable
 from urllib.parse import urlparse
 
-from app import agent, feedback, judge, ledger, mail, metrics, progress, taps, users
+from app import (
+    agent,
+    ask,
+    feedback,
+    judge,
+    ledger,
+    mail,
+    metrics,
+    progress,
+    taps,
+    users,
+)
 from app.agent import Clients
 from app.config import settings
 from app.db import User
 from app.discover import find_terms_url
-from app.outgoing import Outgoing, as_outgoing
+from app.outgoing import Answer, Outgoing, as_outgoing
 from app.telegram import Buttons, Incoming, Telegram, esc, redact
 
 log = logging.getLogger(__name__)
@@ -29,6 +40,7 @@ URL = re.compile(r"https?://\S+")
 MEMBER_MENU = [
     ("watch", "Watch a service's terms"),
     ("list", "What you're watching"),
+    ("ask", "Ask about your terms"),
     ("deadlines", "Your opt-out windows, renewals and calendar link"),
     ("wrapped", "Your year in accepted terms"),
     ("help", "What I can do"),
@@ -59,7 +71,10 @@ HOW_CHECKS_WORK = (
 )
 WATCH_PROMPT = "Which service should I watch? Reply with a name, a domain or a link to its terms."
 WATCH_PLACEHOLDER = "e.g. notion or youtube.com"
-POINTER = "Not sure what you mean. Try one of these, or send me a link or a document to check."
+POINTER = (
+    "Not sure what you mean. Try one of these, or send me a link or a document to check. "
+    "To ask about the terms you watch, use /ask."
+)
 # Single words that are conversation, not service names.
 NOT_SERVICES = frozenset({"hi", "hello", "hey", "thanks", "thank", "thx", "ok", "okay", "yes", "no", "help", "start"})
 
@@ -67,6 +82,7 @@ HELP = """<b>Fine Print</b> watches the fine print you've agreed to.
 
 /watch <i>url, domain or name</i> — watch a service's terms (shows the past year's changes)
 /list — what you're watching, with community grades
+/ask <i>question</i> — ask about the terms you watch, answered with quotes from them
 /deadlines — your opt-out windows, renewals and notice periods, plus your calendar link
 /wrapped — your year in accepted terms
 {email}
@@ -84,10 +100,18 @@ WELCOME = """Welcome to <b>Fine Print</b>, {name}! 👋
 
 I read the terms you agree to and tell you when something that matters changes.
 {forward}
-Documents and links you send are read by AI providers on the operator's accounts; I keep only the
-deadlines I extract and your watchlist. I give information, not legal advice."""
+Documents, links and questions you send are read by AI providers on the operator's accounts; I keep
+only the deadlines I extract and your watchlist. I give information, not legal advice."""
 
 PRIVATE = "This is a private Fine Print bot: {hint}."
+
+ASK_USAGE = (
+    "Ask me about the terms you watch, for example: /ask can Spotify raise my price?\n"
+    "Your questions are read by the AI providers and not stored."
+)
+# Never the exception's text: it could carry the member's question.
+ASK_FAILED = "Something went wrong answering that. Please try again."
+ASK_RATED = frozenset({"answered", "quotes_only"})
 
 
 def _email_help() -> str:
@@ -141,9 +165,14 @@ async def _ask_which_service(tg: Telegram, chat: int) -> None:
     await tg.send(chat, WATCH_PROMPT, markup={"force_reply": True, "input_field_placeholder": WATCH_PLACEHOLDER})
 
 
-async def _suggest_or_point(tg: Telegram, chat: int, text: str) -> None:
+def _suggested(text: str) -> str | None:
+    """A service name worth offering to watch, if the text is one (greetings are not)."""
     name = taps.suggestion(text)
-    if name and name.lower() not in NOT_SERVICES:
+    return name if name and name.lower() not in NOT_SERVICES else None
+
+
+async def _suggest_or_point(tg: Telegram, chat: int, text: str) -> None:
+    if name := _suggested(text):
         label = _name_for(name) if "." in name else name.capitalize()
         await tg.send(chat, f"Watch <b>{esc(label)}</b>?",
                       buttons=[[("Yes, watch it", taps.build("w", name)), ("No", taps.build("n"))]])
@@ -213,6 +242,32 @@ async def _reply(
         rows = out.buttons + (buttons or []) if i == len(outgoing) - 1 else out.buttons
         rows = feedback.with_rating(conn, rows, out.rate)
         await tg.send(chat, out.text, reply_to=reply_to if i == 0 else None, buttons=rows or None)
+
+
+def _watch_offer(name: str) -> Buttons | None:
+    """The "Watch X?" suggestion's buttons for a service an answer named, or none if they can't carry it."""
+    try:
+        return [[("Yes, watch it", taps.build("w", name)), ("No", taps.build("n"))]]
+    except ValueError:
+        return None
+
+
+async def _ask(conn: sqlite3.Connection, cl: Clients, tg: Telegram, user: User, question: str, reply_to: int | None) -> str:
+    """Answer a question about the member's watched terms; returns the metric outcome."""
+    chat = user.chat_id
+    if not question:
+        await tg.send(chat, ASK_USAGE)
+        return "ok"
+    async with progress.working(tg, chat, reply_to) as w:
+        result = await ask.answer(conn, cl, user, question, on_stage=w.stage)
+        w.failed = result.outcome == "error"  # answer() reports failures instead of raising
+    rate = (
+        Answer(kind="ask", model=settings.agent_model, prompt_version=ask.PROMPT_VERSION, quotes_ok=True)
+        if result.outcome in ASK_RATED else None
+    )
+    buttons = _watch_offer(result.service) if result.outcome == "not_watching" else None
+    await _reply(conn, tg, chat, [Outgoing(text=result.html, rate=rate)], reply_to, buttons)
+    return "ok" if result.outcome == "answered" else result.outcome
 
 
 async def _list(conn: sqlite3.Connection, tg: Telegram, user: User) -> None:
@@ -474,12 +529,18 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
     chat = msg.chat_id
     if msg.reply_to_text == WATCH_PROMPT and msg.text.strip() and not msg.text.startswith("/") and not msg.file_id:
         cmd, arg = "/watch", msg.text.strip()
+    question = ""
     if msg.file_id:
         used = "check:file"
     elif cmd in COMMANDS:
         used = cmd
+        question = arg if cmd == "/ask" else ""
+    elif URL.search(msg.text):
+        used = "check:url"
+    elif _suggested(msg.text) is None and ask.is_question(msg.text):
+        used, question = "/ask", msg.text.strip()
     else:
-        used = "check:url" if URL.search(msg.text) else "other"
+        used = "other"
     outcome = "ok"
 
     try:
@@ -495,6 +556,8 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
             await _send_help(tg, user)
         elif cmd == "/watch":
             await _watch(conn, cl, tg, user, arg, msg.message_id)
+        elif used == "/ask":
+            outcome = await _ask(conn, cl, tg, user, question, msg.message_id)
         elif cmd == "/list":
             await _list(conn, tg, user)
         elif cmd == "/deadlines":
@@ -525,7 +588,11 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
             await _suggest_or_point(tg, chat, msg.text)
     except Exception as exc:  # noqa: BLE001
         outcome = "error"
-        log.error("handling message failed: %s", redact(f"{type(exc).__name__}: {exc}"))
-        await tg.send(chat, f"Something went wrong: {esc(redact(str(exc))[:300])}")
+        if used == "/ask":  # the exception's text could carry the question: log and show neither
+            log.error("answering a question failed: %s", type(exc).__name__)
+            await tg.send(chat, ASK_FAILED)
+        else:
+            log.error("handling message failed: %s", redact(f"{type(exc).__name__}: {exc}"))
+            await tg.send(chat, f"Something went wrong: {esc(redact(str(exc))[:300])}")
     finally:
         metrics.count(conn, "command", used, outcome)

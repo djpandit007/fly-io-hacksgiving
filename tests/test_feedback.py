@@ -104,3 +104,9 @@ def test_summary_is_empty_without_votes(conn):
 def test_issued_tokens_always_fit_the_tap_grammar(conn):
     for _ in range(50):
         assert taps.parse(taps.build("fb", feedback.issue(conn, VERDICT), "u"))
+
+
+def test_ask_answers_have_their_own_summary_line(conn):
+    t = feedback.issue(conn, Answer(kind="ask", model="m", prompt_version="v1", quotes_ok=True))
+    feedback.vote(conn, t, "up")
+    assert feedback.summary(conn, 7) == ["• /ask answers — 1 rated, 100% 👍 (by prompt: v1 100% of 1)"]

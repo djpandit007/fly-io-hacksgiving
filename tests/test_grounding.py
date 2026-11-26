@@ -1,0 +1,53 @@
+from app.grounding import contains
+
+DOC = "Fine Print may change the price of a Paid Plan at any time, with notice."
+
+
+def test_exact_quote_found():
+    assert contains("change the price of a Paid Plan at any time", DOC)
+
+
+def test_ignores_case_line_breaks_and_markdown():
+    document = "We may **change**\nthe price of a | Paid Plan |"
+    assert contains("we may change the price of a paid plan", document)
+
+
+def test_ignores_curly_quotes_and_dashes():
+    document = "You grant us a licence – worldwide — to use “your content” and the user’s data."
+    quote = 'a licence - worldwide - to use "your content" and the user\'s data'
+    assert contains(quote, document)
+    assert contains("a licence – worldwide — to use “your content”", quote + " and more")
+
+
+def test_invented_quote_rejected():
+    assert not contains("we will never raise the price of any plan", DOC)
+
+
+def test_too_short_rejected():
+    assert "Paid Plan" in DOC
+    assert not contains("at any time", DOC)  # 3 words
+    assert not contains("price of a Paid Plan", "the price of a Paid Plan x")  # 5 words but 20 chars
+
+
+def test_empty_inputs():
+    assert not contains("", "x")
+    assert not contains("a b c d e f g h", "")
+
+
+def test_quote_must_start_on_word_boundary():
+    assert not contains("limited liability is excluded for all users", "unlimited liability is excluded for all users")
+
+
+def test_quote_must_end_on_word_boundary():
+    assert not contains("you may cancel your subscription", "you may cancel your subscriptions at any time today")
+
+
+def test_table_cells_do_not_fuse():
+    document = "Refunds|None are offered after thirty days"
+    assert contains("refunds none are offered after thirty days", document)
+    assert not contains("refundsnone are offered after thirty days", document)
+
+
+def test_shares_quote_normalisation_with_verdict_cards():
+    document = "We may change\u00a0the price \u2011 of a \uff30aid Plan at any time."
+    assert contains("we may change the price - of a paid plan", document)

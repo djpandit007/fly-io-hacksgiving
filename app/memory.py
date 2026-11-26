@@ -66,9 +66,12 @@ def _index_path(suffix: str) -> str:
     return f"indexes/{settings.pinecone_index}/{suffix}"
 
 
-async def embed(gw: Gateway, text: str, input_type: Literal["passage", "query"]) -> list[float]:
+async def embed(
+    gw: Gateway, text: str, input_type: Literal["passage", "query"], *, log_body: bool = True
+) -> list[float]:
     data = await gw.post(
         "embed",
+        log_body=log_body,
         json={
             "model": EMBED_MODEL,
             "parameters": {"input_type": input_type, "truncate": "END"},
@@ -99,17 +102,21 @@ async def similar(
     top_k: int = 5,
     min_score: float = 0.5,
     vector: list[float] | None = None,
+    *,
+    log_body: bool = True,
 ) -> list[Precedent]:
     """Clauses similar to `text`, only from `services` (the asking member's own watchlist).
 
-    Pass `vector` to reuse an embedding when the same change is reported to several members.
+    Pass `vector` to reuse an embedding when the same change is reported to several members, and
+    `log_body=False` when an error body could echo text a member typed or was shown.
     """
     candidates = sorted(set(services) - {exclude_service})
     if not candidates:
         return []
-    values = vector or await embed(gw, text, "query")
+    values = vector or await embed(gw, text, "query", log_body=log_body)
     data = await gw.post(
         _index_path("query"),
+        log_body=log_body,
         json={
             "namespace": settings.pinecone_namespace,
             "vector": values,

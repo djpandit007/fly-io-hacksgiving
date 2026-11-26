@@ -27,7 +27,10 @@ log = logging.getLogger(__name__)
 RETENTION_DAYS = 90
 Vote = Literal["up", "down"]
 REASON_LABELS = {"wrong": "Wrong", "unclear": "Unclear", "not_useful": "Not useful"}
-KIND_LABELS = {"verdict": "Verdict cards", "alert": "Change alerts", "overview": "/watch overviews", "wrapped": "/wrapped"}
+KIND_LABELS = {
+    "verdict": "Verdict cards", "alert": "Change alerts", "overview": "/watch overviews", "wrapped": "/wrapped",
+    "ask": "/ask answers",
+}
 
 
 def issue(conn: sqlite3.Connection, answer: Answer) -> str | None:
