@@ -1,4 +1,6 @@
-from app.telegram import parse_update
+import pytest
+
+from app.telegram import parse_update, rich
 
 
 def test_text_message():
@@ -27,3 +29,13 @@ def test_rich_converts_light_markdown_safely():
 
     out = rich("SIGN <now>\n- **Auto-renewal:** bills `monthly` & more")
     assert out == "SIGN &lt;now&gt;\n• <b>Auto-renewal:</b> bills <code>monthly</code> &amp; more"
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("`a**b` c**", "<code>a**b</code> c**"),
+    ("**x `y** z`", "**x <code>y** z</code>"),
+    ("`**x**`", "<code>**x**</code>"),
+    ("**a `c` b**", "<b>a <code>c</code> b</b>"),
+])
+def test_rich_never_misnests_tags(text, expected):
+    assert rich(text) == expected

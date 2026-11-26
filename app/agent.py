@@ -11,6 +11,7 @@ watch it. Everything shown to a member is rendered for that member.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import re
@@ -47,6 +48,8 @@ log = logging.getLogger(__name__)
 
 MAX_SECTIONS_PER_VERSION = 20
 MIN_HTML_CHARS = 400  # below this the page is probably rendered by JavaScript
+AI_TIMEOUT = 180.0  # seconds per OpenCode request
+OVERVIEW_TIMEOUT = 45.0  # a /watch reply never waits longer than this for its overview
 
 
 class Clients:
@@ -59,7 +62,8 @@ class Clients:
         # One OpenCode gateway serves both the judge (Jev) and the writer (chat model). It has a
         # default direct URL, so it counts as configured only with a key or a gateway URL.
         oc = settings.opencode
-        self.ai = Gateway(oc) if oc.key.get_secret_value() or "sprites.dev" in oc.base_url else None
+        # Reasoning models can think for minutes on the larger writer budgets.
+        self.ai = Gateway(oc, timeout=AI_TIMEOUT) if oc.key.get_secret_value() or "sprites.dev" in oc.base_url else None
         self.pinecone = make(settings.pinecone)
         self.exa = make(settings.exa)
         self.mail = make(settings.agentmail) if settings.agentmail_inbox_id else None
@@ -471,7 +475,9 @@ async def overview(cl: Clients, svc: Service, reports: list[ChangeReport]) -> st
     if not reports or not cl.ai:
         return ""
     try:
-        text = await writer.watch_overview(cl.ai, svc.name, "\n".join(_overview_fact(r) for r in reports))
+        text = await asyncio.wait_for(
+            writer.watch_overview(cl.ai, svc.name, "\n".join(_overview_fact(r) for r in reports)), OVERVIEW_TIMEOUT
+        )
     except Exception as exc:  # noqa: BLE001 — the cards are still worth sending
         log.warning("watch overview failed for %s: %s", svc.name, exc)
         return ""

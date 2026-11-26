@@ -331,3 +331,21 @@ async def test_overview_tolerates_unjudged_reports(conn):
     assert await agent.overview(cl, svc, [report(1, verdict=False)]) == "ok"
     await cl.aclose()
     assert "unjudged" in json.loads(route.calls[0].request.content)["messages"][1]["content"]
+
+
+def test_ai_gateway_allows_long_thinking():
+    cl = agent.Clients()
+    assert cl.ai.client.timeout.read >= 180
+
+
+async def test_slow_overview_is_dropped(conn, monkeypatch):
+    async def slow(gw, service, facts):
+        await asyncio.sleep(1)
+        return "too late"
+
+    monkeypatch.setattr(agent.writer, "watch_overview", slow)
+    monkeypatch.setattr(agent, "OVERVIEW_TIMEOUT", 0.05)
+    svc = agent.add_service(conn, "Svc", "https://svc.test/terms")
+    cl = agent.Clients()
+    assert await agent.overview(cl, svc, [report(1)]) == ""
+    await cl.aclose()

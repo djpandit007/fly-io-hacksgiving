@@ -24,9 +24,17 @@ _CODE = re.compile(r"`([^`]+)`")
 
 def rich(text: str) -> str:
     """Model output (light Markdown) to Telegram HTML: escape first, then bold, code and bullets."""
-    out = esc(text)
+    # Code spans are set aside first so bold never opens inside one and closes outside it: Telegram
+    # rejects a whole message whose tags are mis-nested.
+    spans: list[str] = []
+
+    def hold(m: re.Match[str]) -> str:
+        spans.append(f"<code>{m.group(1)}</code>")
+        return f"\x00{len(spans) - 1}\x00"
+
+    out = _CODE.sub(hold, esc(text))
     out = _BOLD.sub(lambda m: f"<b>{m.group(1) or m.group(2)}</b>", out)
-    out = _CODE.sub(r"<code>\1</code>", out)
+    out = re.sub(r"\x00(\d+)\x00", lambda m: spans[int(m.group(1))], out)
     return re.sub(r"^\s*[-*]\s+", "• ", out, flags=re.MULTILINE)
 
 
