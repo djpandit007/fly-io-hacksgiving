@@ -89,3 +89,39 @@ async def test_long_work_shows_elapsed_time(monkeypatch):
         w.stage("Reading the document…")
         await asyncio.sleep(0)
     assert any(c[2].startswith("Reading the document… · 4") and c[2].endswith("s") for c in tg.called("draft"))
+
+
+class SlowTelegram(FakeTelegram):
+    """Drafts take a while, so quick stages overlap with requests in flight."""
+
+    def __init__(self):
+        super().__init__()
+        self.in_flight = self.most_in_flight = 0
+
+    async def draft(self, chat, draft_id, text=""):
+        self.in_flight += 1
+        self.most_in_flight = max(self.most_in_flight, self.in_flight)
+        await asyncio.sleep(0.01)
+        await super().draft(chat, draft_id, text)
+        self.in_flight -= 1
+
+
+async def test_quick_stages_send_one_at_a_time_and_end_on_the_newest():
+    tg = SlowTelegram()
+    async with progress.working(tg, 1, 7) as w:
+        for stage in ("Finding the terms page…", "Collecting the changes that matter…", "Writing the overview…"):
+            w.stage(stage)
+        await asyncio.sleep(0.1)
+    drafts = [c[2] for c in tg.called("draft")]
+    assert tg.most_in_flight == 1
+    assert drafts[-1] == "Writing the overview…"
+    assert len(drafts) <= 3  # the empty placeholder, then coalesced stages: no duplicates per stage
+
+
+async def test_drafts_failing_during_quick_stages_fall_back_once():
+    tg = FlakyTelegram(drafts=False)
+    async with progress.working(tg, 1, 7) as w:
+        w.stage("a")
+        w.stage("b")
+        await asyncio.sleep(0.02)
+    assert not tg.called("draft") and 1 <= len(tg.called("typing")) <= 2

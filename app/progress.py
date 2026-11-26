@@ -60,7 +60,9 @@ class Working:
         self.started = time.monotonic()
         self.current = ""
         self.drafts_ok = True
-        self._pending: set[asyncio.Task] = set()
+        self._lock = asyncio.Lock()
+        self._dirty = False
+        self._sender: asyncio.Task | None = None
 
     def text(self) -> str:
         elapsed = int(time.monotonic() - self.started)
@@ -69,18 +71,29 @@ class Working:
         return f"{self.current or 'Still working…'} · {elapsed}s"
 
     def stage(self, text: str) -> None:
-        """Name the current step; the draft updates straight away."""
+        """Name the current step; the draft updates straight away.
+
+        Updates are coalesced: one sender task at a time, which always ends having sent the newest text,
+        so quick successive stages never race each other to Telegram or arrive out of order.
+        """
         self.current = text
-        task = asyncio.get_running_loop().create_task(self.show())
-        self._pending.add(task)
-        task.add_done_callback(self._pending.discard)
+        self._dirty = True
+        if self._sender is None or self._sender.done():
+            self._sender = asyncio.get_running_loop().create_task(self._send_latest())
+
+    async def _send_latest(self) -> None:
+        while self._dirty:
+            self._dirty = False
+            await self.show()
 
     async def show(self) -> None:
-        if self.drafts_ok:
-            if await _quiet(self.tg.draft(self.chat_id, self.draft_id, self.text()), "draft"):
-                return
-            self.drafts_ok = False
-        await _quiet(self.tg.typing(self.chat_id), "typing")
+        """Send the current text (or "typing…" once drafts have failed). One request in flight at a time."""
+        async with self._lock:
+            if self.drafts_ok:
+                if await _quiet(self.tg.draft(self.chat_id, self.draft_id, self.text()), "draft"):
+                    return
+                self.drafts_ok = False
+            await _quiet(self.tg.typing(self.chat_id), "typing")
 
     async def keep_alive(self) -> None:
         while True:
@@ -88,11 +101,10 @@ class Working:
             await self.show()
 
     async def stop(self) -> None:
-        for task in list(self._pending):
-            task.cancel()
-        for task in list(self._pending):
+        if self._sender is not None:
+            self._sender.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await task
+                await self._sender
 
 
 @contextlib.asynccontextmanager

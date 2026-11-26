@@ -7,6 +7,7 @@ bot still checks at tap time that whatever a tap acts on belongs to the member w
     v1:w:<name>                yes, watch this          v1:r:<service id>   undo an unwatch
     v1:n                       no thanks                v1:fx:<flag key>    explain a red flag
     v1:fb:<token>:<u|d>        rate an answer           v1:fr:<token>:<w|c|n>  reason for a 👎
+    v1:k                       an answer already rated (inert)
 """
 
 from __future__ import annotations
@@ -19,8 +20,11 @@ from app.telegram import CALLBACK_DATA_MAX
 
 VERSION = "v1"
 HELP_TOPICS = frozenset({"list", "dl", "watch", "how"})
-# One token that could be a service name or domain. 58 characters keeps "v1:w:<name>" within 64 bytes.
-SERVICE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{1,57}")
+# One token that could be a service name or domain: dot-separated labels of letters, digits and inner
+# hyphens (no leading, trailing or doubled dots or hyphens at label edges), 2-58 characters in all.
+# 58 keeps "v1:w:<name>" within 64 bytes.
+_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+SERVICE_NAME = re.compile(rf"(?=.{{2,58}}$){_LABEL}(?:\.{_LABEL})*")
 TOKEN = re.compile(r"[A-Za-z0-9_-]{12}")
 VOTES = {"u": "up", "d": "down"}
 REASONS = {"w": "wrong", "c": "unclear", "n": "not_useful"}
@@ -42,7 +46,7 @@ def _valid(tap: Tap) -> bool:
             return tap.arg in HELP_TOPICS and not tap.extra
         case "w":
             return bool(SERVICE_NAME.fullmatch(tap.arg)) and not tap.extra
-        case "n":
+        case "n" | "k":
             return not tap.arg and not tap.extra
         case "u" | "r":
             return tap.arg.isascii() and tap.arg.isdigit() and len(tap.arg) <= 12 and not tap.extra

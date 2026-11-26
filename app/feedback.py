@@ -54,9 +54,9 @@ def reason_row(token: str) -> list[tuple[str, str]]:
     return [(REASON_LABELS[why], taps.build("fr", token, code)) for code, why in taps.REASONS.items()]
 
 
-def thanks_row(token: str, vote: Vote) -> list[tuple[str, str]]:
-    """After a vote: the same data, so a second tap records the same vote and changes nothing."""
-    return [("✓ Thanks", taps.build("fb", token, "u" if vote == "up" else "d"))]
+def thanks_row() -> list[tuple[str, str]]:
+    """After a vote: an inert button. Tapping it only says the rating is noted; nothing is recorded or edited."""
+    return [("✓ Thanks", taps.build("k"))]
 
 
 def with_rating(conn: sqlite3.Connection, buttons: Buttons, answer: Answer | None) -> Buttons:

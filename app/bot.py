@@ -343,14 +343,15 @@ class _Tap:
                     placed = True
             if out:
                 rows.append(out)
-        if self.msg.message_id and placed:
+        if self.msg.message_id and placed and rows != self.msg.buttons:  # Telegram refuses no-op edits
             try:
                 await self.tg.edit_buttons(self.msg.chat_id, self.msg.message_id, rows)
             except Exception as exc:  # noqa: BLE001
                 log.info("updating buttons failed: %s", type(exc).__name__)
 
     async def drop_buttons(self) -> None:
-        if self.msg.message_id:
+        """Remove the tapped message's buttons, unless it has none (already removed, or too old to tell)."""
+        if self.msg.message_id and self.msg.buttons:
             try:
                 await self.tg.edit_buttons(self.msg.chat_id, self.msg.message_id, None)
             except Exception as exc:  # noqa: BLE001
@@ -358,7 +359,7 @@ class _Tap:
 
 
 def _rating_of(token: str) -> Callable[[tuple[str, str]], bool]:
-    """Matches an answer's rating buttons (👍/👎, reasons or Thanks) by its token."""
+    """Matches an answer's rating buttons (👍/👎 or reasons) by its token."""
     return lambda button: button[1].startswith((f"v1:fb:{token}:", f"v1:fr:{token}:"))
 
 
@@ -417,7 +418,7 @@ async def _dispatch(conn: sqlite3.Connection, cl: Clients, tg: Telegram, t: _Tap
                 return
             if vote == "up":
                 await t.answer("Thanks!")
-                await t.replace(_rating_of(token), feedback.thanks_row(token, "up"))
+                await t.replace(_rating_of(token), feedback.thanks_row())
             else:
                 await t.answer("Thanks. What was wrong? (optional)")
                 await t.replace(_rating_of(token), feedback.reason_row(token))
@@ -426,7 +427,9 @@ async def _dispatch(conn: sqlite3.Connection, cl: Clients, tg: Telegram, t: _Tap
                 await t.answer("This answer can't be rated any more.")
                 return
             await t.answer("Thanks, noted.")
-            await t.replace(_rating_of(token), feedback.thanks_row(token, "down"))
+            await t.replace(_rating_of(token), feedback.thanks_row())
+        case taps.Tap("k"):
+            await t.answer("Already noted. Thanks!")
         case taps.Tap("fx", flag):
             await t.answer(judge.FLAG_EXPLANATIONS[flag], alert=True)
         case taps.Tap("u", service_id):

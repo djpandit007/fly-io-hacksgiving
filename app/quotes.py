@@ -26,7 +26,7 @@ _TYPOGRAPHY = str.maketrans({
 })
 # Markdown that parsed documents carry and quoted prose doesn't: emphasis, code, headings, quotes, tables.
 _MARKUP = re.compile(r"[*_`#>|]")
-_EDGES = "\"' .…"
+_EDGES = "\"' .…“”‘’«»"  # also the quote marks the card adds around a quote itself
 
 
 class Quote(NamedTuple):
