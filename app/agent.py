@@ -50,6 +50,10 @@ MAX_SECTIONS_PER_VERSION = 20
 MIN_HTML_CHARS = 400  # below this the page is probably rendered by JavaScript
 AI_TIMEOUT = 180.0  # seconds per OpenCode request
 OVERVIEW_TIMEOUT = 45.0  # a /watch reply never waits longer than this for its overview
+# Overviews depend only on the changes (not the member), so each set is written once and shared.
+# Keyed by the facts themselves: an edited summary or a deadline that has passed gives a new key.
+OVERVIEW_CACHE: dict[tuple[int, str], str] = {}
+OVERVIEW_CACHE_SIZE = 256
 
 
 class Clients:
@@ -86,7 +90,7 @@ def flag_line(key: str, p: float) -> str:
     if p >= 0.7:
         return f"🔴 Found ({p:.0%} sure): {name}"
     if p >= 0.3:
-        return f"🟡 Unclear ({p:.0%} sure): {name}"
+        return f"🟡 Unclear ({p:.0%} likely): {name}"
     return f"🟢 Not found ({1 - p:.0%} sure): {name}"
 
 
@@ -474,14 +478,18 @@ async def overview(cl: Clients, svc: Service, reports: list[ChangeReport]) -> st
     """A written roll-up of a service's past changes (Telegram HTML), or "" when it can't be had."""
     if not reports or not cl.ai:
         return ""
+    facts = "\n".join(_overview_fact(r) for r in reports)
+    if cached := OVERVIEW_CACHE.get((svc.id, facts)):
+        return cached
     try:
-        text = await asyncio.wait_for(
-            writer.watch_overview(cl.ai, svc.name, "\n".join(_overview_fact(r) for r in reports)), OVERVIEW_TIMEOUT
-        )
+        text = await asyncio.wait_for(writer.watch_overview(cl.ai, svc.name, facts), OVERVIEW_TIMEOUT)
     except Exception as exc:  # noqa: BLE001 — the cards are still worth sending
         log.warning("watch overview failed for %s: %s", svc.name, exc)
         return ""
-    return rich(text)
+    if len(OVERVIEW_CACHE) >= OVERVIEW_CACHE_SIZE:
+        OVERVIEW_CACHE.clear()
+    OVERVIEW_CACHE[(svc.id, facts)] = rich(text)
+    return OVERVIEW_CACHE[(svc.id, facts)]
 
 
 async def watch_messages(cl: Clients, svc: Service, reports: list[ChangeReport]) -> list[str]:

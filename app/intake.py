@@ -163,9 +163,10 @@ async def _terms_update(conn: sqlite3.Connection, cl: Clients, tg: Sender | None
                 (cards if watcher.id == user.id else fan_out.setdefault(watcher.id, [])).append(report.to_html())
         await deliver(conn, tg, cl, fan_out, f"Fine Print: {svc.name} changed its terms")
     else:
-        if summary := await agent.overview(cl, svc, past):
+        shown = past[-3:]
+        if summary := await agent.overview(cl, svc, shown):  # describe only the cards the email shows
             cards.append(summary)
-        cards += [r.to_html() for r in past[-3:]] or ["No material changes in the past year. I'll check daily."]
+        cards += [r.to_html() for r in shown] or ["No material changes in the past year. I'll check daily."]
     return cards
 
 

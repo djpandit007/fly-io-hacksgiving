@@ -77,7 +77,8 @@ def test_change_too_large_to_show_fails_closed():
 
 @pytest.mark.parametrize(
     "score,label",
-    [(0, "Cosmetic"), (1.49, "Minor"), (1.5, "Worth knowing"), (2.6, "Major"), (3, "Major"), (3.4, "Major")],
+    [(0, "Cosmetic"), (0.5, "Minor"), (1.49, "Minor"), (1.5, "Worth knowing"), (2.5, "Major"), (2.6, "Major"),
+     (3, "Major"), (3.4, "Major")],
 )
 def test_severity_label(score, label):
     assert severity_label(score) == label

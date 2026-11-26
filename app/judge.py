@@ -44,7 +44,8 @@ SEVERITY_LABELS = ["Cosmetic", "Minor", "Worth knowing", "Major"]
 
 
 def severity_label(score: float) -> str:
-    return SEVERITY_LABELS[min(max(round(score), 0), len(SEVERITY_LABELS) - 1)]
+    # Halves round up (2.5 is Major); round() would send them to the even neighbour.
+    return SEVERITY_LABELS[min(max(int(score + 0.5), 0), len(SEVERITY_LABELS) - 1)]
 
 
 QUESTIONS: dict[str, dict[str, Any]] = {

@@ -1,6 +1,8 @@
 """Telegram conversation: claiming, joining, strangers, owner-only commands and member isolation."""
 
+import httpx
 import pytest
+import respx
 
 from app import agent, bot, db, ledger, users
 from app.telegram import Incoming
@@ -165,4 +167,47 @@ async def test_watch_with_no_changes_says_so(conn, tg, monkeypatch):
 
     monkeypatch.setattr(agent, "subscribe", fake_subscribe)
     await bot.handle(conn, SimpleNamespace(ai=None), tg, Incoming(chat_id=2, name="A", text="/watch https://svc.test/terms"))
+    assert "No material changes" in tg.to(2)[-1]
+
+
+CHAT = "https://opencode.test/inference/openai/v1/chat/completions"
+
+
+@respx.mock
+async def test_watch_reply_leads_with_the_overview(conn, tg, monkeypatch):
+    from datetime import UTC, datetime
+
+    respx.post(CHAT).mock(return_value=httpx.Response(200, json={
+        "choices": [{"message": {"content": "The big one: arbitration."}, "finish_reason": "stop"}]}))
+    await say(conn, tg, 2, "/start join-code")
+    svc = agent.add_service(conn, "Svc", "https://svc.test/terms")
+    reports = [agent.ChangeReport(change_id=i, service="Svc", heading=f"Heading {i}", kind="modified",
+                                  effective_at=datetime(2026, 3, i, tzinfo=UTC), verdict=None,
+                                  summary="s", redline="r") for i in (1, 2)]
+
+    async def fake_subscribe(conn_, cl, user, name, url):
+        return svc, reports
+
+    monkeypatch.setattr(agent, "subscribe", fake_subscribe)
+    cl = agent.Clients()
+    await bot.handle(conn, cl, tg, Incoming(chat_id=2, name="A", text="/watch https://svc.test/terms"))
+    await cl.aclose()
+    reply = tg.to(2)[-1]
+    assert reply.index("The big one: arbitration.") < reply.index("Heading 1")
+
+
+@respx.mock
+async def test_watch_with_no_changes_makes_no_overview_call(conn, tg, monkeypatch):
+    route = respx.post(CHAT).mock(return_value=httpx.Response(200, json={"choices": []}))
+    await say(conn, tg, 2, "/start join-code")
+    svc = agent.add_service(conn, "Svc", "https://svc.test/terms")
+
+    async def fake_subscribe(conn_, cl, user, name, url):
+        return svc, []
+
+    monkeypatch.setattr(agent, "subscribe", fake_subscribe)
+    cl = agent.Clients()
+    await bot.handle(conn, cl, tg, Incoming(chat_id=2, name="A", text="/watch https://svc.test/terms"))
+    await cl.aclose()
+    assert not route.called
     assert "No material changes" in tg.to(2)[-1]

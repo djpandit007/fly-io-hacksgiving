@@ -458,3 +458,32 @@ def test_update_subject_matches_plurals_and_word_forms(subject):
 
 def test_update_subject_ignores_ordinary_mail():
     assert not intake.UPDATE_SUBJECT.search("Your order has shipped")
+
+
+async def test_email_overview_covers_only_the_cards_shown(conn, member, monkeypatch):
+    svc = agent.add_service(conn, "Svc", "https://svc.test/terms")
+    past = [agent.ChangeReport(change_id=i, service="Svc", heading=f"H{i}", kind="modified",
+                               effective_at=datetime(2026, 3, i, tzinfo=UTC), verdict=None, summary="s", redline="r")
+            for i in range(1, 6)]
+    seen = []
+
+    async def fake_find(query, cl=None, client=None):
+        return "https://svc.test/terms"
+
+    async def fake_subscribe(conn_, cl, user, name, url):
+        return svc, past
+
+    async def no_fresh(conn_, cl, s):
+        return []
+
+    async def spy_overview(cl, s, reports):
+        seen.append([r.heading for r in reports])
+        return "OVERVIEW"
+
+    monkeypatch.setattr(intake, "find_terms_url", fake_find)
+    monkeypatch.setattr(agent, "subscribe", fake_subscribe)
+    monkeypatch.setattr(agent, "check_service", no_fresh)
+    monkeypatch.setattr(agent, "overview", spy_overview)
+    cards = await intake._terms_update(conn, agent.Clients(), None, member, "svc.test")
+    assert seen == [["H3", "H4", "H5"]]
+    assert cards[1] == "OVERVIEW" and len(cards) == 5  # header, overview, the 3 cards it describes

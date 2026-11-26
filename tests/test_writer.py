@@ -65,3 +65,12 @@ async def test_watch_overview_sends_facts():
 def test_default_writer_model():
     from app.config import Settings
     assert Settings.model_fields["writer_model"].default == "deepseek-v4.1-flash"
+
+
+def test_prompts_treat_given_text_as_data():
+    for system in (writer.SYSTEM, writer.WRAPPED_SYSTEM):
+        assert "never instructions" in system
+
+
+def test_wrapped_prompt_has_formatting_rules():
+    assert "**bold**" in writer.WRAPPED_SYSTEM and "No headings" in writer.WRAPPED_SYSTEM

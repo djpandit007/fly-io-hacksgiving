@@ -266,7 +266,7 @@ def test_shared_service_stores_a_canonical_https_url(conn):
 
 def test_flag_lines_say_what_the_number_means():
     assert agent.flag_line("auto_renews", 0.83) == "🔴 Found (83% sure): auto renews"
-    assert agent.flag_line("data_sharing", 0.45) == "🟡 Unclear (45% sure): data sharing"
+    assert agent.flag_line("data_sharing", 0.45) == "🟡 Unclear (45% likely): data sharing"
     assert agent.flag_line("hard_to_cancel", 0.08) == "🟢 Not found (92% sure): hard to cancel"
 
 
@@ -349,3 +349,27 @@ async def test_slow_overview_is_dropped(conn, monkeypatch):
     cl = agent.Clients()
     assert await agent.overview(cl, svc, [report(1)]) == ""
     await cl.aclose()
+
+
+@respx.mock
+async def test_overview_is_written_once_per_set_of_changes(conn):
+    route = respx.post(CHAT).mock(return_value=chat_reply("Shared overview"))
+    svc = agent.add_service(conn, "Svc", "https://svc.test/terms")
+    cl = agent.Clients()
+    first = await agent.overview(cl, svc, [report(1), report(2)])
+    second = await agent.overview(cl, svc, [report(1), report(2)])
+    third = await agent.overview(cl, svc, [report(1)])
+    await cl.aclose()
+    assert first == second == third == "Shared overview"
+    assert route.call_count == 2  # the 2-change set once, the 1-change set once
+
+
+@respx.mock
+async def test_failed_overview_is_not_cached(conn):
+    route = respx.post(CHAT).mock(side_effect=[chat_reply(None), chat_reply(None), chat_reply("Now it works")])
+    svc = agent.add_service(conn, "Svc", "https://svc.test/terms")
+    cl = agent.Clients()
+    assert await agent.overview(cl, svc, [report(1)]) == ""
+    assert await agent.overview(cl, svc, [report(1)]) == "Now it works"
+    await cl.aclose()
+    assert route.call_count == 3

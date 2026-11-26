@@ -21,3 +21,16 @@ os.environ.setdefault("FP_AGENTMAIL_BASE", "https://agentmail.test")
 os.environ.setdefault("FP_AGENTMAIL_INBOX_ID", "inbox_1")
 os.environ.setdefault("FP_AGENTMAIL_ADDRESS", "fineprint@agentmail.to")
 os.environ.setdefault("FP_AGENTMAIL_WEBHOOK_SECRET", "whsec_dGVzdC1zZWNyZXQta2V5LWZvci1zdml4")  # base64("test-secret-key-for-svix")
+
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _fresh_overview_cache():
+    """Overviews are cached per process; each test starts without another test's overview."""
+    from app import agent
+
+    agent.OVERVIEW_CACHE.clear()
+    yield
+    agent.OVERVIEW_CACHE.clear()
