@@ -35,9 +35,9 @@
 ## 6. Deploy and live verification
 
 - [x] 6.1 Deploy to the Sprite and confirm the v2 migration ran (backup present, `PRAGMA user_version` = 2) and `/health` is OK. The owner re-claims and sees the previously watched service.
-- [ ] 6.2 Live multi-user check: a second Telegram account joins with the join code; both `/watch youtube.com` (the second gets instant replay); `/watch notion` resolves via Exa; each calendar URL shows only its own deadlines; `/members` lists both.
-- [ ] 6.3 Live email check: link and verify the owner's address; forward a real "we updated our terms" email and a PDF and receive verdicts in Telegram and by email; an email-only member joins via a join-code subject; mail from an unknown sender gets no reply.
-- [ ] 6.4 Run the GitHub tick workflow and confirm each member receives only their own messages and the logs show no errors. Then commit and push.
+- [x] 6.2 Live multi-user check: a second Telegram account joins with the join code; both `/watch youtube.com` (the second gets instant replay); `/watch notion` resolves via Exa; each calendar URL shows only its own deadlines; `/members` lists both.
+- [x] 6.3 Live email check: link and verify the owner's address; forward a real "we updated our terms" email and a PDF and receive verdicts in Telegram and by email; an email-only member joins via a join-code subject; mail from an unknown sender gets no reply.
+- [x] 6.4 Run the GitHub tick workflow and confirm each member receives only their own messages and the logs show no errors. Then commit and push.
 
 ## Workflow follow-up
 
