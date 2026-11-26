@@ -1,0 +1,26 @@
+# Runs the test suite on every pull request (and on main after a merge). Branch protection on main
+# requires the "tests" check to pass before a pull request can be merged.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --locked --python 3.12
+      - name: Run tests
+        run: uv run pytest -q
