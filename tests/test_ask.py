@@ -385,7 +385,7 @@ async def test_watched_service_is_never_reported_as_unwatched(world, cl, jev):
 
 
 async def test_watched_service_named_by_domain_is_not_reported_as_unwatched(world, cl, jev):
-    for name in ("spotify.com", "www.Spotify.com", "open.spotify.com"):
+    for name in ("spotify.com", "www.Spotify.com", "open.spotify.com", "spotify.co.uk", "music.spotify.com.au"):
         with models(research=Evidence(answerable=False, unwatched_service=name)):
             result = await ask.answer(world["conn"], cl, world["me"], QUESTION)  # watches Spotify
         assert (result.outcome, result.service) == ("not_found", ""), name

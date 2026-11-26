@@ -312,14 +312,13 @@ def _done(outcome: Outcome, text: str, service: str = "") -> AskResult:
 
 
 def _names_watched(name: str, watched: set[str]) -> bool:
-    """Whether `name`, or for a domain its main label (stored names come from it), is a watched service."""
-    if name.casefold() in watched:
-        return True
-    if "." not in name:
-        return False
-    host = name.casefold().removeprefix("www.")
-    labels = host.split(".")
-    return len(labels) >= 2 and labels[-2] in watched
+    """Whether `name`, or for a domain any of its labels, is a watched service (`watched` is casefolded).
+
+    Stored names come from a domain's main label, which may sit anywhere (spotify.co.uk). Erring
+    towards "watched" only turns a watch offer into the plain not-found reply.
+    """
+    name = name.casefold()
+    return name in watched or any(label in watched for label in name.split("."))
 
 
 def _not_found(deps: AskDeps, evidence: Evidence) -> AskResult:
