@@ -131,3 +131,38 @@ def test_sender_name_is_parsed():
     msg = parse_update({"update_id": 1, "message": {"message_id": 1, "chat": {"id": 5},
                         "from": {"id": 5, "first_name": "Ada", "last_name": "L", "username": "ada"}, "text": "hi"}})
     assert msg.name == "Ada L (@ada)"
+
+
+async def test_watch_sends_one_reply(conn, tg, monkeypatch):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    await say(conn, tg, 2, "/start join-code")
+    svc = agent.add_service(conn, "Svc", "https://svc.test/terms")
+    reports = [agent.ChangeReport(change_id=i, service="Svc", heading=f"Heading {i}", kind="modified",
+                                  effective_at=datetime(2026, 3, i, tzinfo=UTC), verdict=None,
+                                  summary="s", redline="r") for i in (1, 2, 3)]
+
+    async def fake_subscribe(conn_, cl, user, name, url):
+        return svc, reports
+
+    monkeypatch.setattr(agent, "subscribe", fake_subscribe)
+    before = len(tg.to(2))
+    await bot.handle(conn, SimpleNamespace(ai=None), tg, Incoming(chat_id=2, name="A", text="/watch https://svc.test/terms"))
+    sent = tg.to(2)[before:]
+    assert len(sent) == 2 and sent[0].startswith("Watching")
+    assert all(f"Heading {i}" in sent[1] for i in (1, 2, 3))
+
+
+async def test_watch_with_no_changes_says_so(conn, tg, monkeypatch):
+    from types import SimpleNamespace
+
+    await say(conn, tg, 2, "/start join-code")
+    svc = agent.add_service(conn, "Svc", "https://svc.test/terms")
+
+    async def fake_subscribe(conn_, cl, user, name, url):
+        return svc, []
+
+    monkeypatch.setattr(agent, "subscribe", fake_subscribe)
+    await bot.handle(conn, SimpleNamespace(ai=None), tg, Incoming(chat_id=2, name="A", text="/watch https://svc.test/terms"))
+    assert "No material changes" in tg.to(2)[-1]

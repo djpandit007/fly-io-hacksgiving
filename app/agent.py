@@ -30,7 +30,7 @@ from app.judge import Verdict
 from app.locks import locks
 from app.memory import Precedent
 from app.netguard import BlockedURL
-from app.telegram import esc, rich
+from app.telegram import MAX_LEN, esc, rich
 from app.watch import (
     SectionChange,
     diff,
@@ -439,6 +439,51 @@ async def subscribe(
     vectors: dict[int, list[float]] = {}
     reports = [await report_for(conn, cl, c, svc, user, vectors) for c in past_material_changes(conn, svc.id)]
     return svc, reports
+
+
+def pack(parts: list[str], limit: int = MAX_LEN, sep: str = "\n\n") -> list[str]:
+    """Join parts into as few messages as fit within limit, never splitting a part.
+
+    Telegram.send splits over-long text by characters, which can cut an HTML tag in half; packing at
+    part boundaries avoids that. A part longer than limit gets a message of its own.
+    """
+    out: list[str] = []
+    for part in parts:
+        if out and len(out[-1]) + len(sep) + len(part) <= limit:
+            out[-1] += sep + part
+        else:
+            out.append(part)
+    return out
+
+
+def _overview_fact(r: ChangeReport) -> str:
+    v = r.verdict
+    fields = [
+        f"{r.effective_at:%d %b %Y}", r.heading or "terms", v.category if v else "unjudged",
+        judge.severity_label(v.severity) if v else "—", FAVOURS_TEXT[v.favours] if v else "—", r.summary,
+    ]
+    line = "- " + " · ".join(" ".join(f.split()) for f in fields)
+    return line + (f" · opt-out by {r.deadline:%d %b %Y}" if r.deadline else "")
+
+
+async def overview(cl: Clients, svc: Service, reports: list[ChangeReport]) -> str:
+    """A written roll-up of a service's past changes (Telegram HTML), or "" when it can't be had."""
+    if not reports or not cl.ai:
+        return ""
+    try:
+        text = await writer.watch_overview(cl.ai, svc.name, "\n".join(_overview_fact(r) for r in reports))
+    except Exception as exc:  # noqa: BLE001 — the cards are still worth sending
+        log.warning("watch overview failed for %s: %s", svc.name, exc)
+        return ""
+    return rich(text)
+
+
+async def watch_messages(cl: Clients, svc: Service, reports: list[ChangeReport]) -> list[str]:
+    """One /watch reply: header, overview, then every change card, packed into as few messages as fit."""
+    n = len(reports)
+    header = f"<b>{esc(svc.name)}</b> — past year ({n} change{'s' if n != 1 else ''})"
+    summary = await overview(cl, svc, reports)
+    return pack([header, *([summary] if summary else []), *(r.to_html() for r in reports)])
 
 
 # --- Before you agree ----------------------------------------------------------------------------

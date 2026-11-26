@@ -276,3 +276,58 @@ def test_change_badge_uses_words_and_number():
                            effective_at=datetime(2026, 3, 4, tzinfo=UTC), verdict=v, summary="x", redline="x")
     assert "data · Major (2.6/3) · favours the company" in r.to_html()
     assert "unjudged" in r.model_copy(update={"verdict": None}).to_html()
+
+
+def test_pack_keeps_cards_whole():
+    out = agent.pack(["a" * 1500] * 5, limit=4000)
+    assert len(out) == 3 and all(len(m) <= 4000 for m in out) and "".join(out).count("a") == 7500
+
+
+def test_pack_gives_an_oversized_card_its_own_message():
+    assert agent.pack(["x", "y" * 5000, "z"], limit=4000) == ["x", "y" * 5000, "z"]
+
+
+def report(i, verdict=True, heading=None):
+    v = Verdict(material=0.9, category="arbitration", opt_out=0.1, favours="company", severity=2.6) if verdict else None
+    return agent.ChangeReport(change_id=i, service="Svc", heading=heading or f"Section {i}", kind="modified",
+                              effective_at=datetime(2026, 3, i, tzinfo=UTC), verdict=v, summary=f"Summary {i}",
+                              redline="x")
+
+
+def chat_reply(content):
+    return httpx.Response(200, json={"choices": [{"message": {"content": content}, "finish_reason": "stop"}]})
+
+
+@respx.mock
+async def test_watch_messages_overview_first(conn):
+    respx.post(CHAT).mock(return_value=chat_reply("Arbitration <now> & more"))
+    svc = agent.add_service(conn, "Svc", "https://svc.test/terms")
+    cl = agent.Clients()
+    msgs = await agent.watch_messages(cl, svc, [report(1), report(2)])
+    await cl.aclose()
+    assert len(msgs) == 1
+    m = msgs[0]
+    assert m.startswith("<b>Svc</b> — past year (2 changes)")
+    assert m.index("Arbitration &lt;now&gt; &amp; more") < m.index("Section 1") < m.index("Section 2")
+
+
+@respx.mock
+async def test_watch_messages_without_overview_when_writer_fails(conn):
+    respx.post(CHAT).mock(return_value=chat_reply(None))
+    svc = agent.add_service(conn, "Svc", "https://svc.test/terms")
+    cl = agent.Clients()
+    msgs = await agent.watch_messages(cl, svc, [report(1), report(2)])
+    await cl.aclose()
+    joined = "\n".join(msgs)
+    assert "past year (2 changes)" in joined and "Section 1" in joined and "Section 2" in joined
+    assert "wrong" not in joined.lower() and "no text" not in joined
+
+
+@respx.mock
+async def test_overview_tolerates_unjudged_reports(conn):
+    route = respx.post(CHAT).mock(return_value=chat_reply("ok"))
+    svc = agent.add_service(conn, "Svc", "https://svc.test/terms")
+    cl = agent.Clients()
+    assert await agent.overview(cl, svc, [report(1, verdict=False)]) == "ok"
+    await cl.aclose()
+    assert "unjudged" in json.loads(route.calls[0].request.content)["messages"][1]["content"]

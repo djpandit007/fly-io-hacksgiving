@@ -97,8 +97,9 @@ async def _watch(conn: sqlite3.Connection, cl: Clients, tg: Telegram, user: User
     svc, reports = await agent.subscribe(conn, cl, user, name, url)
     if not reports:
         await tg.send(chat, f"No material changes to {esc(svc.name)}'s terms in the past year. I'll check daily.")
-    for r in reports:
-        await tg.send(chat, r.to_html())
+        return
+    for message in await agent.watch_messages(cl, svc, reports):
+        await tg.send(chat, message)
 
 
 async def _members(conn: sqlite3.Connection, tg: Telegram, user: User) -> None:
