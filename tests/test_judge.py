@@ -138,3 +138,9 @@ async def test_relevance_missing_answer_scores_zero():
 
     respx.post(RELEVANCE_URL).mock(return_value=httpx.Response(200, json=_noul_response(c1=0.7)))
     assert await relevance(_relevance_gateway(), "Q?", ["a", "b"]) == [0.7, 0.0]
+
+def test_every_red_flag_has_a_short_explanation():
+    from app.judge import FLAG_EXPLANATIONS, RED_FLAGS
+
+    assert FLAG_EXPLANATIONS.keys() == RED_FLAGS.keys()
+    assert all(0 < len(text) <= 200 for text in FLAG_EXPLANATIONS.values())

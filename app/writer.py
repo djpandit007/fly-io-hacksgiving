@@ -15,6 +15,10 @@ log = logging.getLogger(__name__)
 
 CHAT_PATH = "openai/v1/chat/completions"
 
+# Version of each prompt, stored with answer feedback so ratings can be compared across prompt changes.
+# Bump a version whenever its prompt changes; tests/test_writer.py fails until you do.
+PROMPT_VERSIONS = {"verdict": "v2", "alert": "v1", "overview": "v1", "wrapped": "v1"}
+
 
 # Reasoning models think before answering, and the thinking counts against max_tokens. If the
 # budget runs out mid-thought the reply has content=None; retry once with a bigger budget.
@@ -116,15 +120,27 @@ async def summarise_change(gw: Gateway, service: str, heading: str, before: str,
     return await chat(gw, prompt)
 
 
-async def verdict_card(gw: Gateway, title: str, flags: dict[str, float], excerpt: str) -> str:
-    raised = [k.replace("_", " ") for k, p in flags.items() if p >= 0.7]
-    prompt = (
-        f"I am about to agree to '{title}'. A checker flagged: {', '.join(raised) or 'nothing'}.\n\n"
+def verdict_prompt(title: str, raised: list[str], excerpt: str) -> str:
+    quotes = (
+        "\n\nAfter the bullets, for each of these flagged keys: "
+        f"{', '.join(raised)}, add one line exactly like:\nQUOTE <key>: <the clause that raised it>\n"
+        "Copy the clause word for word from the excerpt (one or two sentences, under 300 characters); do "
+        "not paraphrase, shorten or fix it. Leave a key out if you can't find its clause."
+        if raised else ""
+    )
+    return (
+        f"I am about to agree to '{title}'. A checker flagged: "
+        f"{', '.join(k.replace('_', ' ') for k in raised) or 'nothing'}.\n\n"
         f"Document excerpt:\n{excerpt[:12000]}\n\n"
         "Reply with one line starting with SIGN, PUSH BACK or WALK AWAY, then up to three short "
-        "bullets on the clauses that matter most to me."
+        "bullets on the clauses that matter most to me." + quotes
     )
-    return await chat(gw, prompt)
+
+
+async def verdict_card(gw: Gateway, title: str, flags: dict[str, float], excerpt: str) -> str:
+    """The card text; for flags found, it ends with `QUOTE <key>: …` lines (see app/quotes.py)."""
+    raised = [k for k, p in flags.items() if p >= 0.7]
+    return await chat(gw, verdict_prompt(title, raised, excerpt))
 
 
 async def watch_overview(gw: Gateway, service: str, facts: str) -> str:

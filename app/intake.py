@@ -16,7 +16,8 @@ from app.config import settings
 from app.db import User
 from app.discover import find_terms_url
 from app.discover import registrable_domain as _registrable
-from app.notify import FOOTER, Sender, deliver
+from app.notify import FOOTER, Sender, deliver, send_outgoing
+from app.outgoing import Outgoing, as_outgoing
 from app.telegram import esc
 
 log = logging.getLogger(__name__)
@@ -132,8 +133,8 @@ async def resolve_sender(conn: sqlite3.Connection, cl: Clients, msg: mail.Messag
     return None
 
 
-async def _attachments(conn: sqlite3.Connection, cl: Clients, user: User, msg: mail.Message) -> list[str]:
-    cards = []
+async def _attachments(conn: sqlite3.Connection, cl: Clients, user: User, msg: mail.Message) -> list[str | Outgoing]:
+    cards: list[str | Outgoing] = []
     for att in [a for a in msg.attachments if (a.filename or "").lower().endswith(PARSEABLE)][:MAX_ATTACHMENTS]:
         content = await mail.download_attachment(cl.mail, msg, att)
         if content is None:
@@ -146,21 +147,23 @@ async def _attachments(conn: sqlite3.Connection, cl: Clients, user: User, msg: m
     return cards
 
 
-async def _terms_update(conn: sqlite3.Connection, cl: Clients, tg: Sender | None, user: User, domain: str) -> list[str]:
+async def _terms_update(
+    conn: sqlite3.Connection, cl: Clients, tg: Sender | None, user: User, domain: str
+) -> list[str | Outgoing]:
     url = await find_terms_url(domain, cl)
     if not url:
         return [f"I couldn't find the terms page for {esc(domain)}. Send me the link and I'll watch it."]
     svc, past = await agent.subscribe(conn, cl, user, domain.split(".")[0].capitalize(), url)
-    cards = [f"Now watching <b>{esc(svc.name)}</b> — {esc(svc.terms_url)}"]
+    cards: list[str | Outgoing] = [f"Now watching <b>{esc(svc.name)}</b> — {esc(svc.terms_url)}"]
     # Check right away; anything new goes to *every* watcher, not just the sender.
     fresh = await agent.check_service(conn, cl, svc)
     if fresh:
-        fan_out: dict[int, list[str]] = {}
+        fan_out: dict[int, list[str | Outgoing]] = {}
         vectors: dict[int, list[float]] = {}
         for change in fresh:
             for watcher in agent.subscribers(conn, svc.id):
                 report = await agent.report_for(conn, cl, change, svc, watcher, vectors)
-                (cards if watcher.id == user.id else fan_out.setdefault(watcher.id, [])).append(report.to_html())
+                (cards if watcher.id == user.id else fan_out.setdefault(watcher.id, [])).append(agent.alert(report, svc))
         await deliver(conn, tg, cl, fan_out, f"Fine Print: {svc.name} changed its terms")
     else:
         shown = past[-3:]
@@ -201,8 +204,9 @@ async def process(
         log.warning("processing mail failed: %s", exc)
         cards = ["Sorry, something went wrong while reading that email. Please try again later."]
 
+    outgoing = [as_outgoing(c) for c in cards]
     if user.chat_id and tg is not None and tg.configured:
-        for card in cards or [esc(HELP)]:
-            await tg.send(user.chat_id, card)
-    reply_text = "\n\n---\n\n".join(plain(c) for c in cards) if cards else HELP
+        for out in outgoing or [Outgoing(text=esc(HELP))]:
+            await send_outgoing(conn, tg, user.chat_id, out)
+    reply_text = "\n\n---\n\n".join(plain(o.text) for o in outgoing) if outgoing else HELP
     await mail.respond(cl.mail, msg, reply_text + FOOTER)

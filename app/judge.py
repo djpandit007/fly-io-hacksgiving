@@ -251,6 +251,24 @@ RED_FLAGS: dict[str, str] = {
 }
 
 
+# What each red flag means, in plain English, for the 💡 buttons on verdict cards. Fixed text: showing
+# one needs no provider call and no copy of the checked document. Each fits a 200-character pop-up.
+FLAG_EXPLANATIONS: dict[str, str] = {
+    "auto_renews": "Auto-renewal: the subscription or trial keeps going, and keeps charging you, unless you cancel "
+                   "in time. Note the renewal date and how to cancel.",
+    "arbitration": "Arbitration: disputes go to a private arbitrator instead of a court, and you usually can't join "
+                   "a class action. Some terms let you opt out within a set time.",
+    "data_sharing": "Data sharing: the company may pass your personal data to other companies for their own use, "
+                    "such as advertising or training AI models.",
+    "unilateral_changes": "One-sided changes: the company can change the terms or prices without asking you; "
+                          "carrying on using the service counts as agreeing.",
+    "content_licence": "Content licence: you let the company use, change and pass on what you upload, often for "
+                       "free, worldwide and for as long as it likes.",
+    "hard_to_cancel": "Hard to cancel: stopping takes extra steps, like notice well in advance, a phone call or a "
+                      "letter, so you may keep paying longer than you want.",
+}
+
+
 async def red_flags(gw: Gateway, title: str, text: str) -> dict[str, float]:
     questions = {key: {"type": "noul", "instructions": q} for key, q in RED_FLAGS.items()}
     body = {"model": settings.judge_model, "state": {"document_title": title, "document": text}, "questions": questions}

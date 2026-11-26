@@ -55,7 +55,8 @@ Pydantic at the boundary, so an API change fails loudly instead of silently mis-
 ## Sharing Fine Print
 
 - **Owner:** you. Claim the bot once with `/start <FP_OWNER_CLAIM_CODE>` (or fix it with `FP_OWNER_CHAT_ID`).
-- **Members:** anyone you give the join code to sends `/start <FP_JOIN_CODE>` to the bot. Put the code in
+- **Members:** share the join link `https://t.me/<your_bot>?start=<FP_JOIN_CODE>`: opening it and
+  pressing Start joins in one tap. Sending `/start <FP_JOIN_CODE>` to the bot works too. Put the link in
   your submission or send it to colleagues.
 - **Email-only members:** someone without Telegram emails the shared inbox with the join code in the
   subject, and gets verdicts back by email.
@@ -76,8 +77,20 @@ Each member's watchlist, deadlines, calendar feed and Wrapped are private to the
 | `/email <address>`, `/verify <code>` | members | link your email so forwarded mail reaches you |
 | `/members` | owner | who has joined |
 | `/remove <id>` | owner | remove a member |
-| `/stats` | owner | the past 7 days: daily runs and failures, provider calls and response times, cost the providers reported, usage totals |
+| `/stats` | owner | the past 7 days: daily runs and failures, provider calls and response times, cost the providers reported, usage totals, answer feedback |
 | *a link, PDF, screenshot or photo* | members | "before you agree" check |
+
+Typing `/` shows the command menu; the owner's menu also lists the owner commands. Before someone joins,
+the bot's description (shown in an empty chat) says it is private and how to get access.
+
+**Buttons.** `/help` and the welcome have buttons for the main actions. `/watch` on its own asks which
+service and takes the reply as the name. A single word such as `notion` gets "Watch Notion?" with Yes/No.
+`/list`, change alerts and `/watch` results have unwatch buttons, with Undo. Each red flag on a verdict
+card has a 💡 button that explains it. Verdict cards, change alerts, `/watch` overviews and `/wrapped` have
+👍/👎, with an optional reason after 👎.
+
+**While it works**, the bot puts 👀 on your message, shows a "Thinking…" draft with the current step, and
+replies to your message with the result; 👀 becomes 👌, or 😢 if it failed.
 
 ## Run locally
 
@@ -99,7 +112,8 @@ uv run uvicorn app.main:app --reload --port 8080
    `./scripts/setup_sprite.sh`.
 4. `./scripts/connectors.sh`, copy each gateway base into `.env.sprite`, set `FP_PUBLIC_URL`, redeploy.
 5. Register the Telegram webhook (command printed by the setup script), then send
-   `/start <FP_OWNER_CLAIM_CODE>` to your bot.
+   `/start <FP_OWNER_CLAIM_CODE>` to your bot. Register it again (`POST /admin/telegram-webhook`) after
+   upgrading from a version without buttons: the registration is what asks Telegram for button taps.
 6. Set up the shared inbox and its webhook (see *Email intake*).
 7. Add repo secrets `FINE_PRINT_URL` and `FINE_PRINT_SECRET`; the workflow in
    `.github/workflows/tick.yml` wakes the Sprite daily (Sprites cannot wake themselves on a schedule).
@@ -138,6 +152,9 @@ How members use it:
   webhook secret have no connector and live in a `0600` env file on the Sprite.
 - Documents and links members send are read by the operator's AI providers; Fine Print keeps only
   extracted deadlines, watchlists and verified email addresses — not message bodies or attachments.
+- Answer feedback (👍/👎) keeps only the kind of answer, the writer model and prompt version, and for
+  public terms changes the change id: never the answer text, a URL, or who rated it. Kept 90 days.
+- Button data is never trusted: every tap is checked against the tapping member's own data.
 - Non-members get no service: a `/start` without a valid code gets one explanation; everything else is ignored.
 - Links you send, links found on pages or in email, and search results are fetched only if every redirect
   hop resolves to a public address.

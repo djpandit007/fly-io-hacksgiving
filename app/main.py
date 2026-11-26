@@ -3,11 +3,12 @@ route except /health is guarded by a secret."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
 import time
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from typing import Annotated
 
 from fastapi import (
@@ -22,7 +23,20 @@ from fastapi import (
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 
-from app import agent, bot, db, intake, ledger, mail, metrics, notify, sprite, users
+from app import (
+    agent,
+    bot,
+    db,
+    feedback,
+    intake,
+    ledger,
+    mail,
+    metrics,
+    notify,
+    sprite,
+    taps,
+    users,
+)
 from app.agent import Clients
 from app.config import settings
 from app.locks import locks
@@ -45,7 +59,11 @@ async def lifespan(app: FastAPI):
     app.state.clients = Clients(recorder)
     app.state.tg = Telegram()
     app.state.tg.recorder = recorder
+    # Description and command menus: best-effort, in the background so a slow Telegram never delays startup.
+    app.state.setup = asyncio.create_task(bot.setup(app.state.conn, app.state.tg)) if app.state.tg.configured else None
     yield
+    if app.state.setup:
+        app.state.setup.cancel()
     await app.state.clients.aclose()
     await app.state.tg.aclose()
     app.state.conn.close()
@@ -91,6 +109,7 @@ async def tick(request: Request) -> TickSummary:
             changes=result.changes, nudges=result.nudges, sent=delivered.sent, undelivered=delivered.failed,
         )
         metrics.prune(st.conn)
+        feedback.prune(st.conn)
     return TickSummary(
         checked=result.checked, failed=result.failed, changes=result.changes, nudges=result.nudges,
         members_notified=len(result.deliveries), sent=delivered.sent, undelivered=delivered.failed,
@@ -104,8 +123,17 @@ async def _handle_message(app_: FastAPI, payload: dict, task: str) -> None:
         msg = parse_update(payload)
         if not msg:
             return
+        chat_lock: AbstractAsyncContextManager = locks.hold(f"chat:{msg.chat_id}")
+        if msg.kind == "tap":
+            if taps.is_slow(msg.data):
+                # Stop the spinner now: this tap may queue behind a long check in the same chat.
+                await _answer_quietly(st.tg, msg.callback_id)
+                msg = msg.model_copy(update={"callback_id": None})
+            else:
+                # Quick taps (a lookup or one write) don't wait behind a long job in the same chat.
+                chat_lock = nullcontext()
         # The hold was taken before the webhook answered; keep refreshing it while queued and working.
-        async with stay_awake(task, expire="5m"), locks.hold(f"chat:{msg.chat_id}"):
+        async with stay_awake(task, expire="5m"), chat_lock:
             await bot.handle(st.conn, st.clients, st.tg, msg)
         metrics.count(st.conn, "job", "telegram", "ok", metrics.elapsed_ms(started))
     except Exception as exc:
@@ -115,6 +143,13 @@ async def _handle_message(app_: FastAPI, payload: dict, task: str) -> None:
         raise
     finally:
         await sprite.release(task)
+
+
+async def _answer_quietly(tg: Telegram, callback_id: str | None) -> None:
+    try:
+        await tg.answer_callback(callback_id or "", "On it…")
+    except Exception as exc:  # noqa: BLE001 — the work matters more than the toast
+        log.info("answering a slow tap failed: %s", type(exc).__name__)
 
 
 @app.post("/telegram")

@@ -83,9 +83,32 @@ def test_v3_database_gains_metrics_tables_and_keeps_its_data(tmp_path):
     conn.close()
 
     conn = db.connect(path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {"metric_runs", "metric_failures", "metric_counts", "metric_usage"} <= tables
     assert conn.execute("SELECT name FROM services").fetchone()[0] == "Acme"
     assert conn.execute("SELECT chat_id FROM users").fetchone()[0] == 7
     assert db.backup_path(path, 3).exists()
+
+
+def test_v4_database_gains_answers_table_and_keeps_its_data(tmp_path):
+    path = tmp_path / "v4.db"
+    conn = sqlite3.connect(path, isolation_level=None)
+    conn.executescript(db.SCHEMA)
+    for version in (2, 3, 4):
+        for stmt in (s.strip() for s in db.MIGRATIONS[version].split(";\n")):
+            if stmt:
+                conn.execute(stmt)
+    conn.execute("PRAGMA user_version = 4")
+    conn.execute("INSERT INTO services (name, terms_url, added_at) VALUES ('Acme', 'https://acme.test/terms', ?)", (db.now(),))
+    conn.execute("INSERT INTO metric_counts (day, kind, name, outcome, n) VALUES ('2026-11-26', 'command', '/list', 'ok', 3)")
+    conn.close()
+
+    conn = db.connect(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(answers)")}
+    assert columns == {"token", "kind", "model", "prompt_version", "change_id", "quotes_ok", "sent_at", "vote",
+                       "reason", "voted_at"}
+    assert {r["name"] for r in conn.execute("PRAGMA table_info(unwatched)")} == {"user_id", "service_id", "unwatched_at"}
+    assert conn.execute("SELECT name FROM services").fetchone()[0] == "Acme"
+    assert conn.execute("SELECT n FROM metric_counts").fetchone()[0] == 3
