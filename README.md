@@ -42,7 +42,7 @@ distinct services, not members.
 |---|---|
 | **Sprite** | The agent's home: SQLite, snapshots, a service on :8080; holds a task while it works |
 | **OpenCode → Jev** | TypeSafe's decision model, served by OpenCode: typed judgments per change — material (Noul), category and who it favours (Choice), opt-out (Noul), severity (Score) |
-| **OpenCode → chat model** | Plain-language summaries, verdict cards, Wrapped (`glm-5.3-flash` by default) |
+| **OpenCode → chat model** | Plain-language summaries, verdict cards, /watch overviews, Wrapped (`deepseek-v4.1-flash` by default: discounted on OpenCode Zen, zero data retention per Zen docs) |
 | **Pinecone** | Embeddings and clause memory: "you already accepted similar wording from Spotify and Uber" — limited to *your* services |
 | **AgentMail** | The shared inbox members forward mail to, and email replies |
 | **Exa** | Finds a service's terms page from a name (`/watch notion`) and reads pages that block scrapers |

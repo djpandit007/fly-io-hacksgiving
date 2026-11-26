@@ -17,7 +17,7 @@ CHAT_PATH = "openai/v1/chat/completions"
 
 # Reasoning models think before answering, and the thinking counts against max_tokens. If the
 # budget runs out mid-thought the reply has content=None; retry once with a bigger budget.
-TOKEN_BUDGETS = (1500, 4000)
+TOKEN_BUDGETS = (4000, 12000)
 
 
 class EmptyReply(RuntimeError):
@@ -59,9 +59,18 @@ class ChatCompletion(BaseModel):
         return f"finish_reason={finish}, reasoning_tokens={reasoning}"
 
 SYSTEM = (
-    "You explain changes to consumer terms of service in plain English for one person who uses the "
-    "service. Be concrete and brief. Never claim to give legal advice. Never invent facts that are "
-    "not in the text you are given."
+    "You explain consumer terms of service in plain English to one ordinary person who uses the "
+    "service. They are not a lawyer and are reading on a phone.\n\n"
+    "Before you write, work out exactly what the text says and what changed: compare the wording "
+    "carefully, and notice who gains or loses rights, money, data or time.\n\n"
+    "Rules:\n"
+    "- Ground every claim in the text you are given. Never invent deadlines, email addresses, "
+    "settings, amounts or dates; if the text does not say, do not say.\n"
+    "- If the text is ambiguous, say so plainly rather than guessing.\n"
+    "- Be concrete: name the right, cost, data or step involved. No filler, no hedging boilerplate.\n"
+    "- You give information, not legal advice; never tell the person what they legally must do.\n"
+    "- Formatting: plain sentences, **bold** for labels or key words, and lines starting with - "
+    "for bullets. No headings, tables, links or other Markdown."
 )
 
 
@@ -88,8 +97,11 @@ async def summarise_change(gw: Gateway, service: str, heading: str, before: str,
     prompt = (
         f"{service} changed the section '{heading}' of its terms.\n\nBEFORE:\n{before or '(new section)'}"
         f"\n\nAFTER:\n{after or '(section removed)'}\n\n"
-        "In at most two sentences: what changed, and what it means for me. If I can opt out or act, "
-        "say how and by when, using only what the text says."
+        "Reply in three short lines, about four sentences in total:\n"
+        "**What changed:** the concrete difference between BEFORE and AFTER.\n"
+        "**What it means for you:** the practical effect on my rights, money, data or time.\n"
+        "**What you can do:** how to opt out, object or act, and by when. Include this line only if "
+        "the text gives a way to act; never make one up."
     )
     return await chat(gw, prompt)
 
@@ -101,6 +113,17 @@ async def verdict_card(gw: Gateway, title: str, flags: dict[str, float], excerpt
         f"Document excerpt:\n{excerpt[:12000]}\n\n"
         "Reply with one line starting with SIGN, PUSH BACK or WALK AWAY, then up to three short "
         "bullets on the clauses that matter most to me."
+    )
+    return await chat(gw, prompt)
+
+
+async def watch_overview(gw: Gateway, service: str, facts: str) -> str:
+    prompt = (
+        f"I just started watching {service}'s terms. These are the material changes from the past "
+        f"year, one per line (date · section · area · how much it matters · who it favours · summary):"
+        f"\n{facts}\n\n"
+        "In 2-4 sentences, tell me what matters most for me across these changes, biggest first. "
+        "Then, if any line has an opt-out date, list those dates as - bullets. Under 120 words."
     )
     return await chat(gw, prompt)
 
