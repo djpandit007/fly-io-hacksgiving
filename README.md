@@ -31,6 +31,7 @@ Built for [Fly.io Hacksgiving](https://fly.io/hacksgiving), Nov 23–29, 2026.
 | **Deadline ledger** | Opt-out windows from changes, plus deadlines LlamaExtract pulls from your own documents (lease, offer letter) → your private calendar feed and nudges 3 days ahead |
 | **Email intake** | Forward "we updated our terms" emails, receipts and contracts to the shared inbox → verdicts in Telegram and by email |
 | **Agreed Wrapped** | Your year of accepted terms, as a dissenting opinion |
+| **Ask about your terms** | `/ask can Spotify raise my price?` (or just type the question) → a short answer from the terms you watch, with the clauses quoted word for word and checked against the stored text; says so when your terms don't cover it |
 
 **Judged once, shared by everyone:** terms are public and identical for all members, so each service is
 fetched, diffed and judged once and the result fans out to every watcher. Cost grows with the number of
@@ -42,6 +43,7 @@ distinct services, not members.
 |---|---|
 | **Sprite** | The agent's home: SQLite, snapshots, a service on :8080; holds a task while it works |
 | **OpenCode → Jev** | TypeSafe's decision model, served by OpenCode: typed judgments per change — material (Noul), category and who it favours (Choice), opt-out (Noul), severity (Score) |
+| **OpenCode → researcher, writer, verifier** | `/ask` splits the work: a researcher agent (tools over your watched terms only) finds the clauses and quotes them, code checks every quote against the stored text and Jev ranks them by relevance, a writer answers only from those clauses, and a verifier on a different model (`glm-5.3-flash`, GLM) rejects claims the clauses don't state; after two rejections you get the quotes alone |
 | **OpenCode → chat model** | Plain-language summaries, verdict cards, /watch overviews, Wrapped (`deepseek-v4.1-flash` by default: discounted on OpenCode Zen, zero data retention per Zen docs) |
 | **Pinecone** | Embeddings and clause memory: "you already accepted similar wording from Spotify and Uber" — limited to *your* services |
 | **AgentMail** | The shared inbox members forward mail to, and email replies |
@@ -72,6 +74,7 @@ Each member's watchlist, deadlines, calendar feed and Wrapped are private to the
 | `/start <code>` | anyone | claim the bot (owner code) or join it (join code) |
 | `/watch <url, domain or name>` | members | watch a service's terms; shows its past year of material changes |
 | `/list` | members | your watchlist with community grades |
+| `/ask <question>` | members | ask about the terms you watch; answered with quotes from them. A plain question typed without `/ask` works too |
 | `/deadlines` | members | your upcoming deadlines and your private calendar link |
 | `/wrapped` | members | your year in accepted terms |
 | `/email <address>`, `/verify <code>` | members | link your email so forwarded mail reaches you |
@@ -86,8 +89,8 @@ the bot's description (shown in an empty chat) says it is private and how to get
 **Buttons.** `/help` and the welcome have buttons for the main actions. `/watch` on its own asks which
 service and takes the reply as the name. A single word such as `notion` gets "Watch Notion?" with Yes/No.
 `/list`, change alerts and `/watch` results have unwatch buttons, with Undo. Each red flag on a verdict
-card has a 💡 button that explains it. Verdict cards, change alerts, `/watch` overviews and `/wrapped` have
-👍/👎, with an optional reason after 👎.
+card has a 💡 button that explains it. Verdict cards, change alerts, `/watch` overviews, `/wrapped` and
+`/ask` answers have 👍/👎, with an optional reason after 👎.
 
 **While it works**, the bot puts 👀 on your message, shows a "Thinking…" draft with the current step, and
 replies to your message with the result; 👀 becomes 👌, or 😢 if it failed.
@@ -152,6 +155,7 @@ How members use it:
   webhook secret have no connector and live in a `0600` env file on the Sprite.
 - Documents and links members send are read by the operator's AI providers; Fine Print keeps only
   extracted deadlines, watchlists and verified email addresses — not message bodies or attachments.
+- Questions you ask are read by the operator's AI providers and are not stored.
 - Answer feedback (👍/👎) keeps only the kind of answer, the writer model and prompt version, and for
   public terms changes the change id: never the answer text, a URL, or who rated it. Kept 90 days.
 - Button data is never trusted: every tap is checked against the tapping member's own data.

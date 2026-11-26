@@ -526,7 +526,51 @@ async def test_researcher_sees_watchlist_tool(world, cl, jev):
 
 
 def test_is_question():
-    for text in ["", "   ", "hi", "thanks", "/list", "spotify", "cancel notion", "  OK  ", "Hello!"]:
+    for text in ["", "   ", "hi", "thanks", "/list", "spotify", "cancel notion", "  OK  ", "Hello!",
+                 "my password is hunter2", "spotify changed its prices"]:
         assert ask.is_question(text) is False, text
-    for text in ["refund?", "can spotify raise my price", "is it?"]:
+    for text in ["refund?", "can spotify raise my price", "is it?", "tell me about spotify refunds",
+                 "does notion sell my data"]:
         assert ask.is_question(text) is True, text
+
+
+# --- Rendering limits --------------------------------------------------------------------------------
+
+def _clauses(n: int, quote_chars: int = 400) -> tuple[list[Clause], list[str]]:
+    clauses = [Clause(service=f"Svc{i}", heading=f"Heading {i}", quote="q" * quote_chars) for i in range(n)]
+    return clauses, [f"Svc{i} · Heading {i} · in force since 1 Jan 2026" for i in range(n)]
+
+
+def test_quote_block_has_no_blank_line():
+    clauses, labels = _clauses(3, 50)
+    for html in (ask._render_answer(Answer(summary="s", cites=[1, 2, 3]), clauses, labels),
+                 ask._render_quotes_only(clauses, labels)):
+        assert "\n\n" not in _quote_block(html)
+
+
+def test_long_summary_and_points_are_cut():
+    clauses, labels = _clauses(1, 50)
+    html = ask._render_answer(Answer(summary="s" * 3000, points=["p" * 1000], cites=[1]), clauses, labels)
+    assert "s" * (ask.MAX_SUMMARY_CHARS - 1) + "…" in html and "s" * ask.MAX_SUMMARY_CHARS not in html
+    assert "- " + "p" * (ask.MAX_POINT_CHARS - 1) + "…" in html and "p" * ask.MAX_POINT_CHARS not in html
+
+
+def test_worst_case_blockquote_fits_one_message():
+    from datetime import date
+
+    from app.telegram import MAX_LEN
+
+    clauses = [Clause(service=f"{i}" + "S" * 57, heading="H" * 200, quote="q" * 450) for i in range(ask.MAX_CLAUSES)]
+    labels = [ask._label(c, date(2026, 11, 26), ask.MAX_LABEL_HEADING_CHARS) for c in clauses]
+    assert all("H" * ask.MAX_LABEL_HEADING_CHARS not in label and "H…" in label for label in labels)
+    ans = Answer(summary="s" * 3000, points=["p" * 1000] * 3, cites=list(range(1, ask.MAX_CLAUSES + 1)))
+    html = ask._render_answer(ans, clauses, labels)
+    block = re.search(r"<blockquote expandable>.*?</blockquote>", html, re.DOTALL).group(0)
+    assert len(block) < MAX_LEN and "\n\n" not in block
+
+
+def test_prompt_labels_keep_the_whole_heading():
+    from datetime import date
+
+    clause = Clause(service="Svc", heading="H" * 200, quote="q")
+    assert "H" * 200 in ask._label(clause, date(2026, 11, 26))

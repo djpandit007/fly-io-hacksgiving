@@ -366,7 +366,7 @@ async def test_menus_match_the_counted_commands():
     menu = {f"/{c}" for c, _ in bot.MEMBER_MENU + bot.EMAIL_MENU + bot.OWNER_MENU}
     assert bot.COMMANDS == menu | {"/start"}
     assert bot.COMMANDS == {"/start", "/help", "/watch", "/list", "/deadlines", "/email", "/verify", "/wrapped",
-                            "/members", "/remove", "/stats"}
+                            "/members", "/remove", "/stats", "/ask"}
 
 
 async def test_setup_failure_does_not_raise(conn):
@@ -438,13 +438,14 @@ async def test_reply_to_the_prompt_watches_but_a_plain_message_does_not(conn, tg
     assert watched == ["notion"] and tg.to(2)[-1] == "Watch <b>Notion</b>?"
 
 
-async def test_free_text_gets_a_suggestion_or_a_pointer(conn, tg):
+async def test_free_text_gets_a_suggestion_or_a_pointer(conn, tg, monkeypatch):
+    asked = fake_ask(monkeypatch)
     await say(conn, tg, 2, "/start join-code")
     await say(conn, tg, 2, "youtube.com")
     assert tg.to(2)[-1] == "Watch <b>Youtube</b>?"
     assert tg.last(2)["buttons"] == [[("Yes, watch it", "v1:w:youtube.com"), ("No", "v1:n")]]
     await say(conn, tg, 2, "what does this bot do?")
-    assert tg.to(2)[-1] == bot.POINTER and tg.last(2)["buttons"] == bot.HELP_BUTTONS
+    assert asked == ["what does this bot do?"]  # a free-text question is answered from the terms
     await say(conn, tg, 2, "x" * 59)
     assert tg.to(2)[-1] == bot.POINTER
     await say(conn, tg, 2, "thanks")
@@ -711,3 +712,160 @@ async def test_wrapped_is_rated(conn, tg, monkeypatch):
     await say(conn, tg, 2, "/start join-code")
     await say(conn, tg, 2, "/wrapped", message_id=80)
     assert [label for label, _ in tg.last(2)["buttons"][-1]] == ["👍", "👎"]
+
+
+# --- Asking about terms ---------------------------------------------------------------------------
+
+def fake_ask(monkeypatch, outcome="not_found", html="I couldn't find that in the terms you watch.", raises=None):
+    """Patch `ask.answer`; returns the questions it was asked."""
+    from app import ask
+
+    asked: list[str] = []
+
+    async def answer(conn_, cl, user, question, on_stage=lambda _: None):
+        asked.append(question)
+        on_stage("Finding the clauses…")
+        if raises:
+            raise raises
+        return ask.AskResult(html=html, outcome=outcome)
+
+    monkeypatch.setattr(ask, "answer", answer)
+    return asked
+
+
+async def test_ask_command_replies_threaded(conn, tg, monkeypatch):
+    asked = fake_ask(monkeypatch, outcome="answered", html="<b>Yes</b>, with notice.")
+    await say(conn, tg, 2, "/start join-code")
+    await say(conn, tg, 2, "/ask can spotify raise prices?", message_id=90)
+    assert asked == ["can spotify raise prices?"]
+    assert tg.last(2)["text"] == "<b>Yes</b>, with notice." and tg.last(2)["reply_to"] == 90
+    assert [c[3] for c in tg.called("react")] == ["👀", "👌"]
+    assert any(c[2] == "Finding the clauses…" for c in tg.called("draft"))
+
+
+async def test_bare_ask_explains_usage(conn, tg, monkeypatch):
+    asked = fake_ask(monkeypatch)
+    await say(conn, tg, 2, "/start join-code")
+    await say(conn, tg, 2, "/ask")
+    assert tg.to(2)[-1] == "Ask me about the terms you watch, for example: /ask can Spotify raise my price?"
+    assert asked == []
+
+
+async def test_statement_is_not_sent_to_ask(conn, tg, monkeypatch):
+    asked = fake_ask(monkeypatch)
+    await say(conn, tg, 2, "/start join-code")
+    await say(conn, tg, 2, "my password is hunter2")
+    assert tg.to(2)[-1] == bot.POINTER and tg.last(2)["buttons"] == bot.HELP_BUTTONS
+    assert asked == []
+
+
+async def test_ask_command_skips_the_question_check(conn, tg, monkeypatch):
+    asked = fake_ask(monkeypatch)
+    await say(conn, tg, 2, "/start join-code")
+    await say(conn, tg, 2, "/ask spotify refunds")
+    assert asked == ["spotify refunds"]
+
+
+async def test_free_text_question_goes_to_ask(conn, tg, monkeypatch):
+    asked = fake_ask(monkeypatch)
+    await say(conn, tg, 2, "/start join-code")
+    await say(conn, tg, 2, "can spotify raise my price", message_id=91)
+    assert asked == ["can spotify raise my price"]
+    assert tg.to(2)[-1] == "I couldn't find that in the terms you watch." and tg.last(2)["reply_to"] == 91
+
+
+async def test_service_name_still_suggests_watch(conn, tg, monkeypatch):
+    asked = fake_ask(monkeypatch)
+    await say(conn, tg, 2, "/start join-code")
+    await say(conn, tg, 2, "spotify")
+    assert tg.to(2)[-1] == "Watch <b>Spotify</b>?"
+    assert tg.last(2)["buttons"] == [[("Yes, watch it", "v1:w:spotify"), ("No", "v1:n")]]
+    assert asked == []
+
+
+async def test_greeting_gets_pointer_not_ask(conn, tg, monkeypatch):
+    asked = fake_ask(monkeypatch)
+    await say(conn, tg, 2, "/start join-code")
+    await say(conn, tg, 2, "thanks")
+    assert tg.to(2)[-1] == bot.POINTER and tg.last(2)["buttons"] == bot.HELP_BUTTONS
+    assert asked == []
+
+
+async def test_stranger_question_is_ignored(conn, tg, monkeypatch):
+    asked = fake_ask(monkeypatch)
+    await say(conn, tg, 9, "/ask can spotify raise prices?")
+    await say(conn, tg, 9, "can spotify raise my price")
+    assert tg.sent == [] and tg.calls == [] and asked == []
+
+
+async def test_ask_metric_has_outcome_and_no_text(conn, tg, monkeypatch):
+    from tests.test_metrics import counts, everything_stored
+
+    fake_ask(monkeypatch, outcome="not_found")
+    await say(conn, tg, 2, "/start join-code")
+    await say(conn, tg, 2, "/ask can spotify raise prices?")
+    await say(conn, tg, 2, "does notion train models on my documents")
+    fake_ask(monkeypatch, outcome="answered", html="Yes.")
+    await say(conn, tg, 2, "/ask will dropbox renew automatically?")
+    command = {k: n for k, n in counts(conn, "command").items() if k[0] == "/ask"}
+    assert command == {("/ask", "not_found"): 2, ("/ask", "ok"): 1}
+    stored = everything_stored(conn).lower()
+    for word in ("spotify", "raise", "prices", "notion", "train", "models", "documents", "dropbox", "renew",
+                 "automatically"):
+        assert word not in stored
+
+
+async def test_ask_exception_reacts_sad(conn, tg, monkeypatch, caplog):
+    from tests.test_metrics import counts
+
+    fake_ask(monkeypatch, raises=RuntimeError("failed on: can spotify raise prices?"))
+    await say(conn, tg, 2, "/start join-code")
+    await say(conn, tg, 2, "/ask can spotify raise prices?", message_id=92)
+    assert [c[3] for c in tg.called("react")] == ["👀", "😢"]
+    assert tg.to(2)[-1] == bot.ASK_FAILED
+    assert "spotify" not in caplog.text
+    assert counts(conn, "command")[("/ask", "error")] == 1
+
+
+async def test_ask_answers_are_rated_and_store_no_text_or_member(conn, tg, monkeypatch):
+    fake_ask(monkeypatch, outcome="answered", html="<b>Yes</b>.")
+    await say(conn, tg, 4242, "/start join-code", name="Secret Name")
+    await say(conn, tg, 4242, "/ask can spotify raise prices?", message_id=93)
+    assert [label for label, _ in tg.last(4242)["buttons"][-1]] == ["👍", "👎"]
+    fake_ask(monkeypatch, outcome="quotes_only", html="<b>Here is what the terms say</b>")
+    await say(conn, tg, 4242, "/ask can spotify raise prices?")
+    assert [label for label, _ in tg.last(4242)["buttons"][-1]] == ["👍", "👎"]
+    rows = conn.execute("SELECT * FROM answers").fetchall()
+    assert [(r["kind"], r["quotes_ok"]) for r in rows] == [("ask", 1), ("ask", 1)]
+    stored = " ".join(str(v) for r in rows for v in tuple(r))
+    for private in ("spotify", "Yes", "Here is", "4242", "Secret Name"):
+        assert private not in stored
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(answers)")}
+    assert not columns & {"text", "question", "url", "user_id", "chat_id", "member"}
+
+
+async def test_unanswered_asks_are_not_rated(conn, tg, monkeypatch):
+    await say(conn, tg, 2, "/start join-code")
+    for outcome in ("not_found", "no_services", "error"):
+        fake_ask(monkeypatch, outcome=outcome, html="Nothing.")
+        await say(conn, tg, 2, "/ask can spotify raise prices?")
+        assert tg.last(2)["buttons"] is None
+    assert conn.execute("SELECT COUNT(*) FROM answers").fetchone()[0] == 0
+
+
+async def test_long_ask_answer_never_splits_a_blockquote(conn, tg, monkeypatch):
+    from app import ask
+    from app.ask_tools import Clause
+    from app.telegram import MAX_LEN, split
+
+    clauses = [Clause(service=f"Svc{i}", heading=f"Heading {i}", quote="q" * 400) for i in range(ask.MAX_CLAUSES)]
+    labels = [f"Svc{i} · Heading {i}" for i in range(ask.MAX_CLAUSES)]
+    # Longer than any rendered answer can be, to show the send path still never splits the quotes.
+    long_html = "\n\n".join(["s" * 1500, "p" * 1500, ask._quotes(clauses, labels), ask.DISCLAIMER])
+    assert len(long_html) > MAX_LEN
+    fake_ask(monkeypatch, outcome="answered", html=long_html)
+    await say(conn, tg, 2, "/start join-code")
+    await say(conn, tg, 2, "/ask can spotify raise prices?", message_id=94)
+    chunks = split(tg.last(2)["text"])
+    assert len(chunks) > 1 and all(len(c) <= MAX_LEN for c in chunks)
+    assert all(c.count("<blockquote") == c.count("</blockquote>") for c in chunks)

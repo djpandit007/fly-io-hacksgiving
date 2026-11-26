@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from app.telegram import Buttons
 
-AnswerKind = Literal["verdict", "alert", "overview", "wrapped"]
+AnswerKind = Literal["verdict", "alert", "overview", "wrapped", "ask"]
 
 
 class Answer(BaseModel):

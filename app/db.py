@@ -192,7 +192,7 @@ CREATE TABLE metric_usage (
 V5_MIGRATION = """
 CREATE TABLE answers (
     token          TEXT PRIMARY KEY,
-    kind           TEXT NOT NULL,                 -- verdict | alert | overview | wrapped
+    kind           TEXT NOT NULL,                 -- verdict | alert | overview | wrapped | ask
     model          TEXT NOT NULL,
     prompt_version TEXT NOT NULL,
     change_id      INTEGER,                       -- the public terms change an alert or overview covers

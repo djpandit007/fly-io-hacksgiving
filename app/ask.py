@@ -41,6 +41,9 @@ MAX_CLAUSES = 6
 RELEVANCE_MIN = 0.5
 MAX_POINTS = 3
 MAX_QUOTE_CHARS = 400
+MAX_SUMMARY_CHARS = 500
+MAX_POINT_CHARS = 250
+MAX_LABEL_HEADING_CHARS = 60
 
 NO_SERVICES = "You're not watching any services yet. Send /watch &lt;name&gt; first, then ask me about its terms."
 NOT_FOUND = "I couldn't find that in the terms you watch."
@@ -49,6 +52,13 @@ QUOTES_ONLY = "<b>Here is what the terms say</b>"
 DISCLAIMER = "<i>Information, not legal advice.</i>"
 
 _SMALL_TALK = {"hi", "hello", "hey", "thanks", "thank", "thx", "ok", "okay", "yes", "no", "help", "start"}
+# Free text is a question only with a "?" or one of these first words, so statements (which may hold
+# anything, such as a password) are never sent to the model providers.
+_QUESTION_WORDS = frozenset({
+    "what", "when", "where", "which", "who", "whose", "why", "how", "can", "could", "do", "does", "did", "is",
+    "are", "was", "were", "will", "would", "should", "may", "might", "must", "am", "has", "have", "tell",
+    "explain", "show",
+})
 
 
 class Answer(BaseModel):
@@ -73,6 +83,9 @@ class AskResult(BaseModel):
 
 
 # --- Agents (built without a model; `answer` supplies one per run) ----------------------------------
+
+# Version of the researcher, writer and verifier instructions below, recorded with answer feedback.
+PROMPT_VERSION = "v1"
 
 RESEARCHER_INSTRUCTIONS = (
     "You find the clauses in a person's watched terms of service that answer their question.\n"
@@ -157,17 +170,19 @@ def is_question(text: str) -> bool:
     words = text.split()
     if len(words) == 1 and words[0].strip("!.,?").casefold() in _SMALL_TALK:
         return False
-    return len(words) >= 3 or "?" in text
+    return "?" in text or words[0].strip("!.,?:;\"'").casefold() in _QUESTION_WORDS
 
 
 # --- Prompts ----------------------------------------------------------------------------------------
 
-def _label(clause: Clause, on: date | None) -> str:
+def _label(clause: Clause, on: date | None, heading_chars: int | None = None) -> str:
+    """`heading_chars` cuts the heading for display; the prompts get it whole."""
+    heading = clause.heading if heading_chars is None else _cut(clause.heading, heading_chars)
     when = ""
     if on is not None:
         verb = "changed on" if clause.source == "change" else "in force since"
         when = f" · {verb} {on.day} {on:%b %Y}"
-    return f"{clause.service} · {clause.heading}{when}"
+    return f"{clause.service} · {heading}{when}"
 
 
 def _numbered(clauses: list[Clause], labels: list[str]) -> str:
@@ -184,14 +199,16 @@ def _esc(text: str) -> str:
     return html.escape(text, quote=False)
 
 
-def _cut(quote: str) -> str:
-    quote = quote.strip()
-    return quote if len(quote) <= MAX_QUOTE_CHARS else quote[: MAX_QUOTE_CHARS - 1].rstrip() + "…"
+def _cut(text: str, limit: int = MAX_QUOTE_CHARS) -> str:
+    text = text.strip()
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 def _quotes(clauses: list[Clause], labels: list[str]) -> str:
+    # Single line breaks only: Telegram.send splits long messages at blank lines, and a split inside
+    # the blockquote would leave unbalanced HTML.
     lines = [f"“{_esc(_cut(c.quote))}”\n<i>{_esc(label)}</i>" for c, label in zip(clauses, labels)]
-    return "<blockquote expandable>" + "\n\n".join(lines) + "</blockquote>"
+    return "<blockquote expandable>" + "\n".join(lines) + "</blockquote>"
 
 
 def _cited(cites: list[int], count: int) -> list[int]:
@@ -204,8 +221,8 @@ def _cited(cites: list[int], count: int) -> list[int]:
 
 def _render_answer(ans: Answer, clauses: list[Clause], labels: list[str]) -> str:
     picked = _cited(ans.cites, len(clauses))
-    parts = [_esc(ans.summary.strip())]
-    if points := [p.strip() for p in ans.points[:MAX_POINTS] if p.strip()]:
+    parts = [_esc(_cut(ans.summary, MAX_SUMMARY_CHARS))]
+    if points := [_cut(p, MAX_POINT_CHARS) for p in ans.points[:MAX_POINTS] if p.strip()]:
         parts.append("\n".join(f"- {_esc(p)}" for p in points))
     parts.append(_quotes([clauses[i] for i in picked], [labels[i] for i in picked]))
     parts.append(DISCLAIMER)
@@ -264,7 +281,9 @@ async def answer(
     clauses = await _relevant(cl, question, clauses)
     if not clauses:
         return _done("not_found", NOT_FOUND)
-    labels = [_label(c, ask_tools.dated(deps, c)) for c in clauses]
+    dates = [ask_tools.dated(deps, c) for c in clauses]
+    labels = [_label(c, on) for c, on in zip(clauses, dates)]
+    shown = [_label(c, on, MAX_LABEL_HEADING_CHARS) for c, on in zip(clauses, dates)]
     evidence = _numbered(clauses, labels)
 
     on_stage("Writing…")
@@ -285,10 +304,10 @@ async def answer(
             check = await _check(cl, question, evidence, draft)
     except Exception as exc:  # noqa: BLE001 — the verified quotes still stand on their own
         log.warning("ask writing failed: %s", type(exc).__name__)
-        return _done("quotes_only", _render_quotes_only(clauses, labels))
+        return _done("quotes_only", _render_quotes_only(clauses, shown))
     if not check.passed:
-        return _done("quotes_only", _render_quotes_only(clauses, labels))
-    return _done("answered", _render_answer(draft, clauses, labels))
+        return _done("quotes_only", _render_quotes_only(clauses, shown))
+    return _done("answered", _render_answer(draft, clauses, shown))
 
 
 async def _check(cl: Clients, question: str, evidence: str, draft: Answer) -> Check:

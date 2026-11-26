@@ -8,29 +8,18 @@ from __future__ import annotations
 
 import re
 
+from app import quotes
+
 MIN_CHARS = 25
 MIN_WORDS = 4
 
-_PUNCTUATION = str.maketrans(
-    {
-        "‘": "'",
-        "’": "'",
-        "“": '"',
-        "”": '"',
-        "–": "-",
-        "—": "-",
-    }
-)
-_DELETED = re.compile(r"[*_`]")
+# quotes.normalise deletes these; here they separate table cells and headings, so they become spaces.
 _SEPARATORS = re.compile(r"[#>|]")
-_WHITESPACE = re.compile(r"\s+")
 _EDGE_CHARS = "\"' .…"
 
 
 def normalise(text: str) -> str:
-    text = text.translate(_PUNCTUATION)
-    text = _SEPARATORS.sub(" ", _DELETED.sub("", text)).lower()
-    return _WHITESPACE.sub(" ", text).strip(_EDGE_CHARS)
+    return quotes.normalise(_SEPARATORS.sub(" ", text)).strip(_EDGE_CHARS)
 
 
 def contains(quote: str, document: str) -> bool:

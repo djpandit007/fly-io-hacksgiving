@@ -46,3 +46,8 @@ def test_table_cells_do_not_fuse():
     document = "Refunds|None are offered after thirty days"
     assert contains("refunds none are offered after thirty days", document)
     assert not contains("refundsnone are offered after thirty days", document)
+
+
+def test_shares_quote_normalisation_with_verdict_cards():
+    document = "We may change\u00a0the price \u2011 of a \uff30aid Plan at any time."
+    assert contains("we may change the price - of a paid plan", document)
