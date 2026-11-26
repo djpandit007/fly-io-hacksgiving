@@ -110,6 +110,7 @@ class ChangeReport(BaseModel):
     redline: str
     precedents: list[Precedent] = Field(default_factory=list)
     deadline: date | None = None
+    written: bool = True  # False when the summary is the raw redline (no writer, or the writer failed)
 
     def to_html(self) -> str:
         v = self.verdict
@@ -352,10 +353,11 @@ async def report_for(
                 conn, user.id, f"Opt out: {svc.name} — {change.heading or 'terms change'}", due, "opt_out",
                 detail=change.summary or "", service_id=svc.id, change_id=change.id,
             )
+    fallback = redline(change.before_text, change.after_text)[:600]  # what _summary stores without a writer
     return ChangeReport(
         change_id=change.id, service=svc.name, heading=change.heading, kind=change.kind,
         effective_at=change.effective_at, verdict=verdict,
-        summary=change.summary or redline(change.before_text, change.after_text)[:600],
+        summary=change.summary or fallback, written=bool(change.summary) and change.summary != fallback,
         redline=redline(change.before_text, change.after_text)[:1500], precedents=precedents, deadline=deadline,
     )
 
@@ -510,9 +512,10 @@ def rated(kind: AnswerKind, **meta) -> Answer:
 
 
 def alert(report: ChangeReport, svc: Service) -> Outgoing:
-    """A material change as delivered to one watcher: the report, an unwatch button, and 👍/👎."""
+    """A material change as delivered to one watcher: the report, an unwatch button, and 👍/👎 when the
+    writer wrote its summary (a raw redline isn't the writer's answer to rate)."""
     return Outgoing(text=report.to_html(), buttons=[[unwatch_button(svc)]],
-                    rate=rated("alert", change_id=report.change_id))
+                    rate=rated("alert", change_id=report.change_id) if report.written else None)
 
 
 def pack(parts: list[str], limit: int = MAX_LEN, sep: str = "\n\n") -> list[str]:

@@ -339,7 +339,7 @@ async def test_unknown_data_gets_a_short_notice(conn, tg):
 
 async def test_every_tap_is_answered_exactly_once(conn, tg):
     await say(conn, tg, 2, "/start join-code")
-    await tap(conn, tg, 2, "v1:n")
+    await tap(conn, tg, 2, "v1:n", buttons=[[("Yes, watch it", "v1:w:notion"), ("No", "v1:n")]])
     assert len(tg.called("answer")) == 1
     assert tg.called("edit") == [("edit", 2, 900, None)]
 
@@ -468,14 +468,14 @@ async def test_yes_watches_once_and_removes_the_buttons(conn, tg, monkeypatch):
 
     monkeypatch.setattr(bot, "_watch", fake_watch)
     await say(conn, tg, 2, "/start join-code")
-    await tap(conn, tg, 2, "v1:w:notion", message_id=321)
+    await tap(conn, tg, 2, "v1:w:notion", message_id=321, buttons=[[("Yes, watch it", "v1:w:notion"), ("No", "v1:n")]])
     assert watched == [("notion", 321)]
     assert ("edit", 2, 321, None) in tg.calls and answers(tg) == ["On it…"]
 
 
 async def test_no_removes_the_buttons(conn, tg):
     await say(conn, tg, 2, "/start join-code")
-    await tap(conn, tg, 2, "v1:n", message_id=321)
+    await tap(conn, tg, 2, "v1:n", message_id=321, buttons=[[("Yes, watch it", "v1:w:notion"), ("No", "v1:n")]])
     assert ("edit", 2, 321, None) in tg.calls
 
 
@@ -652,7 +652,7 @@ async def test_thumbs_up_says_thanks(conn, tg, monkeypatch):
     buttons, token = await _rated_check(conn, tg, monkeypatch)
     await tap(conn, tg, 2, f"v1:fb:{token}:u", message_id=71, buttons=buttons)
     assert answers(tg)[-1] == "Thanks!"
-    assert tg.called("edit")[-1][3] == [buttons[0], [("✓ Thanks", f"v1:fb:{token}:u")]]
+    assert tg.called("edit")[-1][3] == [buttons[0], [("✓ Thanks", "v1:k")]]
     assert conn.execute("SELECT vote FROM answers WHERE token = ?", (token,)).fetchone()[0] == "up"
 
 
@@ -663,7 +663,11 @@ async def test_thumbs_down_offers_reasons_then_thanks(conn, tg, monkeypatch):
     assert [label for label, _ in reasons[-1]] == ["Wrong", "Unclear", "Not useful"] and reasons[0] == buttons[0]
     await tap(conn, tg, 2, f"v1:fr:{token}:c", message_id=71, buttons=reasons)
     assert answers(tg)[-1] == "Thanks, noted."
-    assert tg.called("edit")[-1][3] == [buttons[0], [("✓ Thanks", f"v1:fb:{token}:d")]]
+    thanked = tg.called("edit")[-1][3]
+    assert thanked == [buttons[0], [("✓ Thanks", "v1:k")]]
+    edits = len(tg.called("edit"))
+    await tap(conn, tg, 2, "v1:k", message_id=71, buttons=thanked)  # tapping Thanks again
+    assert answers(tg)[-1] == "Already noted. Thanks!" and len(tg.called("edit")) == edits
     row = conn.execute("SELECT vote, reason FROM answers WHERE token = ?", (token,)).fetchone()
     assert tuple(row) == ("down", "unclear")
 
@@ -899,3 +903,12 @@ async def test_multi_paragraph_quotes_never_split_a_blockquote(conn, tg, monkeyp
     chunks = split(tg.last(2)["text"])
     assert len(chunks) > 1 and all(len(c) <= MAX_LEN for c in chunks)
     assert all(c.count("<blockquote") == c.count("</blockquote>") for c in chunks)
+
+
+async def test_unchanged_buttons_are_not_edited(conn, tg, monkeypatch):
+    buttons, token = await _rated_check(conn, tg, monkeypatch)
+    await tap(conn, tg, 2, f"v1:fb:{token}:u", buttons=buttons)
+    thanked = tg.called("edit")[-1][3]
+    edits = len(tg.called("edit"))
+    await tap(conn, tg, 2, f"v1:fb:{token}:u", buttons=thanked)  # an old 👍 data with no rating row left
+    assert len(tg.called("edit")) == edits  # Telegram would refuse a no-op edit

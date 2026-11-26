@@ -518,3 +518,39 @@ async def test_long_card_never_splits_a_blockquote():
     chunks = split(card.text)
     assert len(chunks) > 1
     assert all(c.count("<blockquote") == c.count("</blockquote>") for c in chunks)
+
+
+# --- Review fixes ------------------------------------------------------------------------------------
+
+def test_alerts_are_rated_only_when_the_writer_wrote_them(conn):
+    svc = agent.add_service(conn, "Svc", "https://svc.test/terms")
+    written = agent.alert(report(1), svc)
+    raw = agent.alert(report(2).model_copy(update={"written": False}), svc)
+    assert written.rate.kind == "alert" and raw.rate is None
+    assert raw.buttons == written.buttons == [[agent.unwatch_button(svc)]]
+
+
+@respx.mock
+async def test_tick_alert_is_not_rated_when_the_writer_fails(conn, members, history, monkeypatch):
+    m = mock_providers()
+    a = members[0]
+    cl = agent.Clients()
+    await agent.subscribe(conn, cl, a, "Acme", "https://acme.test/terms")
+    # The judge still works, but the writer returns nothing: the summary falls back to the redline.
+    m["chat"].mock(return_value=httpx.Response(200, json={"choices": [{"message": {"content": None}, "finish_reason": "length"}]}))
+    changed = text(NEW_HTML).replace("individual arbitration", "individual arbitration in Texas, with no right to appeal")
+
+    async def page(cl_, url):
+        return changed
+
+    monkeypatch.setattr(agent, "page_text", page)
+    result = await agent.tick(conn, cl)
+    await cl.aclose()
+    alerts = [o for o in result.deliveries.get(a.id, []) if o.buttons]
+    assert alerts and all(o.rate is None for o in alerts)
+
+
+def test_shown_quote_drops_its_own_curly_quotes():
+    from app.quotes import shown
+
+    assert shown("“Binding arbitration applies.”") == "Binding arbitration applies"

@@ -4,6 +4,7 @@ route except /health is guarded by a secret."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import logging
@@ -64,6 +65,8 @@ async def lifespan(app: FastAPI):
     yield
     if app.state.setup:
         app.state.setup.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await app.state.setup
     await app.state.clients.aclose()
     await app.state.tg.aclose()
     app.state.conn.close()
@@ -119,19 +122,30 @@ async def tick(request: Request) -> TickSummary:
 async def _handle_message(app_: FastAPI, payload: dict, task: str) -> None:
     st = app_.state
     started = time.monotonic()
+    claimed: tuple[int, int] | None = None
     try:
         msg = parse_update(payload)
         if not msg:
             return
         chat_lock: AbstractAsyncContextManager = locks.hold(f"chat:{msg.chat_id}")
         if msg.kind == "tap":
-            if taps.is_slow(msg.data):
-                # Stop the spinner now: this tap may queue behind a long check in the same chat.
-                await _answer_quietly(st.tg, msg.callback_id)
-                msg = msg.model_copy(update={"callback_id": None})
-            else:
-                # Quick taps (a lookup or one write) don't wait behind a long job in the same chat.
+            member = users.active(users.by_chat(st.conn, msg.chat_id))
+            if member is None or not taps.is_slow(msg.data):
+                # Quick taps (a lookup or one write) don't wait behind a long job in the same chat, and
+                # a non-member's tap is answered with the private-bot notice straight away.
                 chat_lock = nullcontext()
+            else:
+                if msg.message_id:
+                    if (msg.chat_id, msg.message_id) in _claimed:
+                        # A second tap on the same button while the first is queued or running.
+                        await _answer_quietly(st.tg, msg.callback_id, "Already on it.")
+                        return
+                    claimed = (msg.chat_id, msg.message_id)
+                    _claimed.add(claimed)
+                # Stop the spinner and remove the button now: this tap may queue behind a long check.
+                await _answer_quietly(st.tg, msg.callback_id, "On it…")
+                await _drop_buttons_quietly(st.tg, msg.chat_id, msg.message_id)
+                msg = msg.model_copy(update={"callback_id": None, "buttons": []})
         # The hold was taken before the webhook answered; keep refreshing it while queued and working.
         async with stay_awake(task, expire="5m"), chat_lock:
             await bot.handle(st.conn, st.clients, st.tg, msg)
@@ -142,14 +156,30 @@ async def _handle_message(app_: FastAPI, payload: dict, task: str) -> None:
         metrics.failure(st.conn, "telegram", exc)
         raise
     finally:
+        if claimed:
+            _claimed.discard(claimed)
         await sprite.release(task)
 
 
-async def _answer_quietly(tg: Telegram, callback_id: str | None) -> None:
+# Slow taps queued or running, so a double tap on [Yes, watch it] runs /watch once. A key is released
+# when its tap finishes; by then the button has been removed from the message.
+_claimed: set[tuple[int, int]] = set()
+
+
+async def _answer_quietly(tg: Telegram, callback_id: str | None, text: str) -> None:
     try:
-        await tg.answer_callback(callback_id or "", "On it…")
+        await tg.answer_callback(callback_id or "", text)
     except Exception as exc:  # noqa: BLE001 — the work matters more than the toast
         log.info("answering a slow tap failed: %s", type(exc).__name__)
+
+
+async def _drop_buttons_quietly(tg: Telegram, chat_id: int, message_id: int | None) -> None:
+    if not message_id:
+        return
+    try:
+        await tg.edit_buttons(chat_id, message_id, None)
+    except Exception as exc:  # noqa: BLE001
+        log.info("removing a slow tap's buttons failed: %s", type(exc).__name__)
 
 
 @app.post("/telegram")
