@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from app import exa, judge, ledger, memory, parse, tosdr, writer
 from app.config import settings
 from app.db import Change, Service, Snapshot, User, now, one, rows
-from app.gateway import Gateway
+from app.gateway import Gateway, Recorder
 from app.history import backfill
 from app.judge import Verdict
 from app.locks import locks
@@ -59,21 +59,21 @@ OVERVIEW_CACHE_SIZE = 256
 class Clients:
     """Gateways for the providers that are configured; others are None and their step is skipped."""
 
-    def __init__(self) -> None:
+    def __init__(self, recorder: Recorder | None = None) -> None:
         def make(provider):
-            return Gateway(provider) if provider.configured else None
+            return Gateway(provider, recorder=recorder) if provider.configured else None
 
         # One OpenCode gateway serves both the judge (Jev) and the writer (chat model). It has a
         # default direct URL, so it counts as configured only with a key or a gateway URL.
         oc = settings.opencode
         # Reasoning models can think for minutes on the larger writer budgets.
-        self.ai = Gateway(oc, timeout=AI_TIMEOUT) if oc.key.get_secret_value() or "sprites.dev" in oc.base_url else None
+        self.ai = Gateway(oc, timeout=AI_TIMEOUT, recorder=recorder) if oc.key.get_secret_value() or "sprites.dev" in oc.base_url else None
         self.pinecone = make(settings.pinecone)
         self.exa = make(settings.exa)
         self.mail = make(settings.agentmail) if settings.agentmail_inbox_id else None
         # LlamaCloud has a default direct URL, so it counts as configured only with a key or a gateway URL.
         llama = settings.llama
-        self.llama = Gateway(llama) if llama.key.get_secret_value() or "sprites.dev" in llama.base_url else None
+        self.llama = Gateway(llama, recorder=recorder) if llama.key.get_secret_value() or "sprites.dev" in llama.base_url else None
 
     async def aclose(self) -> None:
         for gw in (self.ai, self.pinecone, self.exa, self.mail, self.llama):

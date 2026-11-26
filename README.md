@@ -76,6 +76,7 @@ Each member's watchlist, deadlines, calendar feed and Wrapped are private to the
 | `/email <address>`, `/verify <code>` | members | link your email so forwarded mail reaches you |
 | `/members` | owner | who has joined |
 | `/remove <id>` | owner | remove a member |
+| `/stats` | owner | the past 7 days: daily runs and failures, provider calls and response times, cost the providers reported, usage totals |
 | *a link, PDF, screenshot or photo* | members | "before you agree" check |
 
 ## Run locally
@@ -102,6 +103,8 @@ uv run uvicorn app.main:app --reload --port 8080
 6. Set up the shared inbox and its webhook (see *Email intake*).
 7. Add repo secrets `FINE_PRINT_URL` and `FINE_PRINT_SECRET`; the workflow in
    `.github/workflows/tick.yml` wakes the Sprite daily (Sprites cannot wake themselves on a schedule).
+   The job page shows each run's summary, and the job fails (so GitHub emails you) when a service
+   could not be checked or the Sprite could not be reached.
 
 The database upgrades itself on start-up (`PRAGMA user_version`); a `fineprint.db.v1.bak` copy is kept
 when a single-owner database is migrated.

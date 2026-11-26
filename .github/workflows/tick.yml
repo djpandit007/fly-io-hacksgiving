@@ -17,5 +17,23 @@ jobs:
           URL: ${{ secrets.FINE_PRINT_URL }}
           SECRET: ${{ secrets.FINE_PRINT_SECRET }}
         run: |
-          curl -fsS --retry 3 --retry-delay 5 --max-time 1500 \
-            -X POST "$URL/tick" -H "X-Fine-Print-Secret: $SECRET"
+          body=$(curl -fsS --retry 3 --retry-delay 5 --max-time 1500 \
+            -X POST "$URL/tick" -H "X-Fine-Print-Secret: $SECRET")
+          echo "$body"
+          # The run's summary on the job page; a failed service fails the job so GitHub notifies the owner.
+          # (A run that never happens can only be noticed here: a sleeping Sprite cannot report it.)
+          echo "$body" | jq -r '
+            "### Fine Print daily run\n",
+            "| | |", "|---|---|",
+            "| Services checked | \(.checked) |",
+            "| Services failed | \(.failed | length)\(if (.failed | length) > 0 then " (" + (.failed | join(", ")) + ")" else "" end) |",
+            "| Changes found | \(.changes) |",
+            "| Deadline nudges | \(.nudges) |",
+            "| Members notified | \(.members_notified) |",
+            "| Messages sent | \(.sent) |",
+            "| Members not reached | \(.undelivered) |"' >> "$GITHUB_STEP_SUMMARY"
+          failed=$(echo "$body" | jq '.failed | length')
+          if [ "$failed" -gt 0 ]; then
+            echo "::error::$failed service(s) could not be checked: $(echo "$body" | jq -r '.failed | join(", ")')"
+            exit 1
+          fi

@@ -11,7 +11,7 @@ import re
 import sqlite3
 from urllib.parse import urlparse
 
-from app import agent, ledger, mail, users
+from app import agent, ledger, mail, metrics, users
 from app.agent import Clients
 from app.config import settings
 from app.db import User
@@ -21,6 +21,10 @@ from app.telegram import Incoming, Telegram, esc, redact
 log = logging.getLogger(__name__)
 
 URL = re.compile(r"https?://\S+")
+# Counted by name in the owner's metrics; anything else a member types is counted as "other", never stored.
+COMMANDS = frozenset(
+    {"/start", "/help", "/watch", "/list", "/deadlines", "/email", "/verify", "/wrapped", "/members", "/remove", "/stats"}
+)
 
 HELP = """<b>Fine Print</b> watches the fine print you've agreed to.
 
@@ -36,6 +40,7 @@ OWNER_HELP = """
 
 <b>Owner</b>
 /members — who has joined
+/stats — how the bot is running: daily runs, providers, cost and usage
 /remove <i>id</i> — remove a member"""
 
 WELCOME = """Welcome to <b>Fine Print</b>, {name}! 👋
@@ -170,6 +175,7 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
     user = users.active(users.by_chat(conn, msg.chat_id))
     if cmd == "/start" and (user is None or arg):
         if user is None:
+            metrics.count(conn, "command", "/start")
             await _start(conn, tg, msg, arg)
             return
         # An existing member re-sending a code: maybe the owner claim; otherwise just show help.
@@ -180,6 +186,13 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
         return
     users.set_name(conn, user, msg.name)
     chat = msg.chat_id
+    if msg.file_id:
+        used = "check:file"
+    elif cmd in COMMANDS:
+        used = cmd
+    else:
+        used = "check:url" if URL.search(msg.text) else "other"
+    outcome = "ok"
 
     try:
         if msg.file_id:
@@ -213,11 +226,13 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
             await _verify(conn, tg, user, arg)
         elif cmd == "/wrapped":
             await tg.send(chat, await agent.wrapped(conn, cl, user))
-        elif cmd in ("/members", "/remove"):
+        elif cmd in ("/members", "/remove", "/stats"):
             if not user.is_owner:
                 await tg.send(chat, "That command is owner-only.")
             elif cmd == "/members":
                 await _members(conn, tg, user)
+            elif cmd == "/stats":
+                await tg.send(chat, metrics.report(conn))
             else:
                 await _remove(conn, tg, user, arg)
         elif m := URL.search(msg.text):
@@ -226,5 +241,8 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
         else:
             await tg.send(chat, help_text(user))
     except Exception as exc:  # noqa: BLE001
+        outcome = "error"
         log.error("handling message failed: %s", redact(f"{type(exc).__name__}: {exc}"))
         await tg.send(chat, f"Something went wrong: {esc(redact(str(exc))[:300])}")
+    finally:
+        metrics.count(conn, "command", used, outcome)

@@ -78,7 +78,7 @@ def now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Version 2: members, per-member watchlists and deadlines, email dedupe, replayable verdicts.
 V2_MIGRATION = """
@@ -147,7 +147,46 @@ ALTER TABLE users ADD COLUMN email_failures INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN email_locked_until TEXT;
 """
 
-MIGRATIONS = {2: V2_MIGRATION, 3: V3_MIGRATION}
+# Version 4: owner metrics. Counts, durations and provider-reported amounts only: never URLs, file
+# names, message text, addresses or member ids (see app/metrics.py).
+V4_MIGRATION = """
+CREATE TABLE metric_runs (
+    id          INTEGER PRIMARY KEY,
+    ran_at      TEXT NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    checked     INTEGER NOT NULL,
+    failed      TEXT NOT NULL,                    -- JSON list of service names that could not be checked
+    changes     INTEGER NOT NULL,
+    nudges      INTEGER NOT NULL,
+    sent        INTEGER NOT NULL,
+    undelivered INTEGER NOT NULL
+);
+CREATE TABLE metric_failures (
+    id     INTEGER PRIMARY KEY,
+    at     TEXT NOT NULL,
+    kind   TEXT NOT NULL,                         -- telegram | mail
+    error  TEXT NOT NULL                          -- exception type only
+);
+CREATE TABLE metric_counts (
+    day      TEXT NOT NULL,                       -- UTC date
+    kind     TEXT NOT NULL,                       -- provider | command | job
+    name     TEXT NOT NULL,
+    outcome  TEXT NOT NULL,                       -- ok | error | retried
+    n        INTEGER NOT NULL DEFAULT 0,
+    total_ms INTEGER NOT NULL DEFAULT 0,
+    max_ms   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, kind, name, outcome)
+);
+CREATE TABLE metric_usage (
+    day      TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    unit     TEXT NOT NULL,                       -- usd | input_tokens | output_tokens | credits | read_units | embed_tokens
+    amount   REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, provider, unit)
+);
+"""
+
+MIGRATIONS = {2: V2_MIGRATION, 3: V3_MIGRATION, 4: V4_MIGRATION}
 
 
 def backup_path(path: Path, version: int) -> Path:

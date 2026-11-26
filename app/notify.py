@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 from app import mail, users
 from app.agent import Clients, plain
@@ -19,11 +19,16 @@ class Sender(Protocol):
     async def send(self, chat_id: int, text: str) -> None: ...
 
 
+class Delivered(NamedTuple):
+    sent: int    # messages or email digests that went out
+    failed: int  # members whose delivery raised part-way
+
+
 async def deliver(
     conn: sqlite3.Connection, tg: Sender | None, cl: Clients, deliveries: dict[int, list[str]], subject: str
-) -> int:
-    """Send each member their own messages (HTML). Returns how many messages or digests went out."""
-    sent = 0
+) -> Delivered:
+    """Send each member their own messages (HTML). Reports what went out and how many members were missed."""
+    sent = failed = 0
     for user_id, messages in deliveries.items():
         user = users.active(users.by_id(conn, user_id))
         if not user or not messages:
@@ -39,8 +44,9 @@ async def deliver(
                 await mail.send(cl.mail, user.email, subject, body + FOOTER)
                 sent += 1
         except Exception as exc:  # noqa: BLE001 — one blocked chat or bounced address must not stop the others
+            failed += 1
             log.warning("delivery to member %s failed: %s", user_id, exc)
-    return sent
+    return Delivered(sent, failed)
 
 
 FOOTER = "\n\n—\nFine Print · information, not legal advice. Reply to this address with a forwarded email or a document to check it."

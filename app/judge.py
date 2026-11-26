@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import settings
 from app.gateway import Gateway
+from app.metrics import dig
 from app.watch import SectionChange
 
 SYSTEMONE_PATH = "systemone/v1/systemone"
@@ -223,10 +224,19 @@ def parse_verdict(data: dict[str, Any], partial: bool = False) -> Verdict:
     )
 
 
+def _report_usage(gw: Gateway, data: Any) -> None:
+    """What OpenCode says this judgment cost, and the tokens it counted."""
+    gw.report("usd", dig(data, "usage", "cost"))
+    gw.report("input_tokens", dig(data, "usage", "input_tokens"))
+    gw.report("output_tokens", dig(data, "usage", "output_tokens"))
+
+
 async def judge(gw: Gateway, service: str, change: SectionChange) -> Verdict:
     state, partial = state_for(service, change)
     body = {"model": settings.judge_model, "state": state, "questions": QUESTIONS}
-    return parse_verdict(await gw.post(SYSTEMONE_PATH, json=body), partial=partial)
+    data = await gw.post(SYSTEMONE_PATH, json=body)
+    _report_usage(gw, data)
+    return parse_verdict(data, partial=partial)
 
 
 # --- "Before you agree": judging a whole document you have not accepted yet ---------------------
@@ -245,5 +255,6 @@ async def red_flags(gw: Gateway, title: str, text: str) -> dict[str, float]:
     questions = {key: {"type": "noul", "instructions": q} for key, q in RED_FLAGS.items()}
     body = {"model": settings.judge_model, "state": {"document_title": title, "document": text}, "questions": questions}
     data = await gw.post(SYSTEMONE_PATH, json=body)
+    _report_usage(gw, data)
     resp = SystemOneResponse.model_validate(data)
     return {key: resp.noul(key) for key in RED_FLAGS}

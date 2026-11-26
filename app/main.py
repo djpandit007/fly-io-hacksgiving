@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import Annotated
 
@@ -21,7 +22,7 @@ from fastapi import (
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 
-from app import agent, bot, db, intake, ledger, mail, notify, sprite, users
+from app import agent, bot, db, intake, ledger, mail, metrics, notify, sprite, users
 from app.agent import Clients
 from app.config import settings
 from app.locks import locks
@@ -40,8 +41,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.conn = db.connect(settings.db_path)
-    app.state.clients = Clients()
+    recorder = metrics.Recorder(app.state.conn)
+    app.state.clients = Clients(recorder)
     app.state.tg = Telegram()
+    app.state.tg.recorder = recorder
     yield
     await app.state.clients.aclose()
     await app.state.tg.aclose()
@@ -67,6 +70,7 @@ class TickSummary(BaseModel):
     nudges: int
     members_notified: int
     sent: int
+    undelivered: int
 
 
 @app.get("/health")
@@ -79,16 +83,23 @@ async def tick(request: Request) -> TickSummary:
     """Daily run. Called by the external cron, which keeps the connection open until done."""
     st = request.app.state
     async with locks.hold("tick"), stay_awake("tick", expire="10m"):
+        started = time.monotonic()
         result = await agent.tick(st.conn, st.clients)
-        sent = await notify.deliver(st.conn, st.tg, st.clients, result.deliveries, "Fine Print: changes to terms you accepted")
+        delivered = await notify.deliver(st.conn, st.tg, st.clients, result.deliveries, "Fine Print: changes to terms you accepted")
+        metrics.run(
+            st.conn, duration_ms=metrics.elapsed_ms(started), checked=result.checked, failed=result.failed,
+            changes=result.changes, nudges=result.nudges, sent=delivered.sent, undelivered=delivered.failed,
+        )
+        metrics.prune(st.conn)
     return TickSummary(
-        checked=result.checked, failed=result.failed, changes=result.changes,
-        nudges=result.nudges, members_notified=len(result.deliveries), sent=sent,
+        checked=result.checked, failed=result.failed, changes=result.changes, nudges=result.nudges,
+        members_notified=len(result.deliveries), sent=delivered.sent, undelivered=delivered.failed,
     )
 
 
 async def _handle_message(app_: FastAPI, payload: dict, task: str) -> None:
     st = app_.state
+    started = time.monotonic()
     try:
         msg = parse_update(payload)
         if not msg:
@@ -96,6 +107,12 @@ async def _handle_message(app_: FastAPI, payload: dict, task: str) -> None:
         # The hold was taken before the webhook answered; keep refreshing it while queued and working.
         async with stay_awake(task, expire="5m"), locks.hold(f"chat:{msg.chat_id}"):
             await bot.handle(st.conn, st.clients, st.tg, msg)
+        metrics.count(st.conn, "job", "telegram", "ok", metrics.elapsed_ms(started))
+    except Exception as exc:
+        # bot.handle reports command errors itself; this is what escaped it.
+        metrics.count(st.conn, "job", "telegram", "error", metrics.elapsed_ms(started))
+        metrics.failure(st.conn, "telegram", exc)
+        raise
     finally:
         await sprite.release(task)
 
@@ -119,11 +136,15 @@ async def telegram_webhook(
 
 async def _handle_mail(app_: FastAPI, message_id: str, thread_id: str | None, sender: str, task: str) -> None:
     st = app_.state
+    started = time.monotonic()
     try:
         async with stay_awake(task, expire="5m"), locks.hold(f"email:{sender}"):
             await intake.process(st.conn, st.clients, st.tg, message_id, thread_id)
+        metrics.count(st.conn, "job", "mail", "ok", metrics.elapsed_ms(started))
     except Exception as exc:  # noqa: BLE001
         log.warning("mail %s failed: %s", task, exc)
+        metrics.count(st.conn, "job", "mail", "error", metrics.elapsed_ms(started))
+        metrics.failure(st.conn, "mail", exc)
     finally:
         await sprite.release(task)
 

@@ -67,3 +67,25 @@ def test_only_one_owner(tmp_path):
         raise AssertionError("second owner accepted")
     except sqlite3.IntegrityError:
         pass
+
+
+def test_v3_database_gains_metrics_tables_and_keeps_its_data(tmp_path):
+    path = tmp_path / "v3.db"
+    conn = sqlite3.connect(path, isolation_level=None)
+    conn.executescript(db.SCHEMA)
+    for version in (2, 3):
+        for stmt in (s.strip() for s in db.MIGRATIONS[version].split(";\n")):
+            if stmt:
+                conn.execute(stmt)
+    conn.execute("PRAGMA user_version = 3")
+    conn.execute("INSERT INTO services (name, terms_url, added_at) VALUES ('Acme', 'https://acme.test/terms', ?)", (db.now(),))
+    conn.execute("INSERT INTO users (chat_id, calendar_token, joined_at) VALUES (7, 'tok', ?)", (db.now(),))
+    conn.close()
+
+    conn = db.connect(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert {"metric_runs", "metric_failures", "metric_counts", "metric_usage"} <= tables
+    assert conn.execute("SELECT name FROM services").fetchone()[0] == "Acme"
+    assert conn.execute("SELECT chat_id FROM users").fetchone()[0] == 7
+    assert db.backup_path(path, 3).exists()

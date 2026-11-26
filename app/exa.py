@@ -8,6 +8,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from app.gateway import Gateway
+from app.metrics import dig
 
 
 class Result(BaseModel):
@@ -24,9 +25,13 @@ async def search(gw: Gateway, query: str, domain: str | None = None, num: int = 
     body: dict = {"query": query, "numResults": num, "type": "auto"}
     if domain:
         body["includeDomains"] = [domain]
-    return Results.model_validate(await gw.post("search", json=body)).results
+    data = await gw.post("search", json=body)
+    gw.report("usd", dig(data, "costDollars", "total"))
+    return Results.model_validate(data).results
 
 
 async def contents(gw: Gateway, url: str) -> str:
-    data = Results.model_validate(await gw.post("contents", json={"urls": [url], "text": True}))
-    return (data.results[0].text or "") if data.results else ""
+    data = await gw.post("contents", json={"urls": [url], "text": True})
+    gw.report("usd", dig(data, "costDollars", "total"))
+    results = Results.model_validate(data).results
+    return (results[0].text or "") if results else ""

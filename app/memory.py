@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import settings
 from app.gateway import Gateway
+from app.metrics import dig
 
 EMBED_MODEL = "llama-text-embed-v2"  # 1024 dimensions
 MAX_CHARS = 6000                     # stay inside the embedding model's input limit
@@ -74,6 +75,7 @@ async def embed(gw: Gateway, text: str, input_type: Literal["passage", "query"])
             "inputs": [{"text": text[:MAX_CHARS]}],
         },
     )
+    gw.report("embed_tokens", dig(data, "usage", "total_tokens"))
     return EmbedResponse.model_validate(data).data[0].values
 
 
@@ -116,6 +118,7 @@ async def similar(
             "filter": {"service": {"$in": candidates}},
         },
     )
+    gw.report("read_units", dig(data, "usage", "readUnits"))
     found = [
         Precedent(service=m.metadata.service, heading=m.metadata.heading, text=m.metadata.text, score=m.score)
         for m in QueryResponse.model_validate(data).matches

@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Self
+import time
+from typing import Any, Protocol, Self
 
 import httpx
 
@@ -23,14 +24,29 @@ class ProviderNotConfigured(RuntimeError):
     pass
 
 
+class Recorder(Protocol):
+    """Where call counts and provider-reported amounts go (``app.metrics.Recorder``)."""
+
+    def count(self, kind: str, name: str, outcome: str = "ok", ms: int = 0) -> None: ...
+
+    def usage(self, provider: str, unit: str, amount: float) -> None: ...
+
+
 class Gateway:
-    def __init__(self, provider: Provider, timeout: float = 60.0, transport: httpx.AsyncBaseTransport | None = None):
+    def __init__(
+        self,
+        provider: Provider,
+        timeout: float = 60.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+        recorder: Recorder | None = None,
+    ):
         if not provider.configured:
             raise ProviderNotConfigured(f"{provider.name}: set FP_{provider.name.upper()}_BASE")
         headers = dict(provider.extra_headers)
         if key := provider.key.get_secret_value():
             headers[provider.auth_header] = f"{provider.auth_prefix}{key}"
         self.provider = provider
+        self.recorder = recorder
         self.client = httpx.AsyncClient(
             base_url=provider.base_url + "/", headers=headers, timeout=timeout, transport=transport
         )
@@ -38,16 +54,32 @@ class Gateway:
     async def request(self, method: str, path: str, *, retries: int = 3, **kwargs: Any) -> httpx.Response:
         delay = 1.0
         for attempt in range(retries + 1):
-            resp = await self.client.request(method, path.lstrip("/"), **kwargs)
+            started = time.monotonic()
+            try:
+                resp = await self.client.request(method, path.lstrip("/"), **kwargs)
+            except httpx.HTTPError:
+                self._count("error", started)
+                raise
             if resp.status_code not in RETRY_STATUSES or attempt == retries:
+                self._count("error" if resp.is_error else "ok", started)
                 if resp.is_error:
                     log.warning("%s %s %s -> %s: %s", self.provider.name, method, path, resp.status_code, resp.text[:500])
                 resp.raise_for_status()
                 return resp
+            self._count("retried", started)
             wait = float(resp.headers.get("retry-after", delay))
             await asyncio.sleep(min(wait, 30))
             delay *= 2
         raise AssertionError("unreachable")
+
+    def _count(self, outcome: str, started: float) -> None:
+        if self.recorder is not None:
+            self.recorder.count("provider", self.provider.name, outcome, int((time.monotonic() - started) * 1000))
+
+    def report(self, unit: str, amount: float | None) -> None:
+        """Record an amount this provider reported in a response (dollars, credits, tokens...)."""
+        if self.recorder is not None and amount is not None:
+            self.recorder.usage(self.provider.name, unit, amount)
 
     async def get(self, path: str, **kwargs: Any) -> Any:
         return (await self.request("GET", path, **kwargs)).json()

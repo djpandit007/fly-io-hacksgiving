@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.config import settings
 from app.gateway import Gateway
+from app.metrics import dig
 
 Tier = Literal["fast", "cost_effective", "agentic", "agentic_plus"]
 JobStatus = Literal["PENDING", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"]
@@ -97,7 +98,10 @@ async def _poll(gw: Gateway, path: str, params: dict[str, Any] | None = None, ti
 
 async def _result(gw: Gateway, job_id: str) -> Parsed:
     await _poll(gw, f"api/v2/parse/{job_id}")
-    result = ParseResult.model_validate(await gw.get(f"api/v2/parse/{job_id}", params={"expand": "markdown"}))
+    # `usage` is only returned when asked for; credits can still be null until billing records the job.
+    data = await gw.get(f"api/v2/parse/{job_id}", params={"expand": ["markdown", "usage"]})
+    gw.report("credits", dig(data, "job", "usage", "credits"))
+    result = ParseResult.model_validate(data)
     pages = [Page(number=p.page_number, markdown=p.markdown) for p in (result.markdown.pages if result.markdown else []) if p.success]
     return Parsed(job_id=job_id, pages=pages)
 
@@ -191,8 +195,10 @@ async def extract_deadlines(gw: Gateway, parse_job_id: str) -> DocumentDeadlines
         },
     )
     job_id = Job.model_validate(job).id
-    poll_params = dict(params or {}) | {"expand": "extract_metadata"}
-    done = ExtractJob.model_validate(await _poll(gw, f"api/v2/extract/{job_id}", params=poll_params))
+    poll_params = dict(params or {}) | {"expand": ["extract_metadata", "usage"]}
+    data = await _poll(gw, f"api/v2/extract/{job_id}", params=poll_params)
+    gw.report("credits", dig(data, "usage", "credits"))
+    done = ExtractJob.model_validate(data)
     result = DocumentDeadlines.model_validate(done.extract_result or {})
     meta = ((done.extract_metadata or {}).get("field_metadata") or {}).get("document_metadata") or {}
     for i, item in enumerate(result.deadlines):

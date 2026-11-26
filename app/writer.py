@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.gateway import Gateway
+from app.metrics import dig
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +92,9 @@ async def chat(gw: Gateway, prompt: str, system: str = SYSTEM) -> str:
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
             },
         )
+        gw.report("usd", dig(data, "usage", "cost"))
+        gw.report("input_tokens", dig(data, "usage", "prompt_tokens"))
+        gw.report("output_tokens", dig(data, "usage", "completion_tokens"))
         completion = ChatCompletion.model_validate(data)
         if text := completion.text():
             return text

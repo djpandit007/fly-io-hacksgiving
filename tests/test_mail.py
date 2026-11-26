@@ -386,7 +386,7 @@ async def test_deliver_uses_telegram_for_chats_and_one_digest_for_email_only(con
     cl = agent.Clients()
     sent = await notify.deliver(conn, tg, cl, {chat_member.id: ["<b>one</b>", "two"], email_member.id: ["<b>a</b>", "b"]}, "Subject")
     await cl.aclose()
-    assert tg.to(7) == ["<b>one</b>", "two"] and send.call_count == 1 and sent == 3
+    assert tg.to(7) == ["<b>one</b>", "two"] and send.call_count == 1 and sent == (3, 0)
     body = json.loads(send.calls[0].request.content)
     assert body["to"] == ["judge@example.com"] and "**a**" in body["text"] and "b" in body["text"]
 

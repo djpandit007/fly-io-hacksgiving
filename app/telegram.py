@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import html
 import re
+import time
 
 import httpx
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.gateway import Recorder
 
 API = "https://api.telegram.org"
 MAX_LEN = 4000
@@ -54,12 +56,27 @@ class Telegram:
     def __init__(self, token: str | None = None, client: httpx.AsyncClient | None = None):
         self.token = token or settings.telegram_token.get_secret_value()
         self.client = client or httpx.AsyncClient(timeout=30)
+        self.recorder: Recorder | None = None  # set by the app; counts calls and failures as provider "telegram"
 
     @property
     def configured(self) -> bool:
         return bool(self.token)
 
     async def call(self, method: str, **params) -> dict:
+        started = time.monotonic()
+        try:
+            result = await self._call(method, **params)
+        except TelegramError:
+            self._count("error", started)
+            raise
+        self._count("ok", started)
+        return result
+
+    def _count(self, outcome: str, started: float) -> None:
+        if self.recorder is not None:
+            self.recorder.count("provider", "telegram", outcome, int((time.monotonic() - started) * 1000))
+
+    async def _call(self, method: str, **params) -> dict:
         try:
             resp = await self.client.post(f"{API}/bot{self.token}/{method}", json=params)
             data = _Result.model_validate(resp.json())
