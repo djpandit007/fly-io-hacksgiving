@@ -73,6 +73,19 @@ class Clients:
                 await gw.aclose()
 
 
+FAVOURS_TEXT = {"company": "favours the company", "consumer": "favours you", "neutral": "neutral"}
+
+
+def flag_line(key: str, p: float) -> str:
+    """One red flag in words; the number is how sure the judge is of the word shown."""
+    name = key.replace("_", " ")
+    if p >= 0.7:
+        return f"🔴 Found ({p:.0%} sure): {name}"
+    if p >= 0.3:
+        return f"🟡 Unclear ({p:.0%} sure): {name}"
+    return f"🟢 Not found ({1 - p:.0%} sure): {name}"
+
+
 class ChangeReport(BaseModel):
     change_id: int
     service: str
@@ -87,7 +100,10 @@ class ChangeReport(BaseModel):
 
     def to_html(self) -> str:
         v = self.verdict
-        badge = f"{v.category} · severity {v.severity:.1f}/3 · favours {v.favours}" if v else "unjudged"
+        badge = (
+            f"{v.category} · {judge.severity_label(v.severity)} ({v.severity:.1f}/3) · {FAVOURS_TEXT[v.favours]}"
+            if v else "unjudged"
+        )
         if v and v.partial:
             badge += " · large change, partly judged: please skim it"
         lines = [
@@ -440,9 +456,7 @@ async def verdict_card(cl: Clients, title: str, text: str, domain: str | None = 
     if card:
         lines.append(rich(card))
     if flags:
-        lines.append(
-            "\n".join(f"{'🔴' if p >= 0.7 else '🟡' if p >= 0.3 else '🟢'} {k.replace('_', ' ')} ({p:.0%})" for k, p in flags.items())
-        )
+        lines.append("What I checked for:\n" + "\n".join(flag_line(k, p) for k, p in flags.items()))
     if domain and (rating := await tosdr.lookup(domain)):
         grade = rating.grade or "unrated"
         lines.append(f"ToS;DR community grade: <b>{grade}</b> — <a href=\"{rating.url}\">details</a>")
@@ -543,7 +557,7 @@ async def wrapped(conn: sqlite3.Connection, cl: Clients, user: User) -> str:
     if not stats:
         return "Nothing material changed in the terms you accepted this year. Suspiciously quiet."
     facts = "\n".join(
-        f"- {r['service']}: {r['n']} material change(s) about {r['category'] or 'other'}, worst severity {r['worst'] or 0:.1f}/3"
+        f"- {r['service']}: {r['n']} material change(s) about {r['category'] or 'other'}, worst severity {judge.severity_label(r['worst'] or 0)} ({r['worst'] or 0:.1f}/3)"
         for r in stats
     )
     total = sum(r["n"] for r in stats)

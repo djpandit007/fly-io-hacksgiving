@@ -39,6 +39,14 @@ SEVERITY_LEVELS = [
     "The change removes a significant right, adds significant cost, or expands data use in a way many users would object to or act on.",
 ]
 
+# Short names for SEVERITY_LEVELS, in the same order, for what members see.
+SEVERITY_LABELS = ["Cosmetic", "Minor", "Worth knowing", "Major"]
+
+
+def severity_label(score: float) -> str:
+    return SEVERITY_LABELS[min(max(round(score), 0), len(SEVERITY_LABELS) - 1)]
+
+
 QUESTIONS: dict[str, dict[str, Any]] = {
     "material": {
         "type": "noul",

@@ -9,6 +9,7 @@ import pytest
 import respx
 
 from app import agent, db, ledger, users
+from app.judge import Verdict
 from app.watch import html_to_markdown, normalise
 from tests.test_judge import GOOD
 from tests.test_watch import NEW_HTML, OLD_HTML
@@ -235,7 +236,8 @@ async def test_verdict_card_survives_writer_failure():
     cl = agent.Clients()
     card = await agent.verdict_card(cl, "Lease", "Some lease text")
     await cl.aclose()
-    assert "🔴 arbitration (90%)" in card and "not legal advice" in card
+    assert "What I checked for:" in card and "🔴 Found (90% sure): arbitration" in card
+    assert "not legal advice" in card
 
 
 def test_later_watcher_cannot_repoint_a_shared_service(conn):
@@ -260,3 +262,17 @@ def test_shared_service_stores_a_canonical_https_url(conn):
     assert svc.terms_url == "https://www.acme.test/Terms"
     again = agent.add_service(conn, "Acme", "https://acme.test/Terms")
     assert again.id == svc.id and again.terms_url == "https://www.acme.test/Terms"
+
+
+def test_flag_lines_say_what_the_number_means():
+    assert agent.flag_line("auto_renews", 0.83) == "🔴 Found (83% sure): auto renews"
+    assert agent.flag_line("data_sharing", 0.45) == "🟡 Unclear (45% sure): data sharing"
+    assert agent.flag_line("hard_to_cancel", 0.08) == "🟢 Not found (92% sure): hard to cancel"
+
+
+def test_change_badge_uses_words_and_number():
+    v = Verdict(material=0.9, category="data", opt_out=0.1, favours="company", severity=2.6)
+    r = agent.ChangeReport(change_id=1, service="S", heading="H", kind="modified",
+                           effective_at=datetime(2026, 3, 4, tzinfo=UTC), verdict=v, summary="x", redline="x")
+    assert "data · Major (2.6/3) · favours the company" in r.to_html()
+    assert "unjudged" in r.model_copy(update={"verdict": None}).to_html()

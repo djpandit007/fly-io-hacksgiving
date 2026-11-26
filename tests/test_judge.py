@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.judge import QUESTIONS, SystemOneResponse, parse_verdict
+from app.judge import QUESTIONS, SystemOneResponse, parse_verdict, severity_label
 
 GOOD = {
     "model": "jev-1.14.0",
@@ -73,3 +73,11 @@ def test_change_too_large_to_show_fails_closed():
     quiet = {**GOOD, "answers": {**GOOD["answers"], "material": {"type": "noul", "noul": 0.02}}}
     assert parse_verdict(quiet, partial=True).is_material()
     assert not parse_verdict(quiet).is_material()
+
+
+@pytest.mark.parametrize(
+    "score,label",
+    [(0, "Cosmetic"), (1.49, "Minor"), (1.5, "Worth knowing"), (2.6, "Major"), (3, "Major"), (3.4, "Major")],
+)
+def test_severity_label(score, label):
+    assert severity_label(score) == label
