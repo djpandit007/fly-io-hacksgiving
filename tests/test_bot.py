@@ -869,3 +869,22 @@ async def test_long_ask_answer_never_splits_a_blockquote(conn, tg, monkeypatch):
     chunks = split(tg.last(2)["text"])
     assert len(chunks) > 1 and all(len(c) <= MAX_LEN for c in chunks)
     assert all(c.count("<blockquote") == c.count("</blockquote>") for c in chunks)
+
+
+async def test_multi_paragraph_quotes_never_split_a_blockquote(conn, tg, monkeypatch):
+    from app import ask
+    from app.ask_tools import Clause
+    from app.telegram import MAX_LEN, split
+
+    # Quotes that cross paragraph breaks in the stored terms (verification ignores whitespace).
+    quote = "\n\n".join(["p" * 60] * 6)
+    clauses = [Clause(service=f"Svc{i}", heading=f"Heading {i}", quote=quote) for i in range(ask.MAX_CLAUSES)]
+    labels = [f"Svc{i} · Heading {i}" for i in range(ask.MAX_CLAUSES)]
+    long_html = "\n\n".join(["s" * 1500, "p" * 1500, ask._quotes(clauses, labels), ask.DISCLAIMER])
+    assert len(long_html) > MAX_LEN
+    fake_ask(monkeypatch, outcome="answered", html=long_html)
+    await say(conn, tg, 2, "/start join-code")
+    await say(conn, tg, 2, "/ask can spotify raise prices?", message_id=95)
+    chunks = split(tg.last(2)["text"])
+    assert len(chunks) > 1 and all(len(c) <= MAX_LEN for c in chunks)
+    assert all(c.count("<blockquote") == c.count("</blockquote>") for c in chunks)

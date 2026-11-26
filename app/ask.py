@@ -199,15 +199,23 @@ def _esc(text: str) -> str:
     return html.escape(text, quote=False)
 
 
+def _flat(text: str) -> str:
+    """One line: the reply's line breaks come only from the renderer, never from model or terms text.
+
+    Telegram.send splits long messages at blank lines, so a blank line inside the blockquote (a quote
+    that crosses a paragraph break passes verification, which ignores whitespace) would break its HTML.
+    """
+    return " ".join(text.split())
+
+
 def _cut(text: str, limit: int = MAX_QUOTE_CHARS) -> str:
-    text = text.strip()
+    text = _flat(text)
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 def _quotes(clauses: list[Clause], labels: list[str]) -> str:
-    # Single line breaks only: Telegram.send splits long messages at blank lines, and a split inside
-    # the blockquote would leave unbalanced HTML.
-    lines = [f"“{_esc(_cut(c.quote))}”\n<i>{_esc(label)}</i>" for c, label in zip(clauses, labels)]
+    # Single line breaks only, and none from the text itself (see _flat).
+    lines = [f"“{_esc(_cut(c.quote))}”\n<i>{_esc(_flat(label))}</i>" for c, label in zip(clauses, labels)]
     return "<blockquote expandable>" + "\n".join(lines) + "</blockquote>"
 
 

@@ -574,3 +574,27 @@ def test_prompt_labels_keep_the_whole_heading():
 
     clause = Clause(service="Svc", heading="H" * 200, quote="q")
     assert "H" * 200 in ask._label(clause, date(2026, 11, 26))
+
+
+def test_multi_paragraph_quote_cannot_blank_line_the_blockquote():
+    from datetime import date
+
+    clause = Clause(service="Spotify\n\nPremium", heading="Payments\nand\n\nRefunds",
+                    quote="We may change prices.\n\nWe will tell you first.\n \n Then it applies.")
+    labels = [ask._label(clause, date(2026, 11, 26), ask.MAX_LABEL_HEADING_CHARS)]
+    for html in (ask._render_answer(Answer(summary="s", cites=[1]), [clause], labels),
+                 ask._render_quotes_only([clause], labels)):
+        block = _quote_block(html)
+        assert "\n\n" not in block
+        assert "We may change prices. We will tell you first. Then it applies." in block
+        assert "Spotify Premium · Payments and Refunds" in block
+
+
+def test_summary_and_points_cannot_inject_blank_lines():
+    clauses, labels = _clauses(1, 50)
+    ans = Answer(summary="Yes.\n\nWith notice.", points=["First.\n\nSecond.", "Third.\nFourth."], cites=[1])
+    html = ask._render_answer(ans, clauses, labels)
+    assert "Yes. With notice." in html
+    assert "- First. Second.\n- Third. Fourth." in html
+    summary, points = html.split("\n\n")[:2]
+    assert summary == "Yes. With notice." and points.startswith("- First.")
