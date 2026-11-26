@@ -297,4 +297,21 @@ Decisions:
 
 ## Spike results
 
-_Filled in by Task 0._
+Run on the Sprite through the OpenCode connector on 2026-11-26, with `pydantic-ai-slim[openai]` **2.75.0**.
+
+- **Tool calling and structured output:** `deepseek-v4.1-flash` called the tool and returned a valid
+  Pydantic `output_type`. `agent_model` keeps the writer model's default.
+- **GLM 5.3 Flash:** the model id is `glm-5.3-flash`. It returned structured output and also called
+  tools. `verifier_model` defaults to `glm-5.3-flash`.
+- **Names confirmed in 2.75.0:** `pydantic_ai.models.openai.OpenAIChatModel`,
+  `pydantic_ai.providers.openai.OpenAIProvider(openai_client=...)`,
+  `pydantic_ai.usage.UsageLimits(request_limit=...)`, `pydantic_ai.exceptions.UsageLimitExceeded`,
+  `pydantic_ai.models.function.FunctionModel`.
+- **Difference from the plan's assumptions:** `result.usage` is a property in 2.x; calling
+  `result.usage()` emits a deprecation warning. Use `result.usage`.
+- **Authorization header:** the connector accepted requests both with and without the SDK's
+  placeholder `Authorization` header. Task 1 still strips it so the gateway's own header is the only one.
+- **Cost:** each chat response carries `usage.cost` (dollars), `usage.prompt_tokens` and
+  `usage.completion_tokens`, as `writer.chat` already reads them. One agent run makes several requests
+  (two for a single tool call), so cost must be reported per HTTP response, as Task 1's transport does.
+- The spike script was deleted from the Sprite; nothing under `/home/sprite/fine-print` was touched.
