@@ -1,0 +1,36 @@
+# Runs the test suite and the linter on every pull request (and on main after a merge). The
+# protect-main ruleset requires the "tests" and "lint" checks to pass before a pull request can merge.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --locked --python 3.12
+      - name: Run tests
+        run: uv run pytest -q
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      # Pinned so a new ruff release (and its default rules) can't fail PRs unannounced; bump on purpose.
+      - name: Lint
+        run: uvx ruff@0.17.6 check .

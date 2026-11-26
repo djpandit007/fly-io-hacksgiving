@@ -89,7 +89,7 @@ to fail or to return a different result.
 ### Requirement: Owner reads metrics with /stats
 The system SHALL answer the owner's `/stats` command with a summary of the past 7 days: daily runs and
 their failures, background job failures, per-provider calls, failures and response times, reported cost,
-and usage totals. Members who are not the owner SHALL be told the command is owner-only.
+usage totals, and answer feedback. Members who are not the owner SHALL be told the command is owner-only.
 
 #### Scenario: Owner asks for stats
 - **WHEN** the owner sends `/stats`
@@ -102,6 +102,14 @@ and usage totals. Members who are not the owner SHALL be told the command is own
 #### Scenario: No per-member breakdown
 - **WHEN** the owner sends `/stats`
 - **THEN** the reply contains totals only and does not attribute any activity to an individual member
+
+#### Scenario: Feedback summary
+- **WHEN** answers were rated during the past 7 days
+- **THEN** the reply shows, for each kind of answer, the number of ratings, the share that were 👍, the 👎 reasons, and the 👍 share for each prompt version
+
+#### Scenario: No feedback yet
+- **WHEN** no answers were rated during the past 7 days
+- **THEN** the reply says there is no feedback yet rather than showing 0%
 
 ### Requirement: Cost is reported honestly in /stats
 The `/stats` reply SHALL show the dollar total of provider-reported cost,
@@ -134,3 +142,12 @@ The system SHALL keep metrics for 90 days and SHALL remove older metrics during 
 #### Scenario: Old metrics are pruned
 - **WHEN** a daily run happens and metrics older than 90 days exist
 - **THEN** those older metrics are removed and newer ones are kept
+
+### Requirement: Button taps are counted
+The system SHALL count button taps per day by action name and outcome, in the same way as commands. The
+counts SHALL hold no button data, no service and no member. Rating taps SHALL NOT also be counted here,
+because answer feedback records them.
+
+#### Scenario: Member unwatches from a button
+- **WHEN** a member taps Unwatch
+- **THEN** the day's count for the unwatch tap rises by one, and the count names neither the service nor the member

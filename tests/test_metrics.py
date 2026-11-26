@@ -25,6 +25,7 @@ from app import (
 from app.config import settings
 from app.gateway import Gateway
 from app.telegram import Incoming, Telegram, TelegramError
+from tests.test_bot import FakeTelegram as BotFakeTelegram
 from tests.test_judge import GOOD
 
 
@@ -42,20 +43,15 @@ class Seen:
         self.amounts[(provider, unit)] = self.amounts.get((provider, unit), 0) + amount
 
 
-class FakeTelegram:
-    configured = True
-
+class FakeTelegram(BotFakeTelegram):
     def __init__(self, broken: int | None = None):
-        self.sent: list[tuple[int, str]] = []
+        super().__init__()
         self.broken = broken
 
-    async def send(self, chat, text):
+    async def send(self, chat, text, **kw):
         if chat == self.broken:
             raise TelegramError("Telegram sendMessage failed: blocked")
-        self.sent.append((chat, text))
-
-    def to(self, chat):
-        return [t for c, t in self.sent if c == chat]
+        return await super().send(chat, text, **kw)
 
 
 @pytest.fixture
@@ -315,10 +311,10 @@ async def say(conn, tg, chat, text, **kwargs):
 
 
 async def test_commands_are_counted_by_name_without_content_or_member(conn, monkeypatch):
-    async def fake_check(cl, url):
+    async def fake_check(cl, url, **kw):
         return "card"
 
-    async def broken_file(*args):
+    async def broken_file(*args, **kw):
         raise RuntimeError("cannot parse secret-lease.pdf")
 
     monkeypatch.setattr(agent, "check_url", fake_check)
@@ -380,3 +376,46 @@ def test_report_covers_runs_providers_cost_and_usage(conn):
 def test_report_on_an_empty_database(conn):
     text = metrics.report(conn)
     assert "None recorded." in text and "No dollar cost reported." in text and "Commands: none" in text
+
+
+# --- Buttons and answer feedback in /stats -------------------------------------------------------------
+
+def test_report_shows_button_use_and_answer_feedback(conn):
+    from app import feedback
+    from app.outgoing import Answer
+
+    metrics.count(conn, "tap", "unwatch")
+    metrics.count(conn, "tap", "unwatch")
+    metrics.count(conn, "tap", "explain", "error")
+    for vote, reason in (("up", None), ("up", None), ("down", "wrong")):
+        token = feedback.issue(conn, Answer(kind="verdict", model="m", prompt_version="v2"))
+        feedback.vote(conn, token, vote)
+        if reason:
+            feedback.reason(conn, token, reason)
+    text = metrics.report(conn)
+    assert "Buttons: unwatch 2, explain 1 (1 failed)" in text
+    assert "<b>Answer feedback</b>\n• Verdict cards — 3 rated, 66% 👍; 👎 because: Wrong 1 (by prompt: v2 66% of 3)" in text
+
+
+def test_report_without_feedback_says_so(conn):
+    text = metrics.report(conn)
+    assert "Buttons: none" in text and "No feedback yet." in text and "0%" not in text
+
+
+def test_daily_run_prunes_old_feedback(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app import feedback
+    from app.outgoing import Answer
+
+    async def fake_tick(conn_, cl):
+        return agent.TickResult()
+
+    monkeypatch.setattr(agent, "tick", fake_tick)
+    with TestClient(main.app) as client:
+        conn = db.connect(settings.db_path)
+        old = feedback.issue(conn, Answer(kind="alert", model="m", prompt_version="v1"))
+        conn.execute("UPDATE answers SET sent_at = ? WHERE token = ?",
+                     ((datetime.now(UTC) - timedelta(days=100)).isoformat(), old))
+        client.post("/tick", headers={"X-Fine-Print-Secret": "test-secret"})
+        assert conn.execute("SELECT COUNT(*) FROM answers WHERE token = ?", (old,)).fetchone()[0] == 0

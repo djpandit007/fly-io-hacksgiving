@@ -226,6 +226,13 @@ def report(conn: sqlite3.Connection, days: int = REPORT_DAYS) -> str:
     command_text = ", ".join(
         f"{esc(c['name'])} {c['n']}" + (f" ({c['failed']} failed)" if c["failed"] else "") for c in commands
     )
+    tapped = conn.execute(
+        "SELECT name, SUM(n) AS n, SUM(CASE WHEN outcome = 'error' THEN n ELSE 0 END) AS failed FROM metric_counts "
+        "WHERE kind = 'tap' AND day >= ? GROUP BY name ORDER BY n DESC, name", (day,),
+    ).fetchall()
+    tap_text = ", ".join(
+        f"{esc(t['name'])} {t['n']}" + (f" ({t['failed']} failed)" if t["failed"] else "") for t in tapped
+    )
     out.append(
         "\n<b>Usage</b>\n"
         f"Members: {scalar("SELECT COUNT(*) FROM users WHERE status = 'active'")} active, "
@@ -233,6 +240,14 @@ def report(conn: sqlite3.Connection, days: int = REPORT_DAYS) -> str:
         f"Services watched: {scalar('SELECT COUNT(DISTINCT service_id) FROM subscriptions')}\n"
         "Material changes found: "
         f"{scalar('SELECT COUNT(*) FROM changes WHERE detected_at >= ? AND (material >= ? OR partial = 1)', stamp, settings.material_threshold)}\n"
-        f"Commands: {command_text or 'none'}"
+        f"Commands: {command_text or 'none'}\n"
+        f"Buttons: {tap_text or 'none'}"
     )
+
+    from app import (
+        feedback,  # here, not at the top: feedback -> taps -> judge -> metrics would be a cycle
+    )
+
+    rated = feedback.summary(conn, days)
+    out.append("\n<b>Answer feedback</b>\n" + ("\n".join(rated) if rated else "No feedback yet."))
     return "\n".join(out)
