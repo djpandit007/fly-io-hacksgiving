@@ -728,7 +728,8 @@ async def test_wrapped_is_rated(conn, tg, monkeypatch):
 
 # --- Asking about terms ---------------------------------------------------------------------------
 
-def fake_ask(monkeypatch, outcome="not_found", html="I couldn't find that in the terms you watch.", raises=None):
+def fake_ask(monkeypatch, outcome="not_found", html="I couldn't find that in the terms you watch.", raises=None,
+             service=""):
     """Patch `ask.answer`; returns the questions it was asked."""
     from app import ask
 
@@ -739,7 +740,7 @@ def fake_ask(monkeypatch, outcome="not_found", html="I couldn't find that in the
         on_stage("Finding the clauses…")
         if raises:
             raise raises
-        return ask.AskResult(html=html, outcome=outcome)
+        return ask.AskResult(html=html, outcome=outcome, service=service)
 
     monkeypatch.setattr(ask, "answer", answer)
     return asked
@@ -866,6 +867,46 @@ async def test_unanswered_asks_are_not_rated(conn, tg, monkeypatch):
         await say(conn, tg, 2, "/ask can spotify raise prices?")
         assert tg.last(2)["buttons"] is None
     assert conn.execute("SELECT COUNT(*) FROM answers").fetchone()[0] == 0
+
+
+NOT_WATCHING_SPOTIFY = "You're not watching Spotify, so I haven't read its terms. Watch it and ask again."
+
+
+async def test_ask_about_unwatched_service_offers_to_watch(conn, tg, monkeypatch):
+    from app import taps
+    from tests.test_metrics import counts
+
+    fake_ask(monkeypatch, outcome="not_watching", html=NOT_WATCHING_SPOTIFY, service="Spotify")
+    await say(conn, tg, 2, "/start join-code")
+    await say(conn, tg, 2, "/ask can spotify raise my price mid-year?", message_id=96)
+    assert tg.last(2)["text"] == NOT_WATCHING_SPOTIFY and tg.last(2)["reply_to"] == 96
+    assert tg.last(2)["buttons"] == [[("Yes, watch it", taps.build("w", "Spotify")), ("No", taps.build("n"))]]
+    assert conn.execute("SELECT COUNT(*) FROM answers").fetchone()[0] == 0  # no feedback row
+    assert counts(conn, "command")[("/ask", "not_watching")] == 1
+
+
+async def test_not_watching_with_a_name_no_button_can_carry_has_no_buttons(conn, tg, monkeypatch):
+    fake_ask(monkeypatch, outcome="not_watching", html="You're not watching it.", service="not a name")
+    await say(conn, tg, 2, "/start join-code")
+    await say(conn, tg, 2, "/ask can it raise my price?")
+    assert tg.last(2)["text"] == "You're not watching it." and tg.last(2)["buttons"] is None
+
+
+async def test_tapping_watch_after_not_watching_runs_the_watch_flow(conn, tg, monkeypatch):
+    watched = []
+
+    async def fake_watch(conn_, cl, tg_, user, arg, reply_to):
+        watched.append((arg, reply_to))
+
+    monkeypatch.setattr(bot, "_watch", fake_watch)
+    fake_ask(monkeypatch, outcome="not_watching", html=NOT_WATCHING_SPOTIFY, service="Spotify")
+    await say(conn, tg, 2, "/start join-code")
+    await say(conn, tg, 2, "/ask can spotify raise my price mid-year?")
+    buttons = tg.last(2)["buttons"]
+    yes = buttons[0][0][1]
+    await tap(conn, tg, 2, yes, message_id=321, buttons=buttons)
+    assert watched == [("Spotify", 321)]
+    assert ("edit", 2, 321, None) in tg.calls and answers(tg) == ["On it…"]
 
 
 async def test_long_ask_answer_never_splits_a_blockquote(conn, tg, monkeypatch):

@@ -74,7 +74,7 @@ Each member's watchlist, deadlines, calendar feed and Wrapped are private to the
 | `/start <code>` | anyone | claim the bot (owner code) or join it (join code) |
 | `/watch <url, domain or name>` | members | watch a service's terms; shows its past year of material changes |
 | `/list` | members | your watchlist with community grades |
-| `/ask <question>` | members | ask about the terms you watch; answered with quotes from them. A plain question typed without `/ask` works too |
+| `/ask <question>` | members | ask about the terms you watch; answered with quotes from them. A plain question typed without `/ask` works too. Answers come from each watched service's terms page only (not its privacy policy), and asking about a service you don't watch offers to watch it |
 | `/deadlines` | members | your upcoming deadlines and your private calendar link |
 | `/wrapped` | members | your year in accepted terms |
 | `/email <address>`, `/verify <code>` | members | link your email so forwarded mail reaches you |

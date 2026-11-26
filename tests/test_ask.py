@@ -51,6 +51,10 @@ SCRIPT_QUOTE = "We may run <script> tags & trackers on every page"
 PAYMENT = Clause(service="Spotify", heading="Payments", quote=PAYMENT_QUOTE)
 DISPUTE = Clause(service="Spotify", heading="Disputes", quote=DISPUTE_QUOTE)
 QUESTION = "Can Spotify raise my price?"
+NOT_FOUND_COPY = (
+    "I couldn't find that in the terms you watch. "
+    "I read each service's terms page only, not its privacy policy or other policies."
+)
 
 
 def _ts(days_ago: int) -> str:
@@ -211,7 +215,7 @@ async def test_invented_quote_is_dropped_then_not_found(world, cl, jev):
     with models(research=Evidence(clauses=[invented])) as calls:
         result = await ask.answer(world["conn"], cl, world["me"], QUESTION)
     assert result.outcome == "not_found"
-    assert result.html == "I couldn't find that in the terms you watch."
+    assert result.html == NOT_FOUND_COPY
     assert calls.count("write") == 0
 
 
@@ -303,19 +307,97 @@ async def test_researcher_error_gives_error_outcome(world, cl, jev):
     assert calls.count("write") == 0
 
 
-async def test_research_request_limit_gives_error_outcome(world, cl, jev):
+async def test_research_request_limit_gives_not_found(world, cl, jev, caplog):
+    # A researcher that keeps searching has found nothing the terms say: tell the member so.
+    caplog.set_level(logging.DEBUG)
     requests = 0
 
     def forever(messages, info):
         nonlocal requests
         requests += 1
-        return ModelResponse(parts=[ToolCallPart("list_services", {})])
+        return ModelResponse(parts=[ToolCallPart("search_terms", {"query": "zebra-search advertisers"})])
 
-    with models(research=forever):
+    with models(research=forever) as calls:
+        result = await ask.answer(world["conn"], cl, world["me"], "Does Spotify share zebra-question data?")
+    assert result.outcome == "not_found"
+    assert result.html == NOT_FOUND_COPY
+    assert ask.RESEARCH_REQUEST_LIMIT == 12
+    assert requests == 12
+    assert calls.count("write") == 0 and jev.calls == 0
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "UsageLimitExceeded" in logged
+    assert "zebra" not in logged
+
+
+async def test_not_found_says_what_is_read(world, cl, jev):
+    with models(research=Evidence(answerable=False, missing="advertising")):
         result = await ask.answer(world["conn"], cl, world["me"], QUESTION)
-    assert result.outcome == "error"
-    assert result.html == "I couldn't answer that just now. Please try again."
-    assert requests == ask.RESEARCH_REQUEST_LIMIT
+    assert result.outcome == "not_found"
+    assert result.html == (
+        "I couldn't find that in the terms you watch. "
+        "I read each service's terms page only, not its privacy policy or other policies."
+    )
+
+
+def test_researcher_instructions_cover_unwatched_services_and_stopping():
+    text = " ".join(ask.RESEARCHER_INSTRUCTIONS.split())
+    assert "unwatched_service" in text
+    assert "at most three times" in text
+    assert ask.PROMPT_VERSION == "v2"
+
+
+# --- A question about a service the member does not watch -------------------------------------------
+
+async def test_unwatched_service_gives_not_watching(world, cl, jev):
+    with models(research=Evidence(clauses=[], answerable=False, unwatched_service="Spotify")) as calls:
+        result = await ask.answer(world["conn"], cl, world["other"], QUESTION)  # watches Notion only
+    assert result.outcome == "not_watching"
+    assert result.service == "Spotify"
+    assert "You're not watching Spotify" in result.html
+    assert result.html == "You're not watching Spotify, so I haven't read its terms. Watch it and ask again."
+    assert calls.count("write") == 0 and calls.count("check") == 0
+    assert jev.calls == 0
+
+
+async def test_unwatched_service_name_is_validated(world, cl, jev):
+    for name in ("<b>x</b>", "a b c", "", "a" * 70):
+        with models(research=Evidence(answerable=False, unwatched_service=name)) as calls:
+            result = await ask.answer(world["conn"], cl, world["other"], QUESTION)
+        assert (result.outcome, result.service) == ("not_found", ""), name
+        assert result.html == NOT_FOUND_COPY
+        assert calls.count("write") == 0
+
+
+async def test_unwatched_service_name_is_stripped(world, cl, jev):
+    with models(research=Evidence(answerable=False, unwatched_service="  Spotify \n")):
+        result = await ask.answer(world["conn"], cl, world["other"], QUESTION)
+    assert (result.outcome, result.service) == ("not_watching", "Spotify")
+
+
+async def test_watched_service_is_never_reported_as_unwatched(world, cl, jev):
+    with models(research=Evidence(answerable=False, unwatched_service="spotify")):
+        result = await ask.answer(world["conn"], cl, world["me"], QUESTION)  # watches Spotify
+    assert (result.outcome, result.service) == ("not_found", "")
+
+
+async def test_unwatched_service_after_irrelevant_clauses_gives_not_watching(world, cl, jev):
+    jev.score = 0.1
+    with models(research=Evidence(clauses=[PAYMENT], unwatched_service="Discord")) as calls:
+        result = await ask.answer(world["conn"], cl, world["me"], QUESTION)
+    assert (result.outcome, result.service) == ("not_watching", "Discord")
+    assert calls.count("write") == 0
+
+
+async def test_unwatched_service_is_ignored_when_clauses_verify(world, cl, jev):
+    with models(
+        research=Evidence(clauses=[PAYMENT], unwatched_service="Notion"),
+        write=Answer(summary="Yes, with notice.", cites=[1]),
+        check=OK,
+    ):
+        result = await ask.answer(world["conn"], cl, world["me"], QUESTION)
+    assert result.outcome == "answered"
+    assert result.service == ""
+    assert "not watching" not in result.html
 
 
 async def test_no_ai_gateway_gives_error_outcome(world, cl, jev):

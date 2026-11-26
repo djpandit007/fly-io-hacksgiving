@@ -50,6 +50,8 @@ class Evidence(BaseModel):
     clauses: list[Clause] = Field(default_factory=list)
     answerable: bool = True
     missing: str = ""
+    # The service the question is about when the member does not watch it; checked by `ask` before use.
+    unwatched_service: str = ""
 
 
 class Hit(BaseModel):

@@ -244,6 +244,14 @@ async def _reply(
         await tg.send(chat, out.text, reply_to=reply_to if i == 0 else None, buttons=rows or None)
 
 
+def _watch_offer(name: str) -> Buttons | None:
+    """The "Watch X?" suggestion's buttons for a service an answer named, or none if they can't carry it."""
+    try:
+        return [[("Yes, watch it", taps.build("w", name)), ("No", taps.build("n"))]]
+    except ValueError:
+        return None
+
+
 async def _ask(conn: sqlite3.Connection, cl: Clients, tg: Telegram, user: User, question: str, reply_to: int | None) -> str:
     """Answer a question about the member's watched terms; returns the metric outcome."""
     chat = user.chat_id
@@ -256,7 +264,8 @@ async def _ask(conn: sqlite3.Connection, cl: Clients, tg: Telegram, user: User, 
         Answer(kind="ask", model=settings.agent_model, prompt_version=ask.PROMPT_VERSION, quotes_ok=True)
         if result.outcome in ASK_RATED else None
     )
-    await _reply(conn, tg, chat, [Outgoing(text=result.html, rate=rate)], reply_to)
+    buttons = _watch_offer(result.service) if result.outcome == "not_watching" else None
+    await _reply(conn, tg, chat, [Outgoing(text=result.html, rate=rate)], reply_to, buttons)
     return "ok" if result.outcome == "answered" else result.outcome
 
 
