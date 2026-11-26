@@ -510,6 +510,26 @@ async def test_tools_are_scoped_through_the_agent(world, cl, jev):
     assert result.outcome == "not_found"
 
 
+async def test_researcher_can_read_later_parts_of_a_long_section(world, cl, jev):
+    conn = world["conn"]
+    paragraphs = [f"Paragraph {i} " + " ".join(f"w{i}x{j}" for j in range(80)) for i in range(40)]
+    sid = _service(conn, "Longform", "## Long\n" + "\n\n".join(paragraphs) + "\n")
+    conn.execute("INSERT INTO subscriptions (user_id, service_id, created_at) VALUES (?, ?, ?)", (world["me"].id, sid, _ts(1)))
+    returned: list[Any] = []
+
+    def research(messages, info):
+        tool_returns = [p for m in messages for p in getattr(m, "parts", []) if isinstance(p, ToolReturnPart)]
+        if not tool_returns:
+            return ModelResponse(parts=[ToolCallPart("read_section", {"service": "Longform", "heading": "Long", "part": 2})])
+        returned.extend(p.content for p in tool_returns)
+        return _output(info, Evidence())
+
+    with models(research=research):
+        await ask.answer(conn, cl, world["me"], QUESTION)
+    assert returned and returned[0].startswith("[part 2 of ")
+    assert "part" in ask.RESEARCHER_INSTRUCTIONS
+
+
 async def test_researcher_sees_watchlist_tool(world, cl, jev):
     returned: list[Any] = []
 

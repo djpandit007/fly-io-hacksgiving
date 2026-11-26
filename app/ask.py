@@ -91,6 +91,8 @@ RESEARCHER_INSTRUCTIONS = (
     "You find the clauses in a person's watched terms of service that answer their question.\n"
     "- Call list_services first: only those services exist for this person.\n"
     "- Use search_terms, list_sections, read_section and recent_changes to find the relevant text.\n"
+    "- A long section comes back in parts, starting with a line like `[part 1 of 3]`: call "
+    "read_section again with part=2, part=3 and so on to read the rest. That line is not terms text.\n"
     "- Quote each clause word for word, copied exactly from read_section (source 'current') or from "
     "a recent change's text (source 'change' with its change_id). Never paraphrase or join quotes.\n"
     "- similar_clauses results are leads from other documents, not quotable evidence.\n"
@@ -138,9 +140,12 @@ async def list_sections(ctx: RunContext[AskDeps], service: str) -> list[str]:
 
 
 @researcher.tool
-async def read_section(ctx: RunContext[AskDeps], service: str, heading: str) -> str:
-    """The full text of one section of a watched service's current terms."""
-    return ask_tools.read_section(ctx.deps, service, heading)
+async def read_section(ctx: RunContext[AskDeps], service: str, heading: str, part: int = 1) -> str:
+    """The text of one section of a watched service's current terms.
+
+    A long section comes in parts and starts with `[part N of M]`; pass `part` to read the others.
+    """
+    return ask_tools.read_section(ctx.deps, service, heading, part)
 
 
 @researcher.tool

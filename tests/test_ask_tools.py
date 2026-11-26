@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 from datetime import UTC, date, datetime, timedelta
 
 import httpx
@@ -177,8 +178,9 @@ def test_verified_change_clause_checks_change_text_and_ownership(world):
     foreign = Clause(service="Notion", heading="Payments", quote=NOTION_CHANGE_QUOTE, source="change", change_id=theirs)
     foreign_as_spotify = foreign.model_copy(update={"service": "Spotify"})
     no_id = own_after.model_copy(update={"change_id": None, "quote": "New wording demands binding arbitration!"})
+    # Removed wording is not current terms: only the change's new text can be quoted.
     assert ask_tools.verified(world["mine"], [own_before, own_after, foreign, foreign_as_spotify, no_id]) == [
-        own_before, own_after,
+        own_after,
     ]
     assert ask_tools.verified(world["theirs"], [foreign]) == [foreign]
 
@@ -227,3 +229,97 @@ def test_verified_dedupes_after_canonicalising(world):
         Clause(service="Spotify", heading="Disputes", quote=DISPUTE_QUOTE),
     ]
     assert len(ask_tools.verified(world["mine"], clauses)) == 1
+
+
+def test_change_clause_quote_spanning_old_and_new_text_is_dropped(world):
+    cid = _change(
+        world["conn"], world["spotify"], world["spotify_snap"], "Disputes",
+        "Old wording about the small claims court", "New wording demands binding arbitration always",
+    )
+    spanning = Clause(service="Spotify", heading="Disputes", quote="about the small claims court New wording demands",
+                      source="change", change_id=cid)
+    assert ask_tools.verified(world["mine"], [spanning]) == []
+
+
+# --- Long sections, snippets and change lists --------------------------------------------------------
+
+def _watch(world, name, text):
+    sid, _ = _service(world["conn"], name, text)
+    world["conn"].execute(
+        "INSERT INTO subscriptions (user_id, service_id, created_at) VALUES (?, ?, ?)",
+        (world["mine"].user_id, sid, _ts(1)),
+    )
+    return sid
+
+
+def _paragraph(i: int) -> str:
+    return f"Paragraph {i} says " + " ".join(f"w{i}x{j}" for j in range(80)) + "."
+
+
+def _parts(deps, service, heading):
+    first = ask_tools.read_section(deps, service, heading)
+    total = int(re.match(r"\[part 1 of (\d+)\]\n", first).group(1))
+    return [ask_tools.read_section(deps, service, heading, part=n) for n in range(1, total + 1)]
+
+
+def test_long_section_is_readable_in_parts(world):
+    paragraphs = [_paragraph(i) for i in range(40)]
+    body = "\n\n".join(paragraphs)
+    assert len(body) > 20_000
+    _watch(world, "Longform", "## Long\n" + body + "\n")
+    parts = _parts(world["mine"], "Longform", "Long")
+    assert len(parts) >= 3
+    for n, part in enumerate(parts, 1):
+        header, text = part.split("\n", 1)
+        assert header == f"[part {n} of {len(parts)}]"
+        assert len(text) <= ask_tools.MAX_SECTION_CHARS
+    joined = "\n".join(parts)
+    assert all(p in joined for p in paragraphs)  # broken on paragraph boundaries: none is split
+    assert ask_tools.read_section(world["mine"], "Longform", "Long", part=len(parts) + 1) == ""
+    assert ask_tools.read_section(world["mine"], "Longform", "Long", part=0) == ""
+
+
+def test_long_paragraph_without_breaks_is_still_fully_readable(world):
+    body = " ".join(f"word{n}" for n in range(4000))
+    assert len(body) > 20_000
+    _watch(world, "Wall", "## Wall\n" + body + "\n")
+    texts = [p.split("\n", 1)[1] for p in _parts(world["mine"], "Wall", "Wall")]
+    assert all(len(t) <= ask_tools.MAX_SECTION_CHARS for t in texts)
+    assert "".join(texts) == body
+
+
+def test_short_section_has_no_part_header(world):
+    assert ask_tools.read_section(world["mine"], "Spotify", "Disputes").startswith("Any dispute")
+    assert ask_tools.read_section(world["mine"], "Spotify", "Disputes", part=2) == ""
+
+
+def test_quote_from_the_last_part_verifies(world):
+    paragraphs = [_paragraph(i) for i in range(40)]
+    _watch(world, "Longform", "## Long\n" + "\n\n".join(paragraphs) + "\n")
+    quote = paragraphs[-1][:120]
+    [kept] = ask_tools.verified(world["mine"], [Clause(service="Longform", heading="Long", quote=quote)])
+    assert kept.quote == quote
+
+
+def test_snippet_is_centred_on_the_matching_word(world):
+    _watch(world, "Deep", "## Misc\n" + "filler " * 100 + "the zebrafish clause applies here. " + "tail " * 100 + "\n")
+    [hit] = ask_tools.search_terms(world["mine"], "zebrafish")
+    assert "zebrafish" in hit.snippet
+    assert len(hit.snippet) <= ask_tools.SNIPPET_CHARS
+
+
+def test_snippet_falls_back_to_the_start_on_a_heading_match(world):
+    _watch(world, "Deep", "## Zebrafish\nAlpha beta gamma. " + "filler " * 100 + "\n")
+    [hit] = ask_tools.search_terms(world["mine"], "zebrafish")
+    assert hit.snippet.startswith("Alpha beta gamma.")
+
+
+def test_recent_changes_are_the_latest_ten_and_cut(world):
+    for days_ago in range(1, 13):
+        _change(world["conn"], world["spotify"], world["spotify_snap"], "Disputes", "old",
+                f"change from {days_ago} days ago " + "x" * 3000, days_ago=days_ago)
+    found = ask_tools.recent_changes(world["mine"], "Spotify")
+    assert len(found) == ask_tools.MAX_CHANGES == 10
+    assert all(len(c.after) <= ask_tools.MAX_CHANGE_CHARS == 2000 for c in found)
+    ages = {int(re.match(r"change from (\d+) days", c.after).group(1)) for c in found}
+    assert ages == set(range(1, 11))
