@@ -258,3 +258,31 @@ async def red_flags(gw: Gateway, title: str, text: str) -> dict[str, float]:
     _report_usage(gw, data)
     resp = SystemOneResponse.model_validate(data)
     return {key: resp.noul(key) for key in RED_FLAGS}
+
+
+# --- "Ask about terms": how relevant is each candidate clause to a member's question ------------
+
+RELEVANCE_CLAUSE_CHARS = 4_000
+
+
+async def relevance(gw: Gateway, question: str, clauses: list[str]) -> list[float]:
+    """One probability per clause, in order, that the clause helps answer the question."""
+    if not clauses:
+        return []
+    state: dict[str, Any] = {"question": question}
+    questions: dict[str, dict[str, Any]] = {}
+    for n, clause in enumerate(clauses, start=1):
+        state[f"clause_{n}"] = clause[:RELEVANCE_CLAUSE_CHARS]
+        questions[f"c{n}"] = {
+            "type": "noul",
+            "instructions": f"Does `clause_{n}` contain information that helps answer `question`?",
+        }
+    body = {"model": settings.judge_model, "state": state, "questions": questions}
+    data = await gw.post(SYSTEMONE_PATH, json=body)
+    _report_usage(gw, data)
+    resp = SystemOneResponse.model_validate(data)
+    scores = []
+    for n in range(1, len(clauses) + 1):
+        ans = resp.answers.get(f"c{n}")
+        scores.append(ans.noul if isinstance(ans, NoulAnswer) else 0.0)
+    return scores
