@@ -21,14 +21,15 @@ _PUNCTUATION = str.maketrans(
         "—": "-",
     }
 )
-_MARKDOWN = re.compile(r"[*_`#>|]")
+_DELETED = re.compile(r"[*_`]")
+_SEPARATORS = re.compile(r"[#>|]")
 _WHITESPACE = re.compile(r"\s+")
 _EDGE_CHARS = "\"' .…"
 
 
 def normalise(text: str) -> str:
     text = text.translate(_PUNCTUATION)
-    text = _MARKDOWN.sub("", text).lower()
+    text = _SEPARATORS.sub(" ", _DELETED.sub("", text)).lower()
     return _WHITESPACE.sub(" ", text).strip(_EDGE_CHARS)
 
 
@@ -36,4 +37,4 @@ def contains(quote: str, document: str) -> bool:
     needle = normalise(quote)
     if len(needle) < MIN_CHARS or len(needle.split()) < MIN_WORDS:
         return False
-    return needle in normalise(document)
+    return re.search(r"(?<!\w)" + re.escape(needle) + r"(?!\w)", normalise(document)) is not None

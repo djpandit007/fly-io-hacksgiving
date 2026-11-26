@@ -32,3 +32,17 @@ def test_too_short_rejected():
 def test_empty_inputs():
     assert not contains("", "x")
     assert not contains("a b c d e f g h", "")
+
+
+def test_quote_must_start_on_word_boundary():
+    assert not contains("limited liability is excluded for all users", "unlimited liability is excluded for all users")
+
+
+def test_quote_must_end_on_word_boundary():
+    assert not contains("you may cancel your subscription", "you may cancel your subscriptions at any time today")
+
+
+def test_table_cells_do_not_fuse():
+    document = "Refunds|None are offered after thirty days"
+    assert contains("refunds none are offered after thirty days", document)
+    assert not contains("refundsnone are offered after thirty days", document)
