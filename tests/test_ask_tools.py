@@ -167,3 +167,39 @@ def test_dated_current_and_change(world):
     assert ask_tools.dated(world["mine"], current) == (datetime.now(UTC) - timedelta(days=10)).date()
     assert ask_tools.dated(world["mine"], change) == (datetime.now(UTC) - timedelta(days=3)).date()
     assert ask_tools.dated(world["theirs"], current) is None
+
+
+def _watch_notion_too(world):
+    world["conn"].execute(
+        "INSERT INTO subscriptions (user_id, service_id, created_at) VALUES (?, ?, ?)",
+        (world["mine"].user_id, world["notion"], _ts(1)),
+    )
+
+
+def test_verified_change_clause_takes_service_and_heading_from_the_change(world):
+    _watch_notion_too(world)
+    cid = _change(
+        world["conn"], world["notion"], world["notion_snap"], "Guest seats",
+        "Guests were free before", NOTION_CHANGE_QUOTE + " from now on",
+    )
+    mislabelled = Clause(
+        service="Spotify", heading="Disputes", quote=NOTION_CHANGE_QUOTE, source="change", change_id=cid
+    )
+    [kept] = ask_tools.verified(world["mine"], [mislabelled])
+    assert (kept.service, kept.heading) == ("Notion", "Guest seats")
+    assert kept.quote == NOTION_CHANGE_QUOTE and kept.change_id == cid
+
+
+def test_verified_returns_canonical_service_name(world):
+    [kept] = ask_tools.verified(
+        world["mine"], [Clause(service=" spotify ", heading="Disputes", quote=DISPUTE_QUOTE)]
+    )
+    assert kept.service == "Spotify"
+
+
+def test_verified_dedupes_after_canonicalising(world):
+    clauses = [
+        Clause(service=" Spotify", heading="Disputes", quote=DISPUTE_QUOTE),
+        Clause(service="Spotify", heading="Disputes", quote=DISPUTE_QUOTE),
+    ]
+    assert len(ask_tools.verified(world["mine"], clauses)) == 1

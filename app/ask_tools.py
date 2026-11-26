@@ -157,28 +157,39 @@ async def similar_clauses(deps: AskDeps, text: str) -> list[Hit]:
 
 # --- Checking the researcher's evidence ------------------------------------------------------------
 
-def _supported(deps: AskDeps, clause: Clause) -> bool:
+def _attributed(deps: AskDeps, clause: Clause) -> Clause | None:
+    """The clause relabelled from the stored row its quote came from, or None if the quote is not there."""
     if clause.source == "current":
-        return contains(clause.quote, read_section(deps, clause.service, clause.heading))
-    if clause.change_id is None:
-        return False
-    owned = _owned_change(deps, clause.change_id)
+        service = _watched(deps, clause.service)
+        if service is None or not contains(clause.quote, read_section(deps, clause.service, clause.heading)):
+            return None
+        return clause.model_copy(update={"service": service.name})
+    owned = _owned_change(deps, clause.change_id) if clause.change_id is not None else None
     if owned is None:
-        return False
-    _, change = owned
-    return contains(clause.quote, change.before_text + "\n" + change.after_text)
+        return None
+    service, change = owned
+    if not contains(clause.quote, change.before_text + "\n" + change.after_text):
+        return None
+    return clause.model_copy(update={"service": service.name, "heading": change.heading})
 
 
 def verified(deps: AskDeps, clauses: list[Clause]) -> list[Clause]:
-    """Only clauses whose quote really appears in the member's own stored text, without duplicates."""
+    """Only clauses whose quote really appears in the member's own stored text, without duplicates.
+
+    Service and heading of a change clause, and the service name of a current one, come from the
+    database, never from the caller.
+    """
     kept: list[Clause] = []
     seen: set[tuple[str, str, str]] = set()
     for clause in clauses:
-        key = (clause.service.casefold(), clause.heading.strip().casefold(), normalise(clause.quote))
-        if key in seen or not _supported(deps, clause):
+        checked = _attributed(deps, clause)
+        if checked is None:
+            continue
+        key = (checked.service.casefold(), checked.heading.strip().casefold(), normalise(checked.quote))
+        if key in seen:
             continue
         seen.add(key)
-        kept.append(clause)
+        kept.append(checked)
     return kept
 
 
