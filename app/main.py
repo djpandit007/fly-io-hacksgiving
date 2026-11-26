@@ -9,15 +9,22 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+)
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 
-from app import agent, bot, db, intake, ledger, mail, notify, users
-from app.locks import locks
+from app import agent, bot, db, intake, ledger, mail, notify, sprite, users
 from app.agent import Clients
 from app.config import settings
-from app import sprite
+from app.locks import locks
 from app.sprite import stay_awake
 from app.telegram import Telegram, parse_update
 
@@ -115,7 +122,7 @@ async def _handle_mail(app_: FastAPI, message_id: str, thread_id: str | None, se
     try:
         async with stay_awake(task, expire="5m"), locks.hold(f"email:{sender}"):
             await intake.process(st.conn, st.clients, st.tg, message_id, thread_id)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         log.warning("mail %s failed: %s", task, exc)
     finally:
         await sprite.release(task)

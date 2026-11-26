@@ -20,8 +20,8 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.config import settings  # noqa: E402
-from app.telegram import redact  # noqa: E402
+from app.config import settings
+from app.telegram import redact
 
 APP = "http://127.0.0.1:8080"
 

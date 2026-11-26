@@ -10,9 +10,8 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
-from urllib.parse import quote
-
 from typing import Literal
+from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel

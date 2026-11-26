@@ -14,16 +14,17 @@ from app import agent, mail, users
 from app.agent import Clients, plain
 from app.config import settings
 from app.db import User
-from app.discover import find_terms_url, registrable_domain as _registrable
+from app.discover import find_terms_url
+from app.discover import registrable_domain as _registrable
 from app.notify import FOOTER, Sender, deliver
 from app.telegram import esc
 
 log = logging.getLogger(__name__)
 
 # Word stems, so "Policies", "Agreements" and "Conditions" match too.
-UPDATE_SUBJECT = re.compile(r"(updat|chang|revis|new).{0,40}(term|privac|polic|agreement|condition)", re.I)
+UPDATE_SUBJECT = re.compile(r"(updat|chang|revis|new).{0,40}(term|privac|polic|agreement|condition)", re.IGNORECASE)
 URL = re.compile(r"https?://[^\s<>\"')\]]+")
-TERMS_LINK = re.compile(r"(terms|tos\b|legal|agreement|conditions|privacy|policy)", re.I)
+TERMS_LINK = re.compile(r"(terms|tos\b|legal|agreement|conditions|privacy|policy)", re.IGNORECASE)
 MAX_HEADER_LINE = 300  # forwarded "From:" lines longer than this are ignored (no regex on long input)
 MAILBOX_PROVIDERS = {"gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "yahoo.com",
                      "icloud.com", "me.com", "proton.me", "protonmail.com", "fastmail.com", "aol.com"}
@@ -193,7 +194,7 @@ async def process(
             cards = [await agent.verdict_card(cl, subject.removeprefix("Fwd: ").removeprefix("Fw: ") or "Forwarded email", text)]
         else:
             cards = []
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         log.warning("processing mail failed: %s", exc)
         cards = ["Sorry, something went wrong while reading that email. Please try again later."]
 

@@ -27,7 +27,7 @@ def rich(text: str) -> str:
     out = esc(text)
     out = _BOLD.sub(lambda m: f"<b>{m.group(1) or m.group(2)}</b>", out)
     out = _CODE.sub(r"<code>\1</code>", out)
-    return re.sub(r"^\s*[-*]\s+", "• ", out, flags=re.M)
+    return re.sub(r"^\s*[-*]\s+", "• ", out, flags=re.MULTILINE)
 
 
 _TOKEN_IN_URL = re.compile(r"bot\d+:[A-Za-z0-9_-]+")

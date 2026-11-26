@@ -38,7 +38,7 @@ async def deliver(
                 body = "\n\n---\n\n".join(plain(m) for m in messages)
                 await mail.send(cl.mail, user.email, subject, body + FOOTER)
                 sent += 1
-        except Exception as exc:  # one blocked chat or bounced address must not stop the others
+        except Exception as exc:  # noqa: BLE001 — one blocked chat or bounced address must not stop the others
             log.warning("delivery to member %s failed: %s", user_id, exc)
     return sent
 

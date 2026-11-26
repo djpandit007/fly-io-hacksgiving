@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Iterator, Literal, TypeVar
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -295,13 +296,11 @@ class Subscription(Row):
     created_at: datetime
 
 
-R = TypeVar("R", bound=Row)
 
-
-def rows(model: type[R], cursor: sqlite3.Cursor) -> list[R]:
+def rows[R: Row](model: type[R], cursor: sqlite3.Cursor) -> list[R]:
     return [model.model_validate(dict(r)) for r in cursor.fetchall()]
 
 
-def one(model: type[R], cursor: sqlite3.Cursor) -> R | None:
+def one[R: Row](model: type[R], cursor: sqlite3.Cursor) -> R | None:
     r = cursor.fetchone()
     return model.model_validate(dict(r)) if r else None

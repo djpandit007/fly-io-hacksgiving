@@ -9,9 +9,9 @@ import pytest
 import respx
 
 from app import agent, db, ledger, users
+from app.watch import html_to_markdown, normalise
 from tests.test_judge import GOOD
 from tests.test_watch import NEW_HTML, OLD_HTML
-from app.watch import html_to_markdown, normalise
 
 JEV = "https://opencode.test/inference/systemone/v1/systemone"
 CHAT = "https://opencode.test/inference/openai/v1/chat/completions"
@@ -79,7 +79,7 @@ async def test_first_subscriber_gets_judged_history_with_their_deadline(conn, me
     m = mock_providers()
     a = members[0]
     cl = agent.Clients()
-    svc, reports = await agent.subscribe(conn, cl, a, "Acme", "https://acme.test/terms")
+    _svc, reports = await agent.subscribe(conn, cl, a, "Acme", "https://acme.test/terms")
     await cl.aclose()
 
     assert {r.heading for r in reports} == {"2. Payments", "3. Arbitration"}

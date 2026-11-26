@@ -18,9 +18,8 @@ import sqlite3
 from datetime import UTC, date, datetime, timedelta
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field
-
 import httpx
+from pydantic import BaseModel, Field
 
 from app import exa, judge, ledger, memory, parse, tosdr, writer
 from app.config import settings
@@ -32,7 +31,17 @@ from app.locks import locks
 from app.memory import Precedent
 from app.netguard import BlockedURL
 from app.telegram import esc, rich
-from app.watch import SectionChange, diff, fetch, html_to_markdown, markdown_to_canonical, normalise, opt_out_days, redline, sha
+from app.watch import (
+    SectionChange,
+    diff,
+    fetch,
+    html_to_markdown,
+    markdown_to_canonical,
+    normalise,
+    opt_out_days,
+    redline,
+    sha,
+)
 
 log = logging.getLogger(__name__)
 
@@ -195,7 +204,7 @@ async def _judge(cl: Clients, service: str, change: SectionChange) -> Verdict | 
         return None
     try:
         return await judge.judge(cl.ai, service, change)
-    except Exception as exc:  # one bad section must not sink the run
+    except Exception as exc:  # noqa: BLE001 — one bad section must not sink the run
         log.warning("judge failed for %s/%s: %s", service, change.heading, exc)
         return None
 
@@ -204,7 +213,7 @@ async def _summary(cl: Clients, service: str, change: SectionChange) -> str:
     if cl.ai:
         try:
             return await writer.summarise_change(cl.ai, service, change.heading, change.before, change.after)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             log.warning("summary failed: %s", exc)
     return redline(change.before, change.after)[:600]
 
@@ -276,7 +285,7 @@ async def record_version(
                     cl.pinecone, f"chg-{change_id}", svc.name, change.heading, change.after,
                     verdict.category if verdict else "other",
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 log.warning("pinecone remember failed: %s", exc)
         stored = one(Change, conn.execute("SELECT * FROM changes WHERE id = ?", (change_id,)))
         assert stored
@@ -302,7 +311,7 @@ async def report_for(
             precedents = await memory.similar(
                 cl.pinecone, change.after_text, exclude_service=svc.name, services=names, min_score=0.45, vector=vector
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             log.warning("pinecone similar failed: %s", exc)
 
     deadline = None
@@ -362,7 +371,7 @@ async def page_text(cl: Clients, url: str) -> str:
             if len(candidate) >= MIN_HTML_CHARS:
                 return candidate
             text = max(text, candidate, key=len)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             log.warning("exa contents failed for %s: %s", url, exc)
     if cl.llama:
         return normalise(markdown_to_canonical((await parse.parse_url(cl.llama, url)).markdown))
@@ -387,7 +396,7 @@ async def onboard_service(conn: sqlite3.Connection, cl: Clients, svc: Service) -
         await record_version(conn, cl, svc, version.text, version.taken_at, version.origin)
     try:
         await record_version(conn, cl, svc, await page_text(cl, svc.terms_url), datetime.now(UTC), "live")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         log.warning("live fetch failed for %s: %s", svc.name, exc)
     if rating := await tosdr.lookup(svc.domain or svc.name):
         conn.execute("UPDATE services SET tosdr_grade = ? WHERE id = ?", (rating.grade, svc.id))
@@ -425,7 +434,7 @@ async def verdict_card(cl: Clients, title: str, text: str, domain: str | None = 
         flags = await judge.red_flags(cl.ai, title, text[: judge.MAX_DOCUMENT_CHARS])
         try:
             card = await writer.verdict_card(cl.ai, title, flags, text)
-        except Exception as exc:  # the flags and grade are still worth sending
+        except Exception as exc:  # noqa: BLE001 — the flags and grade are still worth sending
             log.warning("verdict card failed for %s: %s", title, exc)
     lines = [f"<b>{esc(title)}</b>"]
     if card:
@@ -463,7 +472,7 @@ async def intake_file(conn: sqlite3.Connection, cl: Clients, user: User, filenam
             elif d.rule:
                 added.append(f"• {esc(d.title)}: {esc(d.rule)} (no fixed date)")
         title = doc.document_title
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         log.warning("extract failed for %s: %s", filename, exc)
         title = filename
     card = await verdict_card(cl, title, parsed.markdown)
@@ -496,7 +505,7 @@ async def tick(conn: sqlite3.Connection, cl: Clients) -> TickResult:
         try:
             changes = await check_service(conn, cl, svc)
             result.checked += 1
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             log.warning("check failed for %s: %s", svc.name, exc)
             result.failed.append(svc.name)
             continue
@@ -542,6 +551,6 @@ async def wrapped(conn: sqlite3.Connection, cl: Clients, user: User) -> str:
     if cl.ai:
         try:
             body = await writer.wrapped(cl.ai, facts)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             log.warning("wrapped failed: %s", exc)
     return f"<b>Agreed Wrapped {date.today():%Y}</b>\n{total} material changes you accepted by carrying on.\n\n{rich(body)}"

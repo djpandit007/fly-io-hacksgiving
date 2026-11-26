@@ -3,11 +3,9 @@ import socket
 import httpx
 import pytest
 import respx
-from pydantic import SecretStr
 
 from app import netguard
-from app.config import settings
-from app.telegram import Incoming, Telegram, TelegramError, redact
+from app.telegram import Telegram, TelegramError, redact
 
 TOKEN = "123456:ABC-def_ghi"
 

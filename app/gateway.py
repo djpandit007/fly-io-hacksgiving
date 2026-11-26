@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Self
 
 import httpx
 
@@ -59,7 +59,7 @@ class Gateway:
     async def aclose(self) -> None:
         await self.client.aclose()
 
-    async def __aenter__(self) -> "Gateway":
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, *exc: object) -> None:

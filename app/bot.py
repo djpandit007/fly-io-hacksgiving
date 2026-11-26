@@ -171,10 +171,9 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
         if user is None:
             await _start(conn, tg, msg, arg)
             return
-        if user is not None and arg:
-            # An existing member re-sending a code: maybe the owner claim; otherwise just show help.
-            if users.claim_owner(conn, msg.chat_id, arg, msg.name):
-                user = users.by_chat(conn, msg.chat_id)
+        # An existing member re-sending a code: maybe the owner claim; otherwise just show help.
+        if arg and users.claim_owner(conn, msg.chat_id, arg, msg.name):
+            user = users.by_chat(conn, msg.chat_id)
     if user is None:
         log.info("ignoring chat %s (not a member)", msg.chat_id)
         return
@@ -225,6 +224,6 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
             await tg.send(chat, await agent.check_url(cl, m.group(0)))
         else:
             await tg.send(chat, help_text(user))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         log.error("handling message failed: %s", redact(f"{type(exc).__name__}: {exc}"))
         await tg.send(chat, f"Something went wrong: {esc(redact(str(exc))[:300])}")

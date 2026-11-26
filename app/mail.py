@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import logging
 import time
 from email.utils import parseaddr
 from urllib.parse import quote
@@ -23,6 +24,8 @@ from app.netguard import safe_client
 
 MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024  # the connector gateway limit
 SIGNATURE_TOLERANCE_S = 300
+
+log = logging.getLogger(__name__)
 
 
 # --- Wire models -----------------------------------------------------------------------------------
@@ -174,8 +177,8 @@ async def download_attachment(gw: Gateway, msg: Message, attachment: Attachment)
         try:
             link = DownloadLink.model_validate(await gw.get(path))
             break
-        except Exception:
-            continue
+        except Exception as exc:  # noqa: BLE001 — try the next attachment path
+            log.debug("attachment lookup via %s failed: %s", path, exc)
     if link is None:
         return None
     async with safe_client(timeout=60) as client:

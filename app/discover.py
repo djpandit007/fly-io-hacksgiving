@@ -21,12 +21,12 @@ if TYPE_CHECKING:
     from app.agent import Clients
 
 log = logging.getLogger(__name__)
-TERMS_URL = re.compile(r"(terms|tos\b|legal|user[-_]?agreement|conditions|eula)", re.I)
-TERMS_PATH = re.compile(r"(terms|tos\b|agreement|conditions|eula)", re.I)
-NEVER_TERMS = re.compile(r"(/blog|/news|/help/article|/community|/forum)", re.I)
-OTHER_POLICY = re.compile(r"(privacy|cookie)", re.I)
+TERMS_URL = re.compile(r"(terms|tos\b|legal|user[-_]?agreement|conditions|eula)", re.IGNORECASE)
+TERMS_PATH = re.compile(r"(terms|tos\b|agreement|conditions|eula)", re.IGNORECASE)
+NEVER_TERMS = re.compile(r"(/blog|/news|/help/article|/community|/forum)", re.IGNORECASE)
+OTHER_POLICY = re.compile(r"(privacy|cookie)", re.IGNORECASE)
 
-LINK_TEXT = re.compile(r"\b(terms(\s+of\s+(service|use))?|user\s+agreement|conditions\s+of\s+use|legal\s+terms)\b", re.I)
+LINK_TEXT = re.compile(r"\b(terms(\s+of\s+(service|use))?|user\s+agreement|conditions\s+of\s+use|legal\s+terms)\b", re.IGNORECASE)
 GUESSES = ("/terms", "/terms-of-service", "/legal/terms", "/tos", "/terms-of-use", "/legal")
 
 
@@ -40,7 +40,7 @@ def terms_link(html: str, base_url: str) -> str | None:
         href = urljoin(base_url, a["href"])
         if urlparse(href).scheme not in ("http", "https"):
             continue
-        rank = 0 if re.search(r"terms\s+of\s+(service|use)", text, re.I) else 1
+        rank = 0 if re.search(r"terms\s+of\s+(service|use)", text, re.IGNORECASE) else 1
         if best is None or rank < best[0]:
             best = (rank, href)
     return best[1] if best else None
@@ -141,7 +141,7 @@ def pick_terms_result(results: list[exa.Result], domain: str | None) -> str | No
     return next((r.url for r in results if ok(r)), None)
 
 
-async def find_terms_url(query: str, cl: "Clients | None" = None, client: httpx.AsyncClient | None = None) -> str | None:
+async def find_terms_url(query: str, cl: Clients | None = None, client: httpx.AsyncClient | None = None) -> str | None:
     """A terms URL on the service's own domain, or None (then the member is asked for the URL).
 
     A domain query searches that domain. A name query first establishes the brand's official domain
@@ -160,7 +160,7 @@ async def find_terms_url(query: str, cl: "Clients | None" = None, client: httpx.
             found = pick_terms_result(await exa.search(cl.exa, f"{name} terms of service", domain=domain), domain)
             if found:
                 return found
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             log.warning("exa search failed for %s: %s", query, exc)
     return await _scrape_terms_url(domain, client)
 
@@ -181,7 +181,7 @@ async def _scrape_terms_url(domain: str, client: httpx.AsyncClient | None = None
                 resp = await client.get(f"https://{domain}{path}")
             except httpx.HTTPError:
                 continue
-            if resp.status_code == 200 and re.search(r"terms", resp.text[:20000], re.I):
+            if resp.status_code == 200 and re.search(r"terms", resp.text[:20000], re.IGNORECASE):
                 return str(resp.url)
         return None
     finally:

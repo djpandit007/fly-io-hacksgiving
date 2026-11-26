@@ -52,7 +52,9 @@ async def fetch(url: str, client: httpx.AsyncClient | None = None) -> tuple[str,
     """Return (content_type, body) for a URL."""
     own = client is None
     if client is None:
-        from app.netguard import safe_client  # untrusted URLs: block non-public addresses
+        from app.netguard import (
+            safe_client,  # untrusted URLs: block non-public addresses
+        )
 
         client = safe_client()
     try:
@@ -282,7 +284,7 @@ def redline(before: str, after: str) -> str:
     return " ".join(out)
 
 
-_DAYS = re.compile(r"\bwithin\s+(\w+)\s*(?:\(\d+\)\s*)?(calendar\s+|business\s+)?days?\b", re.I)
+_DAYS = re.compile(r"\bwithin\s+(\w+)\s*(?:\(\d+\)\s*)?(calendar\s+|business\s+)?days?\b", re.IGNORECASE)
 _WORDS = {
     "seven": 7, "ten": 10, "fourteen": 14, "fifteen": 15, "twenty": 20, "thirty": 30,
     "forty-five": 45, "sixty": 60, "ninety": 90,
