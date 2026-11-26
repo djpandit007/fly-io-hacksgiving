@@ -1,12 +1,17 @@
 """Member-scoped lookups used by the researcher: a member only ever sees their own watchlist."""
 
 import asyncio
+import logging
 from datetime import UTC, date, datetime, timedelta
 
+import httpx
 import pytest
+import respx
 
 from app import ask_tools, db, users
 from app.ask_tools import AskDeps, Clause
+from app.config import settings
+from app.gateway import Gateway
 
 SPOTIFY_TEXT = (
     "## Payments\nYou pay the subscription price each month and we may change the price with notice.\n"
@@ -124,6 +129,25 @@ def test_recent_changes_returns_material_only(world):
 
 def test_similar_clauses_without_pinecone_is_empty(world):
     assert asyncio.run(ask_tools.similar_clauses(world["mine"], "some clause text")) == []
+
+
+EMBED = "https://pinecone.test/embed"
+QUERY = "https://pinecone.test/indexes/fine-print/query"
+
+
+@pytest.mark.parametrize("failing", ["embed", "query"])
+@respx.mock
+async def test_similar_clauses_error_body_is_not_logged(world, caplog, failing):
+    caplog.set_level(logging.DEBUG)
+    echo = httpx.Response(400, json={"error": "bad input: zebra-quote text"})
+    embedded = httpx.Response(200, json={"data": [{"values": [0.1] * 4}], "usage": {}})
+    respx.post(EMBED).mock(return_value=echo if failing == "embed" else embedded)
+    respx.post(QUERY).mock(return_value=echo)
+    async with Gateway(settings.pinecone) as gw:
+        deps = AskDeps(world["conn"], world["mine"].user_id, gw)
+        assert await ask_tools.similar_clauses(deps, "zebra-quote text") == []
+    assert "zebra-quote" not in caplog.text
+    assert "-> 400" in caplog.text
 
 
 def test_verified_keeps_real_quote_drops_invented(world):

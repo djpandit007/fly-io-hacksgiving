@@ -37,7 +37,10 @@ class GatewayTransport(httpx.AsyncBaseTransport):
         headers = {"content-type": ct} if (ct := request.headers.get("content-type")) else {}
         kwargs = {"params": request.url.params} if request.url.params else {}
         try:
-            resp = await self.gw.request(request.method, path, content=await request.aread(), headers=headers, **kwargs)
+            # The body may echo the prompt (the member's question, quotes), so it is never logged.
+            resp = await self.gw.request(
+                request.method, path, content=await request.aread(), headers=headers, log_body=False, **kwargs
+            )
         except httpx.HTTPStatusError as exc:
             # Pydantic AI turns the status into its own model error; it needs the response, not an exception.
             resp = exc.response

@@ -1,6 +1,7 @@
 """Pydantic AI models whose HTTP requests go through the Gateway (signing, retries, metrics)."""
 
 import json
+import logging
 
 import httpx
 import pytest
@@ -112,6 +113,21 @@ async def test_error_status_reaches_pydantic_ai():
 
     assert caught.value.status_code == 400
     assert not isinstance(caught.value.__cause__, httpx.HTTPStatusError)
+
+
+@respx.mock
+async def test_error_body_is_not_logged(caplog):
+    """A provider may echo the prompt (question, quotes) in an error body; only the status is logged."""
+    caplog.set_level(logging.DEBUG)
+    body = {"error": {"message": "bad", "failed_generation": "Question: zebra-question about my secret"}}
+    respx.post(CHAT).mock(return_value=httpx.Response(400, json=body))
+    gw = Gateway(settings.opencode)
+
+    with pytest.raises(ModelHTTPError):
+        await run(gw, "Question: zebra-question about my secret")
+
+    assert "zebra-question" not in caplog.text
+    assert "-> 400" in caplog.text
 
 
 @respx.mock

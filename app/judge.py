@@ -296,7 +296,7 @@ async def relevance(gw: Gateway, question: str, clauses: list[str]) -> list[floa
             "instructions": f"Does `clause_{n}` contain information that helps answer `question`?",
         }
     body = {"model": settings.judge_model, "state": state, "questions": questions}
-    data = await gw.post(SYSTEMONE_PATH, json=body)
+    data = await gw.post(SYSTEMONE_PATH, json=body, log_body=False)  # an error body may echo the question
     _report_usage(gw, data)
     resp = SystemOneResponse.model_validate(data)
     scores = []

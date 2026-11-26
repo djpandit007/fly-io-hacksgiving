@@ -139,6 +139,22 @@ async def test_relevance_missing_answer_scores_zero():
     respx.post(RELEVANCE_URL).mock(return_value=httpx.Response(200, json=_noul_response(c1=0.7)))
     assert await relevance(_relevance_gateway(), "Q?", ["a", "b"]) == [0.7, 0.0]
 
+@respx.mock
+async def test_relevance_error_body_is_not_logged(caplog):
+    import logging
+
+    from app.judge import relevance
+
+    caplog.set_level(logging.DEBUG)
+    respx.post(RELEVANCE_URL).mock(
+        return_value=httpx.Response(400, json={"error": "state.question: zebra-question is invalid"})
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        await relevance(_relevance_gateway(), "zebra-question?", ["a clause"])
+    assert "zebra-question" not in caplog.text
+    assert "-> 400" in caplog.text
+
+
 def test_every_red_flag_has_a_short_explanation():
     from app.judge import FLAG_EXPLANATIONS, RED_FLAGS
 

@@ -148,7 +148,9 @@ async def similar_clauses(deps: AskDeps, text: str) -> list[Hit]:
     if deps.pinecone is None:
         return []
     try:
-        found = await memory.similar(deps.pinecone, text, exclude_service="", services=list_services(deps))
+        found = await memory.similar(
+            deps.pinecone, text, exclude_service="", services=list_services(deps), log_body=False
+        )
     except Exception as exc:  # noqa: BLE001 — precedents are optional; a failure must not sink the answer
         log.warning("similar clauses lookup failed: %s", type(exc).__name__)
         return []
