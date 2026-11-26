@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     # judgments, a chat model for writing. Free OpenCode models refuse calls from outside OpenCode.
     judge_model: str = "jev-1.14"
     writer_model: str = "deepseek-v4.1-flash"
+    # Pydantic AI agents for questions about terms: researcher and writer, and a separate verifier.
+    agent_model: str = "deepseek-v4.1-flash"
+    verifier_model: str = "glm-5.3-flash"
     pinecone_index: str = "fine-print"
     pinecone_namespace: str = "clauses"
     llama_project_id: str = ""

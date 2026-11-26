@@ -24,6 +24,10 @@ os.environ.setdefault("FP_AGENTMAIL_WEBHOOK_SECRET", "whsec_dGVzdC1zZWNyZXQta2V5
 
 
 import pytest
+from pydantic_ai import models
+
+# No test may reach a real model; tests that exercise the HTTP path opt in with a `with` block.
+models.ALLOW_MODEL_REQUESTS = False
 
 
 @pytest.fixture(autouse=True)
