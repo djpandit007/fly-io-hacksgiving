@@ -39,7 +39,7 @@
 ## 6. Cross-Cutting Integration Verification
 
 - [x] 6.1 Run the full test suite (`uv run pytest`) and linter (`uv run ruff check .`) and verify every existing and new spec scenario passes with zero warnings or regressions.
-- [ ] 6.2 Run an end-to-end local smoke test covering Policy Bundle watch + contradiction alert -> domain playbook verdict + statutory note + ephemeral conflict check -> signed opt-out approval + receipt -> redline kit `.docx` generation -> magic-link Control Room with member Terms Radar + SSE telemetry, verifying zero private document retention in SQLite after completion.
+- [x] 6.2 Run an end-to-end local smoke test covering Policy Bundle watch + contradiction alert -> domain playbook verdict + statutory note + ephemeral conflict check -> signed opt-out approval + receipt -> redline kit `.docx` generation -> magic-link Control Room with member Terms Radar + SSE telemetry, verifying zero private document retention in SQLite after completion.
 
 ## Workflow follow-up
 
