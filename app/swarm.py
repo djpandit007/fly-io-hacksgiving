@@ -51,6 +51,9 @@ ADVOCATE_TIMEOUT = 120.0
 TIMEOUTS: dict[str, float] = {"scout": SCOUT_TIMEOUT, "advocate": ADVOCATE_TIMEOUT}
 RESTORE_TIMEOUT = 90.0   # measured on live Sprites: ~15 s warm, ~48 s when the worker was asleep
 POLICY_TIMEOUT = 60.0    # the first call to a sleeping worker waits for it to wake
+# A new network policy takes a few seconds to apply: on live Sprites a connection opened right after
+# the update hung until its timeout, while the same job 5 s later finished in 5 s.
+POLICY_SETTLE = 5.0
 # Hosts beyond the target's own site a job may reach (asset CDNs). Kept tiny on purpose.
 MAX_EXTRA_HOSTS = 3
 # Where scripts/setup_swarm.sh puts the runners and their virtualenv on each worker Sprite.
@@ -314,6 +317,7 @@ class Swarm:
                 ms = metrics.elapsed_ms(started)
                 self._count(role, "egress_lock", "ok", ms)
                 self._event(role, "egress_lock", "dns_allowlist", ms)
+                await asyncio.sleep(POLICY_SETTLE)
             yield
         finally:
             await self._reset(role, close_egress=allow_hosts is not None)

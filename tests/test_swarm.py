@@ -147,6 +147,23 @@ def test_unconfigured_worker_is_unavailable(monkeypatch):
 # --- Job lifecycle ---------------------------------------------------------------------------------
 
 @respx.mock
+async def test_the_job_waits_for_a_new_egress_policy_to_settle(conn, monkeypatch):
+    order = []
+    routes = mock_api(httpx.Response(200, content=framed({"ok": True})))
+    routes["exec"].side_effect = lambda request: order.append("exec") or httpx.Response(200, content=framed({"ok": True}))
+
+    async def sleep(seconds):
+        order.append(f"sleep {seconds}")
+
+    monkeypatch.setattr(swarm, "POLICY_SETTLE", 5.0)
+    monkeypatch.setattr(swarm.asyncio, "sleep", sleep)
+    sw = make(conn)
+    await sw.run_job("scout", {"url": URL}, allow_hosts=["acme.test"])
+    await sw.aclose()
+    assert order == ["sleep 5.0", "exec"]  # the lock settles before the worker runs
+
+
+@respx.mock
 async def test_job_locks_dns_runs_then_restores(conn):
     routes = mock_api(httpx.Response(200, content=framed({"ok": True, "n": 1})))
     sw = make(conn)

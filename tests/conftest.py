@@ -49,3 +49,4 @@ def _scout_crawls_the_url_as_given(monkeypatch):
         return url
 
     monkeypatch.setattr(swarm, "landing_url", same)
+    monkeypatch.setattr(swarm, "POLICY_SETTLE", 0)  # the live settle pause; tests/test_swarm.py checks it
