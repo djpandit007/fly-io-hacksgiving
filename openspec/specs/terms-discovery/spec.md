@@ -21,12 +21,15 @@ service's home page.
 - **THEN** the member is asked to send the full URL and nothing is added
 
 ### Requirement: Clean page text when direct fetching fails
-The system SHALL obtain a terms page's text from a content-extraction service when a direct fetch is
-refused, fails, or yields too little text. PDFs SHALL be read through document parsing.
+The system SHALL obtain a legal page's text via the Ephemeral Scout Sprite (using a headless browser under a per-job DNS egress lock) when a direct fetch is refused, fails, or yields too little text, falling back to the content-extraction service when the Scout Sprite is unavailable or fails. PDFs SHALL be read through document parsing.
 
 #### Scenario: Site blocks the fetch
-- **WHEN** a terms page returns an error or almost no text to a direct fetch
-- **THEN** the system still produces the page's text from the extraction service and continues
+- **WHEN** a legal page returns an error or almost no text to a direct fetch while the Scout Sprite is available
+- **THEN** the Scout Sprite renders the page under a domain-locked DNS policy, extracts clean normalised text, captures an evidentiary screenshot, and restores its base checkpoint
+
+#### Scenario: Scout Sprite unavailable
+- **WHEN** a direct fetch fails and the Scout Sprite is not configured or unreachable
+- **THEN** the system falls back to the content-extraction service and continues
 
 ### Requirement: Fetch safety is preserved
 The system SHALL keep refusing direct fetches of non-public addresses for any URL, including URLs returned
@@ -35,3 +38,14 @@ by search.
 #### Scenario: Search returns an internal address
 - **WHEN** a discovered or forwarded URL resolves to a private or loopback address
 - **THEN** the system does not fetch it directly
+
+### Requirement: Policy Bundle discovery per service
+The system SHALL, when resolving a service from a name, domain, or primary terms URL, discover linked companion legal documents on the service's domain (`privacy`, `ai_terms`, `billing`, `dpa`) in addition to the primary `terms` page, subject to the same public-address safety checks.
+
+#### Scenario: Discovering companion legal policies
+- **WHEN** a member sends `/watch notion` and Notion's legal hub links to Terms, Privacy Policy, and AI Terms on `notion.so`
+- **THEN** the system attaches the discovered companion documents to Notion's Policy Bundle and reports which document roles are being watched
+
+#### Scenario: Companion link points to an unsafe address
+- **WHEN** a discovered companion link resolves to a non-public address
+- **THEN** the link is skipped and never fetched
