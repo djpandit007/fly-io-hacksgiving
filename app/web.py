@@ -1,19 +1,19 @@
-"""The web face of Fine Print on the Gateway Sprite's URL.
+"""The web face of Fine Print on the Gateway Sprite's URL: a per-member Control Room.
 
-Public, read-only, no member data:
-    GET /                    Terms Radar: services by worst recent severity, Policy Bundle coverage, ToS;DR
-                             grades, recent material changes, cross-document contradictions, Swarm Activity
-    GET /changes/{id}        one change: side-by-side redline, Jev scores, benchmark, evidentiary screenshot
+Every page needs a signed-in member (magic link from `/dashboard` in Telegram, then a signed HTTP-only
+cookie) and shows only that member's own data: nothing lists services, changes or contradictions for
+services the member does not watch.
+
+    GET /                    redirects to /room
+    GET /auth/magic          exchanges a single-use magic link for a session cookie
+    POST /auth/logout
+    GET /room                the member's Terms Radar (their watched services by worst recent severity,
+                             Policy Bundle coverage, ToS;DR grades, material changes, contradictions),
+                             deadlines, jurisdiction, action receipts and Swarm Activity
+    GET /changes/{id}        one change on a service the member watches: side-by-side redline, Jev scores,
+                             benchmark, evidentiary screenshot (404 for any other change)
     GET /changes/{id}/evidence.png
-    GET /api/swarm/stream    Server-Sent Events over sanitized `swarm_events`
-
-Member-only (magic link from `/dashboard` in Telegram, then a signed HTTP-only cookie):
-    GET /auth/magic, GET /room, POST /auth/logout
-
-Public routes read only `services`, `service_documents`, `snapshots` (evidence path), `changes`,
-`document_contradictions` and `swarm_events`; never `users`, `subscriptions`, `ledger` or
-`action_receipts`. That is why the Radar lists every indexed service rather than "watched" ones:
-knowing which are watched would need a join to `subscriptions`.
+    GET /api/swarm/stream    Server-Sent Events over sanitized `swarm_events` (signed-in members only)
 """
 
 from __future__ import annotations
@@ -48,6 +48,7 @@ from app.db import (
     Contradiction,
     Service,
     ServiceDocument,
+    User,
     one,
     rows,
 )
@@ -74,12 +75,11 @@ SSE_POLL_SECONDS = 1.0
 SSE_HEARTBEAT_POLLS = 15
 SSE_BATCH = 50
 
-PUBLIC_HEADERS = {
+BASE_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
-    "Referrer-Policy": "same-origin",
 }
-PRIVATE_HEADERS = PUBLIC_HEADERS | {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
+PRIVATE_HEADERS = BASE_HEADERS | {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 
 
 def _conn(request: Request) -> sqlite3.Connection:
@@ -87,10 +87,18 @@ def _conn(request: Request) -> sqlite3.Connection:
 
 
 def _page(request: Request, name: str, context: dict, status: int = 200, headers: dict | None = None) -> HTMLResponse:
-    return templates.TemplateResponse(request, name, context, status_code=status, headers=headers or PUBLIC_HEADERS)
+    return templates.TemplateResponse(request, name, context, status_code=status, headers=headers or PRIVATE_HEADERS)
 
 
-# --- Public queries: services, service_documents, snapshots, changes, contradictions, swarm_events only ---
+def _member(request: Request) -> User | None:
+    return sessions.member(_conn(request), request.cookies.get(sessions.COOKIE))
+
+
+def _marks(ids: list[int]) -> str:
+    return ",".join("?" * len(ids))
+
+
+# --- Member-scoped queries: each takes the ids of the services the member watches ----------------
 
 def _material_sql(alias: str = "") -> str:
     p = f"{alias}." if alias else ""
@@ -98,25 +106,31 @@ def _material_sql(alias: str = "") -> str:
     return f"({p}material IS NULL OR {p}partial = 1 OR {p}material >= ?)"
 
 
-def _radar(conn: sqlite3.Connection, now: datetime) -> list[dict]:
+def _radar(conn: sqlite3.Connection, services: list[Service], now: datetime) -> list[dict]:
+    """The member's watched services ranked by their worst material change in the past RECENT_DAYS."""
+    if not services:
+        return []
+    ids = [s.id for s in services]
     since = (now - timedelta(days=RECENT_DAYS)).isoformat()
-    services = rows(Service, conn.execute("SELECT * FROM services ORDER BY name"))
     worst: dict[int, tuple[float | None, int]] = {}
     for r in conn.execute(
         f"""SELECT service_id, MAX(severity) AS worst, COUNT(*) AS n FROM changes
-            WHERE effective_at >= ? AND {_material_sql()} GROUP BY service_id""",
-        (since, settings.material_threshold),
+            WHERE service_id IN ({_marks(ids)}) AND effective_at >= ? AND {_material_sql()}
+            GROUP BY service_id""",
+        (*ids, since, settings.material_threshold),
     ):
         worst[r["service_id"]] = (r["worst"], r["n"])
-    roles: dict[int, set[str]] = {}
-    for d in rows(ServiceDocument, conn.execute("SELECT * FROM service_documents")):
-        roles.setdefault(d.service_id, set()).add(d.role)
+    docs: dict[int, dict[str, ServiceDocument]] = {}
+    for d in rows(ServiceDocument, conn.execute(
+        f"SELECT * FROM service_documents WHERE service_id IN ({_marks(ids)})", ids
+    )):
+        docs.setdefault(d.service_id, {})[d.role] = d
     board = [
         {
             "service": s,
             "worst": worst.get(s.id, (None, 0))[0],
             "recent": worst.get(s.id, (None, 0))[1],
-            "bundle": [(role, label, role in roles.get(s.id, set())) for role, label in DOC_ROLE_LABELS.items()],
+            "bundle": [(role, label, docs.get(s.id, {}).get(role)) for role, label in DOC_ROLE_LABELS.items()],
         }
         for s in services
     ]
@@ -124,24 +138,28 @@ def _radar(conn: sqlite3.Connection, now: datetime) -> list[dict]:
     return board
 
 
-def _recent_changes(conn: sqlite3.Connection) -> list[dict]:
+def _recent_changes(conn: sqlite3.Connection, ids: list[int]) -> list[dict]:
+    if not ids:
+        return []
     found = conn.execute(
         f"""SELECT c.id, c.heading, c.kind, c.category, c.severity, c.material, c.summary, c.effective_at,
                    s.name AS service FROM changes c JOIN services s ON s.id = c.service_id
-            WHERE {_material_sql("c")} ORDER BY c.effective_at DESC, c.id DESC LIMIT ?""",
-        (settings.material_threshold, RECENT_CHANGES),
+            WHERE c.service_id IN ({_marks(ids)}) AND {_material_sql("c")}
+            ORDER BY c.effective_at DESC, c.id DESC LIMIT ?""",
+        (*ids, settings.material_threshold, RECENT_CHANGES),
     ).fetchall()
     return [dict(r) for r in found]
 
 
-def _contradictions(conn: sqlite3.Connection, service_id: int | None = None) -> list[dict]:
-    where, args = ("WHERE x.service_id = ?", (service_id,)) if service_id else ("", ())
+def _contradictions(conn: sqlite3.Connection, ids: list[int]) -> list[dict]:
+    if not ids:
+        return []
     found = conn.execute(
         f"""SELECT x.*, s.name AS service, a.role AS role_a, b.role AS role_b
             FROM document_contradictions x JOIN services s ON s.id = x.service_id
             JOIN service_documents a ON a.id = x.doc_a_id JOIN service_documents b ON b.id = x.doc_b_id
-            {where} ORDER BY x.severity DESC, x.detected_at DESC LIMIT ?""",
-        (*args, CONTRADICTIONS),
+            WHERE x.service_id IN ({_marks(ids)}) ORDER BY x.severity DESC, x.detected_at DESC LIMIT ?""",
+        (*ids, CONTRADICTIONS),
     ).fetchall()
     out = []
     for r in found:
@@ -202,23 +220,21 @@ def redline(before: str, after: str) -> tuple[list[tuple[str, str]], list[tuple[
     return left, right
 
 
-# --- Public pages --------------------------------------------------------------------------------
+# --- Change inspector: signed-in members, changes on their own watched services only ---------------
 
-@router.get("/", response_class=HTMLResponse)
-async def radar(request: Request) -> HTMLResponse:
-    conn = _conn(request)
-    return _page(request, "radar.html", {
-        "board": _radar(conn, datetime.now(UTC)),
-        "changes": _recent_changes(conn),
-        "contradictions": _contradictions(conn),
-        "events": _swarm_events(conn),
-        "recent_days": RECENT_DAYS,
-    })
+@router.get("/")
+async def home() -> RedirectResponse:
+    return RedirectResponse("/room", status_code=303, headers=PRIVATE_HEADERS)
 
 
-def _public_change(conn: sqlite3.Connection, change_id: int) -> tuple[Change, Service]:
+def _watched_change(conn: sqlite3.Connection, user: User, change_id: int) -> tuple[Change, Service]:
+    """The change, only if it belongs to a service this member watches. Anything else is a 404, so the
+    ids of changes on other members' services cannot be probed."""
     change = one(Change, conn.execute("SELECT * FROM changes WHERE id = ?", (change_id,)))
-    svc = one(Service, conn.execute("SELECT * FROM services WHERE id = ?", (change.service_id,))) if change else None
+    watched = change is not None and conn.execute(
+        "SELECT 1 FROM subscriptions WHERE user_id = ? AND service_id = ?", (user.id, change.service_id)
+    ).fetchone() is not None
+    svc = one(Service, conn.execute("SELECT * FROM services WHERE id = ?", (change.service_id,))) if watched else None
     if change is None or svc is None:
         raise HTTPException(status_code=404)
     return change, svc
@@ -252,7 +268,10 @@ async def _benchmark(request: Request, change: Change) -> Any:
 @router.get("/changes/{change_id}", response_class=HTMLResponse)
 async def change_page(request: Request, change_id: int) -> HTMLResponse:
     conn = _conn(request)
-    change, svc = _public_change(conn, change_id)
+    user = _member(request)
+    if user is None:
+        return _denied(request, SIGNED_OUT)
+    change, svc = _watched_change(conn, user, change_id)
     doc = (
         one(ServiceDocument, conn.execute("SELECT * FROM service_documents WHERE id = ?", (change.document_id,)))
         if change.document_id else None
@@ -273,18 +292,21 @@ async def change_page(request: Request, change_id: int) -> HTMLResponse:
         "material": change.material is None or change.partial or change.material >= settings.material_threshold,
         "benchmark": await _benchmark(request, change),
         "evidence": _evidence_file(conn, change) is not None,
-        "contradictions": _contradictions(conn, svc.id),
+        "contradictions": _contradictions(conn, [svc.id]),
     })
 
 
 @router.get("/changes/{change_id}/evidence.png")
-async def evidence(request: Request, change_id: int) -> FileResponse:
+async def evidence(request: Request, change_id: int) -> Response:
     conn = _conn(request)
-    change, _ = _public_change(conn, change_id)
+    user = _member(request)
+    if user is None:
+        return _denied(request, SIGNED_OUT)
+    change, _ = _watched_change(conn, user, change_id)
     path = _evidence_file(conn, change)
     if path is None:
         raise HTTPException(status_code=404)
-    return FileResponse(path, media_type="image/png", headers=PUBLIC_HEADERS | {"Cache-Control": "public, max-age=86400"})
+    return FileResponse(path, media_type="image/png", headers=PRIVATE_HEADERS)
 
 
 # --- Swarm telemetry (SSE) -----------------------------------------------------------------------
@@ -320,13 +342,15 @@ async def swarm_stream(
 
 
 @router.get("/api/swarm/stream")
-async def swarm(request: Request) -> StreamingResponse:
+async def swarm(request: Request) -> Response:
+    if _member(request) is None:
+        return Response(status_code=401, headers=PRIVATE_HEADERS)
     last_id = request.headers.get("last-event-id", "")
     after = int(last_id) if last_id.isdigit() else None
     return StreamingResponse(
         swarm_stream(_conn(request), request.is_disconnected, after_id=after),
         media_type="text/event-stream",
-        headers=PUBLIC_HEADERS | {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers=PRIVATE_HEADERS | {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
@@ -370,19 +394,16 @@ async def room(request: Request) -> HTMLResponse:
     if user is None:
         return _denied(request, SIGNED_OUT)
     services = agent.services_for(conn, user.id)
-    docs: dict[int, list[ServiceDocument]] = {}
-    if services:
-        marks = ",".join("?" * len(services))
-        for d in rows(ServiceDocument, conn.execute(
-            f"SELECT * FROM service_documents WHERE service_id IN ({marks}) ORDER BY role", [s.id for s in services]
-        )):
-            docs.setdefault(d.service_id, []).append(d)
+    ids = [s.id for s in services]
     receipts = rows(ActionReceipt, conn.execute(
         "SELECT * FROM action_receipts WHERE user_id = ? ORDER BY executed_at DESC LIMIT 50", (user.id,)
     ))
     return _page(request, "room.html", {
         "user": user,
-        "services": [(s, docs.get(s.id, [])) for s in services],
+        "board": _radar(conn, services, datetime.now(UTC)),
+        "changes": _recent_changes(conn, ids),
+        "contradictions": _contradictions(conn, ids),
+        "recent_days": RECENT_DAYS,
         "deadlines": ledger.upcoming(conn, user.id),
         "calendar": f"/calendar.ics?token={user.calendar_token}",
         "receipts": receipts,

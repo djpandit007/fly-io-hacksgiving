@@ -95,18 +95,19 @@ service and takes the reply as the name. A single word such as `notion` gets "Wa
 card has a 💡 button that explains it. Verdict cards, change alerts, `/watch` overviews, `/wrapped` and
 `/ask` answers have 👍/👎, with an optional reason after 👎.
 
-**On the web.** The Sprite's URL (`FP_PUBLIC_URL`) also serves pages:
+**On the web.** The Sprite's URL (`FP_PUBLIC_URL`) serves a private, per-member **Control Room**, opened
+with the link `/dashboard` sends you in Telegram. There are no public pages: `/` goes to the Control Room,
+and every page shows only your own data.
 
-- `/` — the public **Terms Radar**: every tracked service ranked by its worst material change in the past
-  90 days, Policy Bundle coverage (Terms, Privacy, AI, Billing, DPA), ToS;DR grades, recent material
-  changes, contradictions between a service's documents, and live Swarm Activity.
-- `/changes/<id>` — one change: side-by-side redline, Jev's scores (material, severity, opt-out, who it
-  favours), a benchmark percentile when available, and the captured screenshot when there is one.
-- `/room` — your **Control Room**, opened with the `/dashboard` link: your watchlist with its documents,
-  upcoming deadlines and calendar feed, jurisdiction, and a log of actions taken for you (metadata only).
-  The sign-in lasts 24 hours; `/remove` ends a member's sessions at once.
+- `/room` — your Terms Radar (the services you watch, ranked by their worst material change in the past
+  90 days, with Policy Bundle coverage and ToS;DR grades), their recent material changes and
+  contradictions between their documents, upcoming deadlines and calendar feed, jurisdiction, a log of
+  actions taken for you (metadata only), and live Swarm Activity.
+- `/changes/<id>` — one change on a service you watch: side-by-side redline, Jev's scores (material,
+  severity, opt-out, who it favours), a benchmark percentile when available, and the captured screenshot
+  when there is one. Changes on services you don't watch are not found.
 
-Public pages read only public terms data: never members, watchlists, deadlines or receipts.
+The sign-in lasts 24 hours; `/remove` ends a member's sessions at once.
 
 **While it works**, the bot puts 👀 on your message, shows a "Thinking…" draft with the current step, and
 replies to your message with the result; 👀 becomes 👌, or 😢 if it failed.

@@ -185,13 +185,14 @@ We add `app/playbooks.py` as the single source of truth for all five legal domai
   - Computes deterministic percentile rank of `severity` (and opt-out rarity) over the cohort's metadata and returns a typed `Benchmark(percentile, cohort_size, opt_out_share, comparable_services)`.
   - Private uploaded documents only *query* Pinecone (`log_body=False`) and are never upserted.
 
-### D6. Live Control Room & Public Terms Radar (`app/web.py`)
+### D6. Live Control Room & Member Terms Radar (`app/web.py`)
 
 * Served directly on the Gateway Sprite's existing FastAPI app (`:8080`), using Jinja2 templates (`app/templates/`) + HTMX + vanilla EventSource (SSE) — no build step.
-* **Public Routes (read-only, zero member data):**
-  - `GET /` — **Terms Radar**: Leaderboard of watched public services (sorted by worst recent severity), Policy Bundle coverage badges (`ToS`, `Privacy`, `AI`, `Billing`), ToS;DR grades, recent material changes, cross-document contradictions, and a live sanitized **Swarm Activity Strip**.
-  - `GET /changes/{change_id}` — **Interactive Change & Evidence Inspector**: Side-by-side redline diff, Jev calibrated probability bars (`material`, `severity`, `favours`, `opt_out`), Pinecone benchmark badge, evidentiary screenshot preview (when captured by Scout), and contradiction links.
-  - `GET /api/swarm/stream` — Server-Sent Events stream pushing sanitized `swarm_events` in real time as Sprites wake, lock egress, run, checkpoint-restore, and sleep.
+* **No public data routes (decided during implementation):** every page needs a signed-in member and shows only that member's own data. `GET /` redirects to `/room`.
+* **Member-scoped routes:**
+  - **Terms Radar** (inside `/room`): the member's watched services only (sorted by worst recent severity), Policy Bundle coverage badges (`ToS`, `Privacy`, `AI`, `Billing`), ToS;DR grades, recent material changes, cross-document contradictions, and a live sanitized **Swarm Activity Strip**.
+  - `GET /changes/{change_id}` — **Interactive Change & Evidence Inspector**, only for changes on a service the member watches (404 otherwise): Side-by-side redline diff, Jev calibrated probability bars (`material`, `severity`, `favours`, `opt_out`), Pinecone benchmark badge, evidentiary screenshot preview (when captured by Scout), and contradiction links.
+  - `GET /api/swarm/stream` — Server-Sent Events stream (signed-in members only) pushing sanitized `swarm_events` in real time as Sprites wake, lock egress, run, checkpoint-restore, and sleep.
 * **Authenticated Member Routes (magic-link + HTTP-only cookie):**
   - `/dashboard` in Telegram creates a `dashboard_sessions(kind='magic')` token (10-min TTL, single-use) and sends `https://<FP_PUBLIC_URL>/auth/magic?token=<raw>`.
   - `GET /auth/magic` atomically consumes the magic token, issues a 24-hour signed HTTP-only `SameSite=Lax` `Secure` session cookie backed by `dashboard_sessions(kind='session')`, and redirects to `/room`.
@@ -205,7 +206,7 @@ We add `app/playbooks.py` as the single source of truth for all five legal domai
 - **[Ephemeral contract text needed between Verdict Card and `[Generate Redline Kit]` tap]** → Hold an encrypted-in-RAM (process memory only, never disk/SQLite) LRU cache keyed by `(user_id, ephemeral_token)` with a 10-minute TTL and 20 MB cap, wiped immediately after redline generation or on Sprite sleep. If the Sprite slept before the member tapped, politely ask them to re-send the file with `/redline`.
 - **[Playwright opt-out web forms vary wildly across sites]** → Restrict Playwright form automation to well-structured forms whose submit target matches the service's verified domain, require a dry-run preview of extracted fields before approval, and degrade cleanly to email or printable notice whenever a CAPTCHA or login wall blocks automation.
 - **[Statutory unenforceability notes sounding like legal advice]** → Restrict statutory annotations to a curated, high-confidence ruleset (`app/playbooks.py`) verified by Jev against the quoted clause, phrase every note carefully ("may be restricted or void under…"), and always display `Information, not legal advice.`
-- **[Control Room leaking private data on public routes]** → Strict query separation: `/` and `/changes/{id}` query only `services`, `service_documents`, `changes`, `document_contradictions`, and `swarm_events` (zero joins to `users`, `subscriptions`, `ledger`, or `action_receipts`), verified by dedicated privacy isolation tests.
+- **[Control Room leaking another member's data]** → No public data routes; every query is scoped to the signed-in member's watched service ids, changes on unwatched services return 404, verified by cross-member isolation tests.
 
 ## Migration Plan
 
@@ -220,4 +221,4 @@ We add `app/playbooks.py` as the single source of truth for all five legal domai
    - **Phase 2:** Legal Playbooks (`app/playbooks.py`), Document Router, Jurisdiction (`/jurisdiction` + statutory checks), Ephemeral Cross-Contract Conflicts, and Pinecone Benchmarking (`app/benchmark.py`).
    - **Phase 3:** Multi-Sprite Swarm orchestration (`app/swarm.py`, `workers/scout_runner.py`, `workers/advocate_runner.py`, `scripts/setup_swarm.sh`, DNS egress lock + checkpoint restore + metrics).
    - **Phase 4:** Closed-Loop Counter-Measures (`app/advocate.py`: opt-out extraction, signed approval tokens, AgentMail/Playwright dispatch, receipts, adversarial dual-Sprite `.docx`/`.pdf` redline kits).
-   - **Phase 5:** Live Control Room & Public Terms Radar (`app/web.py`, Jinja2/HTMX templates, `/dashboard` magic links, `/api/swarm/stream` SSE, end-to-end tests & README update).
+   - **Phase 5:** Live Control Room & Member Terms Radar (`app/web.py`, Jinja2/HTMX templates, `/dashboard` magic links, `/api/swarm/stream` SSE, end-to-end tests & README update).

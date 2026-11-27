@@ -1,7 +1,7 @@
 {% extends "base.html" %}
-{% from "_macros.html" import grade %}
+{% from "_macros.html" import sev, grade %}
 {% block title %}Control Room · Fine Print{% endblock %}
-{% block nav %}<a href="/">Terms Radar</a> · <form method="post" action="/auth/logout" style="display:inline"><button type="submit">Sign out</button></form>{% endblock %}
+{% block nav %}<form method="post" action="/auth/logout" style="display:inline"><button type="submit">Sign out</button></form>{% endblock %}
 {% block content %}
 <h1>Control Room</h1>
 <p class="muted">Signed in{% if user.name %} as {{ user.name }}{% endif %}. Only you can see this page.</p>
@@ -19,17 +19,20 @@
   </section>
 </div>
 
-<h2 id="watch-h">What you watch</h2>
-{% if services %}
+<h2 id="watch-h">Your Terms Radar</h2>
+<p class="small muted">The services you watch, ranked by their worst material change in the past {{ recent_days }} days.</p>
+{% if board %}
 <div class="table-scroll">
 <table aria-labelledby="watch-h">
-  <thead><tr><th scope="col">Service</th><th scope="col">ToS;DR</th><th scope="col">Policy Bundle</th></tr></thead>
+  <thead><tr><th scope="col">Service</th><th scope="col">Worst severity</th><th scope="col">Material changes</th><th scope="col">ToS;DR</th><th scope="col">Policy Bundle</th></tr></thead>
   <tbody>
-  {% for s, docs in services %}
+  {% for b in board %}
   <tr>
-    <th scope="row">{{ s.name }}</th>
-    <td>{{ grade(s.tosdr_grade) }}</td>
-    <td>{% for d in docs %}{% if d.url.startswith(("https://", "http://")) %}<a class="badge on" href="{{ d.url }}" rel="noopener noreferrer" target="_blank">{{ d.label }}</a>{% else %}<span class="badge on">{{ d.label }}</span>{% endif %}{% else %}<span class="muted">—</span>{% endfor %}</td>
+    <th scope="row">{{ b.service.name }}{% if b.service.domain %}<div class="small muted">{{ b.service.domain }}</div>{% endif %}</th>
+    <td>{{ sev(b.worst) }}</td>
+    <td>{{ b.recent }}</td>
+    <td>{{ grade(b.service.tosdr_grade) }}</td>
+    <td>{% for role, label, doc in b.bundle %}{% if doc and doc.url.startswith(("https://", "http://")) %}<a class="badge on" href="{{ doc.url }}" rel="noopener noreferrer" target="_blank" title="{{ label }}: tracked">{{ label }}</a>{% else %}<span class="badge {{ 'on' if doc else 'off' }}" title="{{ label }}: {{ 'tracked' if doc else 'not tracked' }}">{{ label }}</span>{% endif %}{% endfor %}</td>
   </tr>
   {% endfor %}
   </tbody>
@@ -37,6 +40,40 @@
 </div>
 {% else %}
 <p class="card muted">You're not watching anything yet. Send /watch to the bot.</p>
+{% endif %}
+
+<h2>Recent material changes</h2>
+{% if changes %}
+<div class="grid">
+  {% for c in changes %}
+  <article class="card">
+    <div class="small muted">{{ c.service }} · {{ c.effective_at[:10] }}{% if c.category %} · {{ c.category | replace("_", " ") }}{% endif %}</div>
+    <h3 style="margin:.25rem 0 .5rem;font-size:1rem"><a href="/changes/{{ c.id }}">{{ c.heading }}</a></h3>
+    {% if c.summary %}<p class="small">{{ c.summary | truncate(220) }}</p>{% endif %}
+    <div class="small">Severity {{ sev(c.severity) }} · {{ c.kind }}</div>
+  </article>
+  {% endfor %}
+</div>
+{% else %}
+<p class="card muted">No material changes on your services yet.</p>
+{% endif %}
+
+<h2>Contradictions between documents</h2>
+{% if contradictions %}
+<div class="grid">
+  {% for x in contradictions %}
+  <article class="card">
+    <div class="small muted">{{ x.service }} · {{ x.label_a }} vs {{ x.label_b }} · severity {{ sev(x.c.severity) }}</div>
+    <p>{{ x.c.summary }}</p>
+    <details><summary class="small">Quotes</summary>
+      <blockquote class="small"><strong>{{ x.label_a }} — {{ x.c.heading_a }}:</strong> {{ x.c.quote_a }}</blockquote>
+      <blockquote class="small"><strong>{{ x.label_b }} — {{ x.c.heading_b }}:</strong> {{ x.c.quote_b }}</blockquote>
+    </details>
+  </article>
+  {% endfor %}
+</div>
+{% else %}
+<p class="card muted">No contradictions found between your services' documents.</p>
 {% endif %}
 
 <h2 id="dl-h">Upcoming deadlines</h2>

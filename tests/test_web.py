@@ -1,5 +1,5 @@
-"""Web: the public Terms Radar and change inspector leak no member data, Control Room sign-in is
-single-use and member-scoped, revocation is immediate, and the swarm stream is sanitized."""
+"""Web: every page needs a signed-in member and shows only that member's own services, changes and
+data; Control Room sign-in is single-use, revocation is immediate, and the swarm stream is sanitized."""
 
 import asyncio
 import json
@@ -12,9 +12,6 @@ from fastapi.testclient import TestClient
 from app import agent, db, ledger, sessions, users, web
 from app.config import settings
 from app.main import app
-
-# Seeded member data that must never appear on a public page.
-SECRETS = ("Private Person", "leaky-", "Secret deadline title", "optout@corp.test", "proofref-secret", "US-CA")
 
 
 @pytest.fixture
@@ -80,76 +77,7 @@ def _seed(conn, suffix: str, chat_id: int):
     return svc, change_id, s2, member
 
 
-def _assert_no_member_data(text: str, member) -> None:
-    for secret in (*SECRETS, member.email or "", member.calendar_token, str(member.chat_id)):
-        assert secret and secret not in text, secret
-
-
-def test_public_radar_shows_public_data_and_no_member_data(client, conn):
-    svc, change_id, _, member = _seed(conn, "pub", 7001)
-    resp = client.get("/")
-    assert resp.status_code == 200 and resp.headers["content-type"].startswith("text/html")
-    page = resp.text
-    assert svc.name in page and f"/changes/{change_id}" in page and "Arbitration" in page
-    assert "Terms and Privacy disagree on selling data." in page and "Privacy Policy" in page
-    assert "<b>arbitration</b>" not in page  # summaries are escaped
-    _assert_no_member_data(page, member)
-
-
-def test_public_change_inspector(client, conn):
-    _, change_id, _, member = _seed(conn, "chg", 7002)
-    resp = client.get(f"/changes/{change_id}")
-    assert resp.status_code == 200
-    page = resp.text
-    assert "<del>" in page and "<ins>" in page and "court." in page
-    assert "<script>alert(1)</script>" not in page and "&lt;script&gt;" in page
-    assert 'aria-valuenow="93"' in page and 'aria-valuenow="81"' in page and "company" in page
-    assert "dispute resolution" in page and "Benchmark" not in page  # no benchmark hook installed
-    _assert_no_member_data(page, member)
-
-
-def test_unknown_change_is_404(client):
-    assert client.get("/changes/999999").status_code == 404
-    assert client.get("/changes/999999/evidence.png").status_code == 404
-
-
-def test_benchmark_hook_shows_a_badge_and_failures_hide_it(client, conn, monkeypatch):
-    _, change_id, _, _ = _seed(conn, "bench", 7003)
-
-    async def hook(request, change):
-        return SimpleNamespace(percentile=88.4, cohort_size=14, opt_out_share=0.25)
-
-    monkeypatch.setattr(web, "benchmark_hook", hook)
-    page = client.get(f"/changes/{change_id}").text
-    assert "more severe than 88% of comparable public clauses (14 services)" in page and "25%" in page
-
-    async def broken(request, change):
-        raise RuntimeError("pinecone down")
-
-    monkeypatch.setattr(web, "benchmark_hook", broken)
-    resp = client.get(f"/changes/{change_id}")
-    assert resp.status_code == 200 and "Benchmark" not in resp.text
-
-
-def test_evidence_is_served_only_from_the_evidence_dir(client, conn):
-    _, change_id, snap, _ = _seed(conn, "ev", 7004)
-    shot = settings.evidence_dir / "1" / "terms" / "abc.png"
-    shot.parent.mkdir(parents=True, exist_ok=True)
-    shot.write_bytes(b"\x89PNG\r\n\x1a\nfake")
-    conn.execute("UPDATE snapshots SET evidence_path = ? WHERE id = ?", ("1/terms/abc.png", snap))
-    assert "/evidence.png" in client.get(f"/changes/{change_id}").text
-    resp = client.get(f"/changes/{change_id}/evidence.png")
-    assert resp.status_code == 200 and resp.headers["content-type"] == "image/png" and resp.content.startswith(b"\x89PNG")
-
-    outside = settings.data_dir / "outside.png"
-    outside.write_bytes(b"\x89PNG secret")
-    for path in ("../outside.png", str(outside), "../fineprint.db"):
-        conn.execute("UPDATE snapshots SET evidence_path = ? WHERE id = ?", (path, snap))
-        assert client.get(f"/changes/{change_id}/evidence.png").status_code == 404
-        assert "/evidence.png" not in client.get(f"/changes/{change_id}").text
-
-
-# --- Control Room ----------------------------------------------------------------------------------
+# --- Sign-in helpers -------------------------------------------------------------------------------
 
 @pytest.fixture
 def linked(monkeypatch):
@@ -167,6 +95,98 @@ def _login(client, conn, user) -> str:
     cookie = resp.headers["set-cookie"]
     assert all(flag in cookie.lower() for flag in ("httponly", "secure", "samesite=lax", "max-age=86400"))
     return resp.cookies[sessions.COOKIE]
+
+
+def _as(client, conn, user) -> dict:
+    """Sign `user` in and return the cookie header for their session."""
+    cookie = _login(client, conn, user)
+    client.cookies.clear()
+    return {"cookie": f"{sessions.COOKIE}={cookie}"}
+
+
+# --- Everything is member-scoped: no public listing of services or changes ------------------------
+
+def test_home_redirects_to_the_control_room(client):
+    resp = client.get("/", follow_redirects=False)
+    assert resp.status_code == 303 and resp.headers["location"] == "/room"
+
+
+def test_room_is_the_members_own_radar(client, conn, linked):
+    svc, change_id, _, member = _seed(conn, "pub", 7001)
+    other_svc, other_change, _, other = _seed(conn, "other", 7011)
+    resp = client.get("/room", headers=_as(client, conn, member))
+    assert resp.status_code == 200 and resp.headers["content-type"].startswith("text/html")
+    page = resp.text
+    assert svc.name in page and f"/changes/{change_id}" in page and "Arbitration" in page
+    assert "Terms and Privacy disagree on selling data." in page and "Privacy Policy" in page
+    assert "<b>arbitration</b>" not in page  # summaries are escaped
+    # Nothing about services the member does not watch, nor about other members.
+    assert other_svc.name not in page and f"/changes/{other_change}" not in page
+    assert other.email not in page and other.calendar_token not in page
+
+
+def test_change_inspector_needs_a_session_and_a_watched_service(client, conn, linked):
+    _, change_id, _, member = _seed(conn, "chg", 7002)
+    _, _, _, stranger = _seed(conn, "chgx", 7012)
+    assert client.get(f"/changes/{change_id}").status_code == 401
+    assert client.get(f"/changes/{change_id}/evidence.png").status_code == 401
+    assert client.get(f"/changes/{change_id}", headers=_as(client, conn, stranger)).status_code == 404
+    resp = client.get(f"/changes/{change_id}", headers=_as(client, conn, member))
+    assert resp.status_code == 200 and resp.headers["cache-control"] == "no-store"
+    page = resp.text
+    assert "<del>" in page and "<ins>" in page and "court." in page
+    assert "<script>alert(1)</script>" not in page and "&lt;script&gt;" in page
+    assert 'aria-valuenow="93"' in page and 'aria-valuenow="81"' in page and "company" in page
+    assert "dispute resolution" in page and "Benchmark" not in page  # no benchmark hook installed
+    for secret in ("Secret deadline title", "optout@corp.test", "proofref-secret", member.calendar_token):
+        assert secret not in page
+
+
+def test_unknown_change_is_404(client, conn, linked):
+    headers = _as(client, conn, _member(conn, 7020, "Curious"))
+    assert client.get("/changes/999999", headers=headers).status_code == 404
+    assert client.get("/changes/999999/evidence.png", headers=headers).status_code == 404
+
+
+def test_benchmark_hook_shows_a_badge_and_failures_hide_it(client, conn, monkeypatch, linked):
+    _, change_id, _, member = _seed(conn, "bench", 7003)
+    headers = _as(client, conn, member)
+
+    async def hook(request, change):
+        return SimpleNamespace(percentile=88.4, cohort_size=14, opt_out_share=0.25)
+
+    monkeypatch.setattr(web, "benchmark_hook", hook)
+    page = client.get(f"/changes/{change_id}", headers=headers).text
+    assert "more severe than 88% of comparable public clauses (14 services)" in page and "25%" in page
+
+    async def broken(request, change):
+        raise RuntimeError("pinecone down")
+
+    monkeypatch.setattr(web, "benchmark_hook", broken)
+    resp = client.get(f"/changes/{change_id}", headers=headers)
+    assert resp.status_code == 200 and "Benchmark" not in resp.text
+
+
+def test_evidence_is_served_only_from_the_evidence_dir(client, conn, linked):
+    _, change_id, snap, member = _seed(conn, "ev", 7004)
+    headers = _as(client, conn, member)
+    shot = settings.evidence_dir / "1" / "terms" / "abc.png"
+    shot.parent.mkdir(parents=True, exist_ok=True)
+    shot.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    conn.execute("UPDATE snapshots SET evidence_path = ? WHERE id = ?", ("1/terms/abc.png", snap))
+    assert "/evidence.png" in client.get(f"/changes/{change_id}", headers=headers).text
+    resp = client.get(f"/changes/{change_id}/evidence.png", headers=headers)
+    assert resp.status_code == 200 and resp.headers["content-type"] == "image/png" and resp.content.startswith(b"\x89PNG")
+
+    outside = settings.data_dir / "outside.png"
+    outside.write_bytes(b"\x89PNG secret")
+    for path in ("../outside.png", str(outside), "../fineprint.db"):
+        conn.execute("UPDATE snapshots SET evidence_path = ? WHERE id = ?", (path, snap))
+        assert client.get(f"/changes/{change_id}/evidence.png", headers=headers).status_code == 404
+        assert "/evidence.png" not in client.get(f"/changes/{change_id}", headers=headers).text
+
+
+# --- Control Room ----------------------------------------------------------------------------------
 
 
 def test_magic_link_signs_in_once_and_shows_only_that_members_room(client, conn, linked):
@@ -293,8 +313,9 @@ async def test_swarm_stream_sends_new_sanitized_events_and_stops_on_disconnect(t
     assert data[0]["duration_ms"] == 12 and data[0]["role"] == "scout"
 
 
-async def test_swarm_stream_resumes_after_last_event_id_and_closes_cleanly(tmp_path):
+async def test_swarm_stream_resumes_after_last_event_id_and_closes_cleanly(tmp_path, monkeypatch):
     conn = db.connect(tmp_path / "s.db")
+    monkeypatch.setattr(web, "_member", lambda request: SimpleNamespace(id=1))  # signed in
     first = _event(conn, "gateway", "wake")
     _event(conn, "advocate", "sleep", "", 300)
     request = SimpleNamespace(
@@ -316,7 +337,8 @@ async def test_swarm_stream_resumes_after_last_event_id_and_closes_cleanly(tmp_p
     await body.aclose()
 
 
-def test_radar_renders_the_swarm_strip(client, conn):
+def test_room_renders_the_swarm_strip_and_the_stream_needs_a_session(client, conn, linked):
     _event(conn, "scout", "checkpoint_restore", "base checkpoint", 310)
-    page = client.get("/").text
+    assert client.get("/api/swarm/stream").status_code == 401
+    page = client.get("/room", headers=_as(client, conn, _member(conn, 7030, "Watcher"))).text
     assert "Swarm Activity" in page and "checkpoint_restore" in page and "/api/swarm/stream" in page

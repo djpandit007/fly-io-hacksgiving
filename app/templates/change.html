@@ -2,7 +2,7 @@
 {% from "_macros.html" import sev, grade %}
 {% block title %}{{ service.name }}: {{ change.heading }} · Fine Print{% endblock %}
 {% block content %}
-<p class="small"><a href="/">← Terms Radar</a></p>
+<p class="small"><a href="/room">← Control Room</a></p>
 <h1>{{ change.heading }}</h1>
 <p class="muted">{{ service.name }} · {{ document }} · {{ change.kind }} · in force {{ change.effective_at.strftime("%d %b %Y") }}{% if change.category %} · {{ change.category | replace("_", " ") }}{% endif %} · ToS;DR {{ grade(service.tosdr_grade) }}</p>
 {% if not material %}<p class="card small muted">Jev judged this change below the materiality threshold.</p>{% endif %}
