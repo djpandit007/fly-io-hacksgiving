@@ -1,0 +1,39 @@
+{# Live Swarm Activity: server-rendered backlog, then new events over /api/swarm/stream. #}
+<section aria-labelledby="swarm-h">
+  <h2 id="swarm-h"><span class="live" id="swarm-live" aria-hidden="true"></span>Swarm Activity</h2>
+  <div class="card">
+    <p class="small muted" id="swarm-status" aria-live="polite">Sanitized lifecycle events from the Gateway, Scout and Advocate Sprites.</p>
+    <ul class="swarm" id="swarm-list" aria-live="polite">
+      {% for e in events %}
+      <li><span class="role">{{ e.role }}</span><span class="ev">{{ e.event }}</span>{% if e.detail %}<span>{{ e.detail }}</span>{% endif %}{% if e.duration_ms is not none %}<span class="muted">{{ e.duration_ms }} ms</span>{% endif %}<time class="muted" datetime="{{ e.at }}">{{ e.at[11:19] }}</time></li>
+      {% else %}
+      <li class="muted" id="swarm-empty">No swarm activity yet.</li>
+      {% endfor %}
+    </ul>
+  </div>
+</section>
+<script>
+(function () {
+  if (!window.EventSource) return;
+  var list = document.getElementById("swarm-list");
+  var live = document.getElementById("swarm-live");
+  var source = new EventSource("/api/swarm/stream");
+  function span(cls, text) { var s = document.createElement("span"); if (cls) s.className = cls; s.textContent = text; return s; }
+  source.onopen = function () { live.classList.add("on"); };
+  source.onerror = function () { live.classList.remove("on"); };
+  source.addEventListener("swarm", function (msg) {
+    var e; try { e = JSON.parse(msg.data); } catch (_) { return; }
+    var empty = document.getElementById("swarm-empty"); if (empty) empty.remove();
+    var li = document.createElement("li");
+    li.appendChild(span("role", String(e.role || "")));
+    li.appendChild(span("ev", String(e.event || "")));
+    if (e.detail) li.appendChild(span("", String(e.detail)));
+    if (e.duration_ms !== null && e.duration_ms !== undefined) li.appendChild(span("muted", String(e.duration_ms) + " ms"));
+    var t = document.createElement("time"); t.className = "muted"; t.dateTime = String(e.at || ""); t.textContent = String(e.at || "").slice(11, 19);
+    li.appendChild(t);
+    list.appendChild(li);
+    while (list.children.length > 50) list.removeChild(list.firstChild);
+    list.scrollTop = list.scrollHeight;
+  });
+})();
+</script>

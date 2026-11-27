@@ -1,0 +1,9 @@
+{% macro sev(v) -%}
+{%- if v is none -%}<span class="muted">—</span>
+{%- else -%}<span class="sev {{ 'high' if v >= 0.7 else ('mid' if v >= 0.4 else 'low') }}">{{ (v * 100) | round | int }}%</span>
+{%- endif -%}
+{%- endmacro %}
+
+{% macro grade(g) -%}
+{%- if g -%}<span class="grade" title="ToS;DR grade {{ g }}">{{ g }}</span>{%- else -%}<span class="muted" title="No ToS;DR grade">—</span>{%- endif -%}
+{%- endmacro %}

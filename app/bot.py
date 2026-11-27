@@ -21,6 +21,7 @@ from app import (
     mail,
     metrics,
     progress,
+    sessions,
     taps,
     users,
 )
@@ -43,6 +44,8 @@ MEMBER_MENU = [
     ("ask", "Ask about your terms"),
     ("deadlines", "Your opt-out windows, renewals and calendar link"),
     ("wrapped", "Your year in accepted terms"),
+    ("jurisdiction", "Where you live, for local consumer-law notes"),
+    ("dashboard", "A private link to your web Control Room"),
     ("help", "What I can do"),
 ]
 EMAIL_MENU = [("email", "Link your email"), ("verify", "Confirm your email code")]
@@ -62,12 +65,14 @@ SHORT_DESCRIPTION = "Watches the fine print you agree to. Private: ask the opera
 
 HELP_BUTTONS = [
     [("👀 Watch a service", taps.build("h", "watch")), ("📋 My list", taps.build("h", "list"))],
-    [("⏰ Deadlines", taps.build("h", "dl")), ("🔎 How checks work", taps.build("h", "how"))],
+    [("⏰ Deadlines", taps.build("h", "dl")), ("🛰 Control Room", taps.build("h", "room"))],
+    [("🔎 How checks work", taps.build("h", "how"))],
 ]
 HOW_CHECKS_WORK = (
     "<b>How checks work</b>\n\nSend me a link to terms, a PDF, a screenshot or a photo of a contract. I'll "
-    "check it <b>before you agree</b>: red flags like auto-renewal, arbitration or data sharing, the clauses "
-    "behind them, and any deadlines in it (added to your calendar)."
+    "check it <b>before you agree</b>, with checks that fit the kind of document (a lease, a job offer, an app's "
+    "terms): red flags like auto-renewal, arbitration or data sharing, the clauses behind them, and any deadlines "
+    "in it (added to your calendar). Where it helps, you can ask for a redline kit with suggested edits."
 )
 WATCH_PROMPT = "Which service should I watch? Reply with a name, a domain or a link to its terms."
 WATCH_PLACEHOLDER = "e.g. notion or youtube.com"
@@ -85,6 +90,8 @@ HELP = """<b>Fine Print</b> watches the fine print you've agreed to.
 /ask <i>question</i> — ask about the terms you watch, answered with quotes from them
 /deadlines — your opt-out windows, renewals and notice periods, plus your calendar link
 /wrapped — your year in accepted terms
+/jurisdiction <i>region</i> — where you live (US-CA, US-NY, US-OTHER, EU, UK), for local consumer-law notes
+/dashboard — a private sign-in link to your web Control Room
 {email}
 Send a link or a file (PDF, screenshot, photo) to check it <b>before you agree</b>.
 <i>Information, not legal advice.</i>"""
@@ -293,6 +300,29 @@ async def _deadlines(conn: sqlite3.Connection, tg: Telegram, user: User) -> None
     await tg.send(user.chat_id, ("\n".join(lines) or "No upcoming deadlines.") + feed)
 
 
+DASHBOARD_OFF = "The web Control Room isn't set up on this bot yet."
+
+
+async def _dashboard(conn: sqlite3.Connection, tg: Telegram, user: User) -> None:
+    """A single-use, 10-minute sign-in link to the member's own Control Room."""
+    if not sessions.configured():
+        await tg.send(user.chat_id, DASHBOARD_OFF)
+        return
+    link = sessions.magic_link(conn, user)
+    await tg.send(
+        user.chat_id,
+        f'<a href="{esc(link)}">Open your Control Room</a>\n\nThis link works once and expires in 10 minutes. '
+        "Don't share it: it signs you in for 24 hours. Send /dashboard again for a fresh one.",
+    )
+
+
+async def _jurisdiction(conn: sqlite3.Connection, tg: Telegram, user: User, arg: str) -> None:
+    """Placeholder until the playbooks change lands: shows the current setting only."""
+    current = users.by_id(conn, user.id)
+    region = current.jurisdiction if current and current.jurisdiction else "not set"
+    await tg.send(user.chat_id, f"Your jurisdiction: <b>{esc(region)}</b>. Setting it here is coming soon.")
+
+
 async def _members(conn: sqlite3.Connection, tg: Telegram, user: User) -> None:
     lines = [
         f"{'👑' if m.is_owner else '•'} <code>{m.id}</code> {esc(m.label)}"
@@ -453,6 +483,9 @@ async def _dispatch(conn: sqlite3.Connection, cl: Clients, tg: Telegram, t: _Tap
         case taps.Tap("h", "dl"):
             await t.answer()
             await _deadlines(conn, tg, user)
+        case taps.Tap("h", "room"):
+            await t.answer()
+            await _dashboard(conn, tg, user)
         case taps.Tap("h", "how"):
             await t.answer()
             await tg.send(user.chat_id, HOW_CHECKS_WORK)
@@ -566,6 +599,10 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
             await _email(conn, cl, tg, user, arg)
         elif cmd == "/verify":
             await _verify(conn, tg, user, arg)
+        elif cmd == "/dashboard":
+            await _dashboard(conn, tg, user)
+        elif cmd == "/jurisdiction":
+            await _jurisdiction(conn, tg, user, arg)
         elif cmd == "/wrapped":
             async with progress.working(tg, chat, msg.message_id) as w:
                 w.stage("Looking back over your year…")
