@@ -18,11 +18,15 @@ The system SHALL separate responsibilities across three Sprite roles: the Gatewa
 - **THEN** no send Connector is reachable during analysis and no email is sent
 
 ### Requirement: Per-job DNS egress locking on the Scout Sprite
-The system SHALL apply a per-job DNS network policy on the Scout Sprite before fetching an external URL so that only the target domain and its explicit allowlisted sub-domains resolve. All other domains SHALL fail closed at DNS resolution.
+The system SHALL apply a per-job DNS network policy on the Scout Sprite before fetching an external URL so that only exact host names resolve: the target host, its registrable domain, and at most a few explicit extra hosts, never wildcard sub-domains. Every allowed host SHALL be resolved and checked once before the job, and the browser SHALL be pinned to those checked addresses. All other names SHALL fail closed at DNS resolution.
 
 #### Scenario: Scout fetches a service's legal portal
-- **WHEN** the Scout is assigned to crawl `notion.so`
-- **THEN** its DNS policy permits only `notion.so` (and required target hosts) and refuses requests to unrelated external or internal domains
+- **WHEN** the Scout is assigned to crawl `https://www.notion.so/terms`
+- **THEN** its DNS policy permits only `www.notion.so` and `notion.so`, and refuses requests to any other host, including other sub-domains such as `cdn.notion.so`
+
+#### Scenario: Allowed host answers differently later
+- **WHEN** an allowed host's DNS answer changes to a private address after the job starts
+- **THEN** the browser keeps using the address checked before the job and never connects to the new one
 
 #### Scenario: Scout attempts to reach a non-public address
 - **WHEN** a target URL redirects to a private, link-local, or loopback address

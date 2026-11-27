@@ -4,7 +4,7 @@
 
 Fine Print currently runs as a single FastAPI application on one Fly.io Sprite (`fly-io-hacksgiving`), backed by local SQLite (`fineprint.db`, schema `v5`) and Fly.io Connectors for OpenCode (TypeSafe Jev + DeepSeek/GLM models), Pinecone, AgentMail, Exa, and LlamaCloud. Code owns the workflow (`app/agent.py`, `app/ask.py`, `app/intake.py`, `app/bot.py`), external responses are validated with Pydantic at the boundary, and `app/sprite.py` holds Sprites task locks over `/.sprite/api.sock` so webhooks do not sleep mid-job.
 
-See `proposal.md` for motivation and capability scope. This design explains how to evolve Fine Print into a 3-role multi-Sprite swarm, expand the legal engine across policy bundles, domain playbooks, statutory checks, benchmarking, and closed-loop counter-measures, and expose a live web Control Room on the Gateway Sprite's HTTPS URL—while preserving Fine Print's deterministic workflow discipline and zero-retention privacy model for personal documents.
+See `proposal.md` for motivation and capability scope. This design explains how to evolve Fine Print into a 3-role multi-Sprite swarm, expand the legal engine across policy bundles, domain playbooks, statutory checks, benchmarking, and and closed-loop counter-measures, all through Telegram and email—while preserving Fine Print's deterministic workflow discipline and zero-retention privacy model for personal documents.
 
 ## Goals / Non-Goals
 
@@ -17,7 +17,7 @@ See `proposal.md` for motivation and capability scope. This design explains how 
 **Non-Goals:**
 - **No Per-Member "Personal Legal Vault" Sprites**, **no Box Connector**, and **no local Ollama vault integration**.
 - **No persistent storage of uploaded user contracts, screenshots of user documents, or outgoing notice bodies.**
-- **No Node/SPA frontend build pipeline**: the web Control Room uses server-rendered Jinja2 HTML + lightweight HTMX/SSE served directly from FastAPI so deployment stays a single `uv sync`.
+- **No web UI**: a magic-link web Control Room was built and then dropped during implementation; everything it showed (watchlist, deadlines, receipts, verdicts) is already available in Telegram.
 - **No autonomous legal dispatch without explicit human confirmation**: every outbound opt-out email or web-form submission requires a member-bound, single-use signed approval tap.
 
 ## Decisions
@@ -50,8 +50,8 @@ We introduce `app/swarm.py` to manage programmatic calls to the Sprites API (`ht
 ```
 
 * **How Gateway talks to Workers:** Each worker Sprite runs a tiny internal runner script (`workers/scout_runner.py`, `workers/advocate_runner.py`) invoked via `POST /v1/sprites/{name}/exec` (passing structured JSON via stdin/args and reading typed Pydantic JSON from stdout) OR an internal authenticated HTTP endpoint on the worker Sprite. Using `exec` keeps worker URLs completely non-public (zero external attack surface).
-* **Per-Job DNS Egress Locking (Scout):** Before executing a crawl for `target_url`, the Gateway validates `target_url` with `app/netguard.py` (public IP check), extracts the registrable target host (plus optional CDN/asset hosts if needed for JS bundles, capped tightly), updates the Scout Sprite's network policy via the Sprites API to allow only that host, runs `scout_runner.py`, and in a `finally:` block calls `POST /v1/sprites/{scout}/checkpoints/{base_id}/restore`.
-* **Evidentiary Snapshots:** When Scout crawls a public terms page with Playwright, it saves a PNG screenshot and computes `sha256(normalised_text)`. For public service pages, screenshots are stored under `$FP_DATA_DIR/evidence/<service_id>/<doc_role>/<sha>.png` on the Gateway Sprite and served read-only in the Control Room. For private user links/PDFs, no screenshot or text is persisted.
+* **Per-Job DNS Egress Locking (Scout):** Before executing a crawl for `target_url`, the Gateway validates `target_url` with `app/netguard.py` (public IP check), builds an allowlist of exact host names only (the target host and its registrable domain, plus at most a few explicit extra hosts; never wildcard sub-domains, so every host can be checked and pinned up front), updates the Scout Sprite's network policy via the Sprites API to allow only those hosts, runs `scout_runner.py`, and in a `finally:` block calls `POST /v1/sprites/{scout}/checkpoints/{base_id}/restore`.
+* **Evidentiary Snapshots:** When Scout crawls a public terms page with Playwright, it saves a PNG screenshot and computes `sha256(normalised_text)`. For public service pages, screenshots are stored under `$FP_DATA_DIR/evidence/<service_id>/<doc_role>/<sha>.png` on the Gateway Sprite and kept as proof (their path on `snapshots.evidence_path`). For private user links/PDFs, no screenshot or text is persisted.
 * **Why `exec` + pre-warmed named workers over creating brand-new Sprites per request:** Creating a fresh Sprite from scratch installs Playwright/Chromium/LibreOffice (minutes) and hits per-minute creation rate limits. Pre-provisioning named Scout and Advocate Sprites once via `scripts/setup_swarm.sh`, taking a verified `base` checkpoint, and restoring that checkpoint in ~300ms after every job gives identical fresh-VM isolation with sub-second turnaround and $0 idle cost.
 * **Alternative considered:** Running Playwright and LibreOffice inside the Gateway Sprite. Rejected because untrusted URLs/PDFs would share the same filesystem, process memory, and Connector reachability as SQLite and member records.
 
@@ -120,15 +120,6 @@ CREATE TABLE action_receipts (
     executed_at   TEXT NOT NULL
 );
 
--- Short-lived magic links and active Control Room sessions
-CREATE TABLE dashboard_sessions (
-    token_hash    TEXT PRIMARY KEY,
-    user_id       INTEGER NOT NULL REFERENCES users(id),
-    kind          TEXT NOT NULL,        -- magic | session
-    expires_at    TEXT NOT NULL,
-    consumed_at   TEXT
-);
-
 -- Sanitized swarm telemetry (zero URLs, zero member ids, pruned after 90 days)
 CREATE TABLE swarm_events (
     id            INTEGER PRIMARY KEY,
@@ -185,19 +176,9 @@ We add `app/playbooks.py` as the single source of truth for all five legal domai
   - Computes deterministic percentile rank of `severity` (and opt-out rarity) over the cohort's metadata and returns a typed `Benchmark(percentile, cohort_size, opt_out_share, comparable_services)`.
   - Private uploaded documents only *query* Pinecone (`log_body=False`) and are never upserted.
 
-### D6. Live Control Room & Member Terms Radar (`app/web.py`)
+### D6. No Web UI (decided during implementation)
 
-* Served directly on the Gateway Sprite's existing FastAPI app (`:8080`), using Jinja2 templates (`app/templates/`) + HTMX + vanilla EventSource (SSE) — no build step.
-* **No public data routes (decided during implementation):** every page needs a signed-in member and shows only that member's own data. `GET /` redirects to `/room`.
-* **Member-scoped routes:**
-  - **Terms Radar** (inside `/room`): the member's watched services only (sorted by worst recent severity), Policy Bundle coverage badges (`ToS`, `Privacy`, `AI`, `Billing`), ToS;DR grades, recent material changes, cross-document contradictions, and a live sanitized **Swarm Activity Strip**.
-  - `GET /changes/{change_id}` — **Interactive Change & Evidence Inspector**, only for changes on a service the member watches (404 otherwise): Side-by-side redline diff, Jev calibrated probability bars (`material`, `severity`, `favours`, `opt_out`), Pinecone benchmark badge, evidentiary screenshot preview (when captured by Scout), and contradiction links.
-  - `GET /api/swarm/stream` — Server-Sent Events stream (signed-in members only) pushing sanitized `swarm_events` in real time as Sprites wake, lock egress, run, checkpoint-restore, and sleep.
-* **Authenticated Member Routes (magic-link + HTTP-only cookie):**
-  - `/dashboard` in Telegram creates a `dashboard_sessions(kind='magic')` token (10-min TTL, single-use) and sends `https://<FP_PUBLIC_URL>/auth/magic?token=<raw>`.
-  - `GET /auth/magic` atomically consumes the magic token, issues a 24-hour signed HTTP-only `SameSite=Lax` `Secure` session cookie backed by `dashboard_sessions(kind='session')`, and redirects to `/room`.
-  - `GET /room` — **Member Control Room**: Shows ONLY that member's watched service bundles, upcoming deadlines + `.ics` link, configured jurisdiction, and metadata-only `action_receipts` log.
-  - `users.remove()` deletes all `dashboard_sessions` rows for the removed user so revocation is immediate.
+A magic-link web Control Room (member Terms Radar, change inspector, live SSE swarm telemetry) was built and then removed. It added sessions, cookies and a streaming endpoint (new attack surface, one privacy rework already) for information members already get in Telegram: verdict cards, alerts, `/list`, `/deadlines`, opt-out receipts sent as messages, and swarm totals in the owner's `/stats`. Evidentiary screenshots are still captured and their paths stored on `snapshots.evidence_path` as proof.
 
 ## Risks / Trade-offs
 
@@ -206,7 +187,6 @@ We add `app/playbooks.py` as the single source of truth for all five legal domai
 - **[Ephemeral contract text needed between Verdict Card and `[Generate Redline Kit]` tap]** → Hold an encrypted-in-RAM (process memory only, never disk/SQLite) LRU cache keyed by `(user_id, ephemeral_token)` with a 10-minute TTL and 20 MB cap, wiped immediately after redline generation or on Sprite sleep. If the Sprite slept before the member tapped, politely ask them to re-send the file with `/redline`.
 - **[Playwright opt-out web forms vary wildly across sites]** → Restrict Playwright form automation to well-structured forms whose submit target matches the service's verified domain, require a dry-run preview of extracted fields before approval, and degrade cleanly to email or printable notice whenever a CAPTCHA or login wall blocks automation.
 - **[Statutory unenforceability notes sounding like legal advice]** → Restrict statutory annotations to a curated, high-confidence ruleset (`app/playbooks.py`) verified by Jev against the quoted clause, phrase every note carefully ("may be restricted or void under…"), and always display `Information, not legal advice.`
-- **[Control Room leaking another member's data]** → No public data routes; every query is scoped to the signed-in member's watched service ids, changes on unwatched services return 404, verified by cross-member isolation tests.
 
 ## Migration Plan
 
@@ -221,4 +201,4 @@ We add `app/playbooks.py` as the single source of truth for all five legal domai
    - **Phase 2:** Legal Playbooks (`app/playbooks.py`), Document Router, Jurisdiction (`/jurisdiction` + statutory checks), Ephemeral Cross-Contract Conflicts, and Pinecone Benchmarking (`app/benchmark.py`).
    - **Phase 3:** Multi-Sprite Swarm orchestration (`app/swarm.py`, `workers/scout_runner.py`, `workers/advocate_runner.py`, `scripts/setup_swarm.sh`, DNS egress lock + checkpoint restore + metrics).
    - **Phase 4:** Closed-Loop Counter-Measures (`app/advocate.py`: opt-out extraction, signed approval tokens, AgentMail/Playwright dispatch, receipts, adversarial dual-Sprite `.docx`/`.pdf` redline kits).
-   - **Phase 5:** Live Control Room & Member Terms Radar (`app/web.py`, Jinja2/HTMX templates, `/dashboard` magic links, `/api/swarm/stream` SSE, end-to-end tests & README update).
+   - **Phase 5:** Bot guidance (`/jurisdiction`, `/redline`), end-to-end tests & README update.
