@@ -77,6 +77,8 @@ Each member's watchlist, deadlines, calendar feed and Wrapped are private to the
 | `/ask <question>` | members | ask about the terms you watch; answered with quotes from them. A plain question typed without `/ask` works too. Answers come from each watched service's terms page only (not its privacy policy), and asking about a service you don't watch offers to watch it |
 | `/deadlines` | members | your upcoming deadlines and your private calendar link |
 | `/wrapped` | members | your year in accepted terms |
+| `/jurisdiction <region>` | members | where you live (`US-CA`, `US-NY`, `US-OTHER`, `EU`, `UK`), for local consumer-law notes on checks |
+| `/dashboard` | members | a private sign-in link to your web Control Room (single use, expires in 10 minutes) |
 | `/email <address>`, `/verify <code>` | members | link your email so forwarded mail reaches you |
 | `/members` | owner | who has joined |
 | `/remove <id>` | owner | remove a member |
@@ -86,11 +88,25 @@ Each member's watchlist, deadlines, calendar feed and Wrapped are private to the
 Typing `/` shows the command menu; the owner's menu also lists the owner commands. Before someone joins,
 the bot's description (shown in an empty chat) says it is private and how to get access.
 
-**Buttons.** `/help` and the welcome have buttons for the main actions. `/watch` on its own asks which
+**Buttons.** `/help` and the welcome have buttons for the main actions, including **Control Room**
+(same as `/dashboard`). `/watch` on its own asks which
 service and takes the reply as the name. A single word such as `notion` gets "Watch Notion?" with Yes/No.
 `/list`, change alerts and `/watch` results have unwatch buttons, with Undo. Each red flag on a verdict
 card has a 💡 button that explains it. Verdict cards, change alerts, `/watch` overviews, `/wrapped` and
 `/ask` answers have 👍/👎, with an optional reason after 👎.
+
+**On the web.** The Sprite's URL (`FP_PUBLIC_URL`) also serves pages:
+
+- `/` — the public **Terms Radar**: every tracked service ranked by its worst material change in the past
+  90 days, Policy Bundle coverage (Terms, Privacy, AI, Billing, DPA), ToS;DR grades, recent material
+  changes, contradictions between a service's documents, and live Swarm Activity.
+- `/changes/<id>` — one change: side-by-side redline, Jev's scores (material, severity, opt-out, who it
+  favours), a benchmark percentile when available, and the captured screenshot when there is one.
+- `/room` — your **Control Room**, opened with the `/dashboard` link: your watchlist with its documents,
+  upcoming deadlines and calendar feed, jurisdiction, and a log of actions taken for you (metadata only).
+  The sign-in lasts 24 hours; `/remove` ends a member's sessions at once.
+
+Public pages read only public terms data: never members, watchlists, deadlines or receipts.
 
 **While it works**, the bot puts 👀 on your message, shows a "Thinking…" draft with the current step, and
 replies to your message with the result; 👀 becomes 👌, or 😢 if it failed.
