@@ -94,6 +94,13 @@ def test_main_turns_crawl_errors_into_labels(monkeypatch, capsys):
     assert "secret-path" not in base64.b64decode(out.split(swarm.RESULT_START)[1].split(swarm.RESULT_END)[0]).decode()
 
 
+def test_dotted_hosts_are_refused_not_normalised():
+    allow = ["notion.so", "*.notion.so"]
+    assert sr.host_allowed("notion.so", allow) and sr.host_allowed("www.notion.so", allow)
+    for host in ("notion.so.", "www.notion.so.", ".notion.so", ""):
+        assert not sr.host_allowed(host, allow), host
+
+
 def test_resolver_rules_pin_each_host_to_its_checked_address():
     rules = sr.resolver_rules({"notion.so": "203.0.113.7", "www.notion.so": "2001:db8::1"})
     assert rules == "MAP notion.so 203.0.113.7, MAP www.notion.so [2001:db8::1]"

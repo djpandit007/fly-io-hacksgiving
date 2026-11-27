@@ -82,7 +82,11 @@ def digest(text: str) -> str:
 
 
 def host_allowed(host: str, allow: list[str]) -> bool:
-    host = host.lower().strip(".")
+    """Exact or `*.`-wildcard match. A host with a leading or trailing dot (`notion.so.`) is refused
+    rather than normalised: Chromium would resolve it separately from the pinned `notion.so`."""
+    host = host.lower()
+    if not host or host.startswith(".") or host.endswith("."):
+        return False
     for rule in allow:
         rule = rule.lower()
         if rule.startswith("*."):
