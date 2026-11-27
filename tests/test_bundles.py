@@ -45,7 +45,7 @@ def pages(monkeypatch):
     live = {TERMS_URL: TERMS, AI_URL: AI_OLD}
     backfills: list[tuple[str, str | None]] = []
 
-    async def fake_page_text(cl, url):
+    async def fake_page_text(cl, url, public=None):
         if isinstance(live[url], Exception):
             raise live[url]
         return live[url]
@@ -163,7 +163,7 @@ async def test_service_with_only_terms_and_pre_bundle_snapshots_keeps_working(co
     conn.execute("INSERT INTO snapshots (service_id, taken_at, origin, sha, text) VALUES (?, ?, 'live', 'old', ?)",
                  (svc.id, (datetime.now(UTC) - timedelta(days=3)).isoformat(), old))
 
-    async def page(cl_, url):
+    async def page(cl_, url, public=None):
         assert url == TERMS_URL
         return new
 

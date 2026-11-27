@@ -140,6 +140,37 @@ uv run uvicorn app.main:app --reload --port 8080
    The job page shows each run's summary, and the job fails (so GitHub emails you) when a service
    could not be checked or the Sprite could not be reached.
 
+### Worker Sprites (optional)
+
+Without them Fine Print runs on one Sprite: pages a direct fetch cannot read go to Exa and LlamaParse.
+With them, the Gateway hands untrusted work to two private workers through the Sprites API:
+
+| Sprite | Connectors | Does |
+|---|---|---|
+| `fly-io-hacksgiving-scout` | none | Renders bot-walled or JavaScript-only legal pages in headless Chromium, expands accordions, finds companion policy links, returns normalised text, a SHA-256 digest and (for public service pages only) a PNG evidentiary screenshot |
+| `fly-io-hacksgiving-advocate` | AgentMail (send only), OpenCode | Member-approved counter-measures: opt-out notices and redline kits |
+
+Every job locks the worker's DNS to the target's own site (everything else is refused), runs the runner
+script, then closes egress and restores the worker's clean base checkpoint, even when the job fails.
+
+1. `SPRITES_API_TOKEN=<token> ./scripts/setup_swarm.sh` creates both workers (Python 3.12, Playwright +
+   Chromium; the Advocate also gets `python-docx` and LibreOffice), takes each one's base checkpoint and
+   saves `FP_SCOUT_BASE_CHECKPOINT` / `FP_ADVOCATE_BASE_CHECKPOINT` into `.env.sprite`. With the token it
+   also adds the Gateway's Sprites API connector, which only Sprites labelled `fineprint` may use and only
+   for exec, network policy and checkpoint restore on the two workers. Without it, add that Custom API
+   connector by hand (base `https://api.sprites.dev`).
+2. Keep the Scout connector-free: make every other connector require the sprite label `fineprint` (the
+   Gateway's), not only the name prefix, since `fly-io-hacksgiving-scout` matches the prefix too. Give
+   the Advocate its own AgentMail connector limited to the send endpoint and an OpenCode connector, both
+   requiring the label `fineprint-advocate`.
+3. `./scripts/connectors.sh`, copy the Sprites connector's gateway base into `.env.sprite` as
+   `FP_SPRITES_API_BASE`, and redeploy the Gateway (`./scripts/setup_sprite.sh`).
+
+Re-run `./scripts/setup_swarm.sh scout` (or `advocate`) after changing `workers/`: it takes a new base
+checkpoint. Evidentiary screenshots are kept under `$FP_DATA_DIR/evidence/<service>/<document>/<sha>.png`;
+nothing is kept from members' own links or files. `/stats` shows worker runs, DNS locks, checkpoint
+restore times and counter-measures, as counts only.
+
 The database upgrades itself on start-up (`PRAGMA user_version`); a `fineprint.db.v1.bak` copy is kept
 when a single-owner database is migrated.
 
@@ -173,6 +204,8 @@ How members use it:
 - Documents and links members send are read by the operator's AI providers; Fine Print keeps only
   extracted deadlines, watchlists and verified email addresses — not message bodies or attachments.
 - Questions you ask are read by the operator's AI providers and are not stored.
+- Worker Sprite activity (`swarm_events`) and counters store only roles, generic labels and durations:
+  never URLs, file names or who asked. Kept 90 days.
 - Answer feedback (👍/👎) keeps only the kind of answer, the writer model and prompt version, and for
   public terms changes the change id: never the answer text, a URL, or who rated it. Kept 90 days.
 - Button data is never trusted: every tap is checked against the tapping member's own data.

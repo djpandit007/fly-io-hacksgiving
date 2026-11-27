@@ -36,6 +36,7 @@ from app import (
     parse,
     playbooks,
     quotes,
+    swarm,
     taps,
     tosdr,
     writer,
@@ -108,9 +109,11 @@ class Clients:
         # LlamaCloud has a default direct URL, so it counts as configured only with a key or a gateway URL.
         llama = settings.llama
         self.llama = Gateway(llama, recorder=recorder) if llama.key.get_secret_value() or "sprites.dev" in llama.base_url else None
+        # Worker Sprites (Scout/Advocate); None in single-Sprite mode.
+        self.swarm: swarm.Swarm | None = swarm.Swarm.from_settings(recorder)
 
     async def aclose(self) -> None:
-        for gw in (self.ai, self.pinecone, self.exa, self.mail, self.llama):
+        for gw in (self.ai, self.pinecone, self.exa, self.mail, self.llama, self.swarm):
             if gw:
                 await gw.aclose()
 
@@ -399,8 +402,10 @@ async def record_version(
     if prev and prev.sha == digest:
         return []
     cur = conn.execute(
-        "INSERT OR IGNORE INTO snapshots (service_id, taken_at, origin, sha, text, document_id) VALUES (?, ?, ?, ?, ?, ?)",
-        (svc.id, taken_at.isoformat(), origin, digest, text, doc.id),
+        """INSERT OR IGNORE INTO snapshots (service_id, taken_at, origin, sha, text, document_id, evidence_path)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (svc.id, taken_at.isoformat(), origin, digest, text, doc.id,
+         swarm.evidence_for(svc.id, doc.role, digest) if origin == "live" else None),
     )
     if cur.rowcount == 0 or prev is None:  # duplicate text, or the first baseline
         return []
@@ -527,12 +532,39 @@ def past_material_changes(conn: sqlite3.Connection, service_id: int, days: int =
     return [c for c in found if _is_material(c)]
 
 
-async def page_text(cl: Clients, url: str) -> str:
+async def scout_text(cl: Clients, url: str, public: swarm.PublicPage | None = None) -> str:
+    """The page rendered by the Scout Sprite (headless browser under a DNS lock), or "" when the
+    Scout is not configured or fails. Only a public service page (`public`) keeps its evidentiary
+    screenshot; a private check asks for none and keeps nothing."""
+    sw = getattr(cl, "swarm", None)
+    if sw is None or not sw.available("scout"):
+        return ""
+    try:
+        result = await sw.scout(url, screenshot=public is not None)
+    except BlockedURL:
+        raise
+    except Exception as exc:  # noqa: BLE001 — the Scout is an optional step; fall back to Exa
+        log.warning("scout crawl failed: %s", type(exc).__name__)
+        return ""
+    text = normalise(html_to_markdown(result.html)) if result.html else ""
+    if len(text) < MIN_HTML_CHARS and len(result.text) > len(text):
+        text = normalise(result.text)
+    if public is not None and text and result.screenshot_png_b64:
+        try:
+            swarm.save_evidence(public, sha(text), result.screenshot_png_b64)
+        except OSError as exc:
+            log.warning("evidence not saved: %s", type(exc).__name__)
+    return text
+
+
+async def page_text(cl: Clients, url: str, *, public: swarm.PublicPage | None = None) -> str:
     """A terms page as normalised text.
 
-    1. Direct fetch (public addresses only). 2. Exa page contents when the fetch is refused, fails or
-    yields almost nothing (bot walls, JavaScript-only pages). 3. LlamaParse for PDFs and as last resort.
-    A URL that resolves to a non-public address is never fetched and never handed to a fallback.
+    1. Direct fetch (public addresses only). 2. The Scout Sprite when the fetch is refused, fails or
+    yields almost nothing (bot walls, JavaScript-only pages). 3. Exa page contents. 4. LlamaParse for
+    PDFs and as last resort. A URL that resolves to a non-public address is never fetched and never
+    handed to a fallback. Pass `public` only for a watched service's own page: its Scout screenshot is
+    kept as evidence under `<service_id>/<doc_role>/<sha>.png`; member checks keep nothing.
     """
     text, is_pdf, error = "", False, None
     try:
@@ -547,6 +579,12 @@ async def page_text(cl: Clients, url: str) -> str:
     except httpx.HTTPError as exc:
         error = exc
         log.info("direct fetch of %s failed (%s); trying fallbacks", url, type(exc).__name__)
+
+    if not is_pdf:
+        candidate = await scout_text(cl, url, public)
+        if len(candidate) >= MIN_HTML_CHARS:
+            return candidate
+        text = max(text, candidate, key=len)
 
     if not is_pdf and cl.exa:
         try:
@@ -582,7 +620,7 @@ async def check_bundle(conn: sqlite3.Connection, cl: Clients, svc: Service) -> B
         for doc in documents_for(conn, svc):
             url = svc.terms_url if doc.role == "terms" else doc.url
             try:
-                text = await page_text(cl, url)
+                text = await page_text(cl, url, public=swarm.PublicPage(service_id=svc.id, doc_role=doc.role))
             except Exception as exc:
                 if doc.role == "terms":
                     raise
@@ -778,7 +816,8 @@ async def onboard_service(conn: sqlite3.Connection, cl: Clients, svc: Service) -
         for version in versions:
             await record_version(conn, cl, svc, version.text, version.taken_at, version.origin, doc)
         try:
-            await record_version(conn, cl, svc, await page_text(cl, url), datetime.now(UTC), "live", doc)
+            text = await page_text(cl, url, public=swarm.PublicPage(service_id=svc.id, doc_role=doc.role))
+            await record_version(conn, cl, svc, text, datetime.now(UTC), "live", doc)
         except Exception as exc:  # noqa: BLE001
             log.warning("live fetch failed for %s (%s): %s", svc.name, doc.role, exc)
     if rating := await tosdr.lookup(svc.domain or svc.name):
