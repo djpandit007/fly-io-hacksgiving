@@ -6,6 +6,7 @@ locally so the delivered .docx can be opened and checked.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import io
@@ -416,6 +417,28 @@ async def test_daily_caps_per_member_and_per_target(conn, members):
         raw = secret_of(await advocate.draft_change(conn, agent.Clients(), b, change_id))
     assert await advocate.approve(conn, SimpleNamespace(swarm=sw, ai=None), tg, b, raw) == "error"
     assert "daily share" in tg.texts(22)[-1] and sw.jobs == []
+
+
+async def test_concurrent_approvals_cannot_both_pass_the_limit(conn, members):
+    a, b = members
+    for _ in range(advocate.MAX_OPT_OUTS_PER_TARGET_PER_DAY - 1):  # one send left for this address today
+        _receipt(conn, a.id, "arbitration-optout@acme.com", hours_ago=2)
+    change_id = watched_change(conn, a)
+    conn.execute("INSERT INTO subscriptions (user_id, service_id, created_at) SELECT ?, service_id, ? FROM changes WHERE id = ?",
+                 (b.id, db.now(), change_id))
+    with extraction(email_opt()):
+        raw_a = secret_of(await advocate.draft_change(conn, agent.Clients(), a, change_id))
+        raw_b = secret_of(await advocate.draft_change(conn, agent.Clients(), b, change_id))
+
+    class SlowSwarm(FakeSwarm):
+        async def run_job(self, role, payload, **kw):
+            await asyncio.sleep(0.05)  # the dispatch takes a while; the other approval runs meanwhile
+            return await super().run_job(role, payload, **kw)
+
+    sw = SlowSwarm({"email": {"ok": True, "message_id": "m-9"}})
+    cl, tg = SimpleNamespace(swarm=sw, ai=None), FakeTelegram()
+    outcomes = await asyncio.gather(advocate.approve(conn, cl, tg, a, raw_a), advocate.approve(conn, cl, tg, b, raw_b))
+    assert sorted(outcomes) == ["error", "ok"] and len(sw.jobs) == 1
 
 
 def test_sweep_drops_expired_tokens_and_cache_entries(conn, members):

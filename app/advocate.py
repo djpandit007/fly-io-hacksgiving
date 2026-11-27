@@ -30,6 +30,7 @@ Redline kits
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -700,6 +701,10 @@ FORM_BLOCKED = {
 MAX_OPT_OUTS_PER_MEMBER_PER_DAY = 5   # sent opt-outs (email or form), by one member
 MAX_OPT_OUTS_PER_TARGET_PER_DAY = 3   # to one address or form host, by all members together
 DISPATCH_KINDS = ("opt_out_email", "opt_out_form")
+# Held from the limit check until the receipt is written, so concurrent approvals can't all pass the
+# counts before any of them records a send. (One process, one event loop; the Advocate runs one job
+# at a time anyway.)
+_DISPATCH_LOCK = asyncio.Lock()
 
 
 def _target_key(d: Dispatch) -> str:
@@ -762,6 +767,12 @@ async def approve(conn: sqlite3.Connection, cl: Any, tg: Messenger, user: User, 
         retry = [[("✅ Approve & Send", taps.build("oa", raw)), ("✖ Cancel", taps.build("ox", raw))]] if live else None
         await tg.send(chat, UNAVAILABLE, buttons=retry)
         return "unavailable"
+    async with _DISPATCH_LOCK:
+        return await _dispatch(conn, cl, tg, user, raw)
+
+
+async def _dispatch(conn: sqlite3.Connection, cl: Any, tg: Messenger, user: User, raw: str) -> str:
+    chat = user.chat_id
     if limit := _over_limit(conn, raw, user):
         # Checked before the token is used: the draft is withdrawn and nothing goes out.
         if taps.SECRET.fullmatch(raw):
