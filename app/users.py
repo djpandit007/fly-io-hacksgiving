@@ -141,12 +141,9 @@ def join_member(
 
 
 def remove(conn: sqlite3.Connection, user_id: int) -> bool:
-    """Owner-only: stop serving a member. The owner cannot be removed. Their Control Room sign-ins end now."""
+    """Owner-only: stop serving a member. The owner cannot be removed."""
     cur = conn.execute("UPDATE users SET status = 'removed' WHERE id = ? AND role = 'member'", (user_id,))
-    if cur.rowcount != 1:
-        return False
-    conn.execute("DELETE FROM dashboard_sessions WHERE user_id = ?", (user_id,))
-    return True
+    return cur.rowcount == 1
 
 
 def set_name(conn: sqlite3.Connection, user: User, name: str) -> None:

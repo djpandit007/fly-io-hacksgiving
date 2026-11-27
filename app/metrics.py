@@ -137,7 +137,7 @@ def _outcome(outcome: str) -> str:
 def swarm_event(
     conn: sqlite3.Connection, role: str, event: str, detail: str = "", ms: int | None = None
 ) -> None:
-    """One sanitized swarm_events row (the Control Room's live activity strip reads these)."""
+    """One sanitized swarm_events row: role, event, a generic label and a duration only."""
     if role not in SWARM_ROLES or event not in SWARM_EVENTS:
         raise ValueError("unknown swarm role or event")
     conn.execute(

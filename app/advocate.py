@@ -664,7 +664,7 @@ async def _send_email(conn: sqlite3.Connection, cl: Any, tg: Messenger, user: Us
         f"✅ <b>Opt-out sent to {esc(d.service)}</b> at {esc(d.target)}.{copy}\n"
         f"Time: {esc(at)} UTC\nClause SHA-256: <code>{d.clause_sha}</code>\n"
         f"Message id: <code>{esc(result.message_id)}</code>\n\n"
-        f"Keep this as your proof of notice. It's in your Control Room receipts too.\n\n{DISCLAIMER}",
+        f"Keep this message as your proof of notice.\n\n{DISCLAIMER}",
     )
     return "ok"
 
@@ -708,8 +708,8 @@ async def _submit_form(conn: sqlite3.Connection, cl: Any, tg: Messenger, user: U
         f"✅ <b>Opt-out form submitted to {esc(d.service)}</b> at {esc(host)}.\n"
         f"Time: {esc(at)} UTC\nClause SHA-256: <code>{d.clause_sha}</code>\n"
         f"Screenshot SHA-256: <code>{result.screenshot_sha256}</code>\n\n"
-        "The screenshot above is your proof; I don't keep a copy. Only this receipt's details are kept, in "
-        f"your Control Room.\n\n{DISCLAIMER}",
+        "The screenshot above is your proof; I don't keep a copy, only this receipt's details.\n\n"
+        f"{DISCLAIMER}",
     )
     return "ok"
 

@@ -148,7 +148,8 @@ def test_v5_database_gains_policy_bundles_and_keeps_its_data(tmp_path):
     [user] = db.rows(db.User, conn.execute("SELECT * FROM users"))
     assert user.jurisdiction is None and user.chat_id == 7
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    assert {"document_contradictions", "approval_tokens", "action_receipts", "dashboard_sessions", "swarm_events"} <= tables
+    assert {"document_contradictions", "approval_tokens", "action_receipts", "swarm_events"} <= tables
+    assert "dashboard_sessions" not in tables
     conn.close()
 
 

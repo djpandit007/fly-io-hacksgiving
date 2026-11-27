@@ -78,7 +78,7 @@ Each member's watchlist, deadlines, calendar feed and Wrapped are private to the
 | `/deadlines` | members | your upcoming deadlines and your private calendar link |
 | `/wrapped` | members | your year in accepted terms |
 | `/jurisdiction <region>` | members | where you live (`US-CA`, `US-NY`, `US-OTHER`, `EU`, `UK`), for local consumer-law notes on checks |
-| `/dashboard` | members | a private sign-in link to your web Control Room (single use, expires in 10 minutes) |
+| `/redline` | members | then send a lease, job offer or client contract within 10 minutes for a tracked-changes redline kit |
 | `/email <address>`, `/verify <code>` | members | link your email so forwarded mail reaches you |
 | `/members` | owner | who has joined |
 | `/remove <id>` | owner | remove a member |
@@ -88,26 +88,11 @@ Each member's watchlist, deadlines, calendar feed and Wrapped are private to the
 Typing `/` shows the command menu; the owner's menu also lists the owner commands. Before someone joins,
 the bot's description (shown in an empty chat) says it is private and how to get access.
 
-**Buttons.** `/help` and the welcome have buttons for the main actions, including **Control Room**
-(same as `/dashboard`). `/watch` on its own asks which
+**Buttons.** `/help` and the welcome have buttons for the main actions. `/watch` on its own asks which
 service and takes the reply as the name. A single word such as `notion` gets "Watch Notion?" with Yes/No.
 `/list`, change alerts and `/watch` results have unwatch buttons, with Undo. Each red flag on a verdict
 card has a 💡 button that explains it. Verdict cards, change alerts, `/watch` overviews, `/wrapped` and
 `/ask` answers have 👍/👎, with an optional reason after 👎.
-
-**On the web.** The Sprite's URL (`FP_PUBLIC_URL`) serves a private, per-member **Control Room**, opened
-with the link `/dashboard` sends you in Telegram. There are no public pages: `/` goes to the Control Room,
-and every page shows only your own data.
-
-- `/room` — your Terms Radar (the services you watch, ranked by their worst material change in the past
-  90 days, with Policy Bundle coverage and ToS;DR grades), their recent material changes and
-  contradictions between their documents, upcoming deadlines and calendar feed, jurisdiction, a log of
-  actions taken for you (metadata only), and live Swarm Activity.
-- `/changes/<id>` — one change on a service you watch: side-by-side redline, Jev's scores (material,
-  severity, opt-out, who it favours), a benchmark percentile when available, and the captured screenshot
-  when there is one. Changes on services you don't watch are not found.
-
-The sign-in lasts 24 hours; `/remove` ends a member's sessions at once.
 
 **While it works**, the bot puts 👀 on your message, shows a "Thinking…" draft with the current step, and
 replies to your message with the result; 👀 becomes 👌, or 😢 if it failed.

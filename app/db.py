@@ -212,8 +212,8 @@ CREATE TABLE unwatched (
 """
 
 # Version 6: Policy Bundles (several legal documents per service), cross-document contradictions,
-# member jurisdiction, single-use approval tokens, metadata-only action receipts, Control Room
-# sessions, and sanitized swarm telemetry. Adds tables and nullable columns only, so restoring the
+# member jurisdiction, single-use approval tokens, metadata-only action receipts, and sanitized
+# swarm telemetry. Adds tables and nullable columns only, so restoring the
 # .v5.bak copy rolls back cleanly. Uploaded member contracts and notice bodies are never stored.
 V6_MIGRATION = """
 CREATE TABLE service_documents (
@@ -262,13 +262,6 @@ CREATE TABLE action_receipts (
     clause_sha   TEXT NOT NULL,
     proof_ref    TEXT NOT NULL DEFAULT '',        -- AgentMail message id or screenshot sha256
     executed_at  TEXT NOT NULL
-);
-CREATE TABLE dashboard_sessions (
-    token_hash  TEXT PRIMARY KEY,
-    user_id     INTEGER NOT NULL REFERENCES users(id),
-    kind        TEXT NOT NULL,                    -- magic | session
-    expires_at  TEXT NOT NULL,
-    consumed_at TEXT
 );
 CREATE TABLE swarm_events (
     id          INTEGER PRIMARY KEY,
@@ -488,14 +481,6 @@ class ActionReceipt(Row):
     clause_sha: str
     proof_ref: str = ""
     executed_at: datetime
-
-
-class DashboardSession(Row):
-    token_hash: str
-    user_id: int
-    kind: Literal["magic", "session"]
-    expires_at: datetime
-    consumed_at: datetime | None = None
 
 
 class SwarmEvent(Row):

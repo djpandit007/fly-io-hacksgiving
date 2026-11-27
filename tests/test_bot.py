@@ -366,7 +366,8 @@ async def test_setup_publishes_description_and_both_menus(conn, tg):
     scopes = {str(c[2]): [name for name, _ in c[1]] for c in tg.called("commands")}
     member = scopes["{'type': 'all_private_chats'}"]
     owner = scopes["{'type': 'chat', 'chat_id': 1}"]
-    assert {"watch", "jurisdiction", "dashboard"} <= set(member) and not {"members", "stats", "remove"} & set(member)
+    assert {"watch", "jurisdiction", "redline"} <= set(member) and not {"members", "stats", "remove"} & set(member)
+    assert "dashboard" not in member
     assert {"members", "stats", "remove"} <= set(owner) and "watch" in owner
 
 
@@ -374,7 +375,7 @@ async def test_menus_match_the_counted_commands():
     menu = {f"/{c}" for c, _ in bot.MEMBER_MENU + bot.EMAIL_MENU + bot.OWNER_MENU}
     assert bot.COMMANDS == menu | {"/start"}
     assert bot.COMMANDS == {"/start", "/help", "/watch", "/list", "/deadlines", "/email", "/verify", "/wrapped",
-                            "/members", "/remove", "/stats", "/ask", "/jurisdiction", "/dashboard", "/redline"}
+                            "/members", "/remove", "/stats", "/ask", "/jurisdiction", "/redline"}
 
 
 async def test_setup_failure_does_not_raise(conn):
@@ -423,40 +424,13 @@ async def test_help_buttons_do_what_the_commands_do(conn, tg):
     assert all(w in tg.to(2)[-1] for w in ("link", "PDF", "screenshot", "photo", "before you agree", "redline kit"))
 
 
-async def test_help_publishes_jurisdiction_and_dashboard_with_a_control_room_button(conn, tg):
+async def test_help_publishes_jurisdiction_and_redline(conn, tg):
     await say(conn, tg, 2, "/start join-code")
     await say(conn, tg, 2, "/help")
-    assert "/jurisdiction" in tg.to(2)[-1] and "/dashboard" in tg.to(2)[-1] and "/members" not in tg.to(2)[-1]
-    labels = {label: data for row in bot.HELP_BUTTONS for label, data in row}
-    assert labels["🛰 Control Room"] == "v1:h:room"
-
-
-async def test_control_room_button_does_what_dashboard_does(conn, tg, monkeypatch):
-    from app import sessions
-
-    monkeypatch.setattr(sessions, "settings", sessions.settings.model_copy(update={"public_url": "https://fp.test"}))
-    await say(conn, tg, 2, "/start join-code")
-    await say(conn, tg, 2, "/dashboard")
-    by_command = tg.to(2)[-1]
-    await tap(conn, tg, 2, "v1:h:room")
-    by_button = tg.to(2)[-1]
-    for text in (by_command, by_button):
-        assert "https://fp.test/auth/magic?token=" in text and "expires in 10 minutes" in text
-    assert by_command != by_button  # each is a fresh single-use link
-    # Only the latest link is live, and only its hash is stored.
-    member = users.by_chat(conn, 2)
-    stored = conn.execute("SELECT token_hash FROM dashboard_sessions WHERE user_id = ?", (member.id,)).fetchall()
-    assert len(stored) == 1 and stored[0][0] not in by_button
-
-
-async def test_dashboard_without_a_public_url_says_so(conn, tg, monkeypatch):
-    from app import sessions
-
-    monkeypatch.setattr(sessions, "settings", sessions.settings.model_copy(update={"public_url": ""}))
-    await say(conn, tg, 2, "/start join-code")
-    await say(conn, tg, 2, "/dashboard")
-    assert tg.to(2)[-1] == bot.DASHBOARD_OFF
-    assert conn.execute("SELECT COUNT(*) FROM dashboard_sessions").fetchone()[0] == 0
+    assert "/jurisdiction" in tg.to(2)[-1] and "/redline" in tg.to(2)[-1] and "/members" not in tg.to(2)[-1]
+    assert "/dashboard" not in tg.to(2)[-1]
+    labels = {label for row in bot.HELP_BUTTONS for label, _ in row}
+    assert labels == {"👀 Watch a service", "📋 My list", "⏰ Deadlines", "🔎 How checks work"}
 
 
 async def test_watch_without_a_name_asks_which_service(conn, tg):

@@ -92,8 +92,6 @@ class Settings(BaseSettings):
     scout_base_checkpoint: str = ""
     advocate_sprite: str = "fly-io-hacksgiving-advocate"
     advocate_base_checkpoint: str = ""
-    # Signs Control Room session cookies; falls back to shared_secret when unset.
-    session_secret: SecretStr = SecretStr("")
 
     @field_validator("public_url", "sprites_api_base")
     @classmethod

@@ -7,7 +7,7 @@ from app.taps import Tap
 
 
 @pytest.mark.parametrize("action,arg,extra", [
-    ("h", "list", ""), ("h", "dl", ""), ("h", "watch", ""), ("h", "how", ""), ("h", "room", ""),
+    ("h", "list", ""), ("h", "dl", ""), ("h", "watch", ""), ("h", "how", ""),
     ("w", "notion", ""), ("w", "youtube.com", ""), ("n", "", ""),
     ("k", "", ""), ("u", "42", ""), ("r", "42", ""), ("fx", "arbitration", ""),
     ("fb", "AbC_-123xyz0", "u"), ("fb", "AbC_-123xyz0", "d"),

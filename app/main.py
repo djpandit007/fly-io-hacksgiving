@@ -1,6 +1,5 @@
 """HTTP entry points. The Sprite URL is public (Telegram and the cron must reach it), so every
-route here except /health is guarded by a secret. The web pages in app/web.py are either public and
-read-only over public data, or behind a Control Room session."""
+route except /health is guarded by a secret."""
 
 from __future__ import annotations
 
@@ -38,7 +37,6 @@ from app import (
     sprite,
     taps,
     users,
-    web,
 )
 from app.agent import Clients
 from app.config import settings
@@ -75,8 +73,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Fine Print", lifespan=lifespan)
-# The public Terms Radar, change inspector and swarm stream, and the member Control Room (app/web.py).
-app.include_router(web.router)
 
 
 def _same(given: str | None, expected: str) -> bool:

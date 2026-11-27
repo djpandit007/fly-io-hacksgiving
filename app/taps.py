@@ -3,7 +3,7 @@
 Button data comes back from the client and is untrusted: `parse` accepts only the shapes below, and the
 bot still checks at tap time that whatever a tap acts on belongs to the member who tapped.
 
-    v1:h:<list|dl|watch|how|room>  help buttons            v1:u:<service id>   unwatch
+    v1:h:<list|dl|watch|how>       help buttons            v1:u:<service id>   unwatch
     v1:w:<name>                yes, watch this          v1:r:<service id>   undo an unwatch
     v1:n                       no thanks                v1:fx:<flag key>    explain a red flag
     v1:fb:<token>:<u|d>        rate an answer           v1:fr:<token>:<w|c|n>  reason for a 👎
@@ -25,7 +25,7 @@ from app.judge import FLAG_EXPLANATIONS
 from app.telegram import CALLBACK_DATA_MAX
 
 VERSION = "v1"
-HELP_TOPICS = frozenset({"list", "dl", "watch", "how", "room"})
+HELP_TOPICS = frozenset({"list", "dl", "watch", "how"})
 # One token that could be a service name or domain: dot-separated labels of letters, digits and inner
 # hyphens (no leading, trailing or doubled dots or hyphens at label edges), 2-58 characters in all.
 # 58 keeps "v1:w:<name>" within 64 bytes.

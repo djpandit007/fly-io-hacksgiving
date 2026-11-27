@@ -470,7 +470,7 @@ def save_evidence(page: PublicPage, sha: str, png_b64: str, root: Path | None = 
 # --- Reading telemetry ----------------------------------------------------------------------------
 
 def events_after(conn: sqlite3.Connection, last_id: int = 0, limit: int = 50) -> list[SwarmEvent]:
-    """Sanitized swarm events newer than `last_id`, oldest first (for the Control Room SSE stream)."""
+    """Sanitized swarm events newer than `last_id`, oldest first."""
     return rows(
         SwarmEvent,
         conn.execute(

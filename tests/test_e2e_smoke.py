@@ -7,14 +7,12 @@ and AI Terms; B watches another service -> a daily check finds the AI Terms now 
 note, ephemeral conflict check against A's watched service; B gets nothing) -> a later check finds an
 arbitration change with an email opt-out -> A drafts, fills in a missing field, approves (one receipt;
 a replayed approval sends nothing) -> A asks for a Balanced redline kit (a real tracked-changes .docx
-built by the Advocate runner's builder) -> A signs in to the Control Room with a /dashboard magic link
-(only A's data; B's session can't open A's change) while the swarm telemetry stream shows the Advocate's
-jobs, sanitized -> every SQLite row is checked for the contract's and the notice's text.
+built by the Advocate runner's builder) -> the receipt belongs to A alone and the swarm telemetry the
+owner's /stats reads holds only sanitized labels -> every SQLite row is checked for the contract's and the
+notice's text.
 
-Entry points: `bot.handle` (messages and taps, with a fake Telegram), `agent.tick` + `notify.deliver`
-(what POST /tick runs), FastAPI `TestClient` for /auth/magic, /room and /changes/{id}, and
-`web.swarm_stream` (the generator behind GET /api/swarm/stream; an endless SSE response is not
-practical to read through TestClient).
+Entry points: `bot.handle` (messages and taps, with a fake Telegram) and `agent.tick` + `notify.deliver`
+(what POST /tick runs).
 
 Faked boundaries: Jev and the OpenCode writer (respx), Pinecone (respx, recorded), LlamaParse /
 LlamaExtract (respx), the opt-out extraction model (pydantic-ai FunctionModel), page fetching and
@@ -30,26 +28,22 @@ import io
 import json
 import re
 import zipfile
-from types import SimpleNamespace
 
 import httpx
 import pytest
 import respx
-from fastapi.testclient import TestClient
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from app import advocate, agent, bot, db, metrics, notify, sessions, web
+from app import advocate, agent, bot, db, metrics, notify, swarm
 from app.advocate import OptOut, OptOutExtract
-from app.config import Provider, settings
+from app.config import Provider
 from app.gateway import Gateway
-from app.main import app
 from app.telegram import Incoming
 from tests.test_advocate import FakeSwarm, FakeTelegram
 from tests.test_bundles import AI_NEW, AI_OLD, TERMS
 from tests.test_judge import GOOD
 from tests.test_playbooks import OFFER, QUOTES
-from tests.test_web import _Disconnect
 from workers import advocate_runner as ar
 
 JEV = "https://opencode.test/inference/systemone/v1/systemone"
@@ -78,7 +72,6 @@ INSTRUCTION = "You may opt out of arbitration by emailing arbitration-optout@smo
 DISPUTES = f"## 3. Disputes\nAll disputes will be resolved by binding individual arbitration. {INSTRUCTION}"
 NOTICE_MARK = "WOMBAT-ACCT-8842"  # what A types as their account username: goes into the notice body only
 NOTICE_SENTENCE = "Please treat this message as my formal notice"
-LEAKY_URL, LEAKY_EMAIL = "https://smokeco.test/private?u=1", "ada.private@example.com"
 
 
 class Telegram(FakeTelegram):
@@ -102,11 +95,8 @@ class Advocate(FakeSwarm):
     async def run_job(self, role, payload, *, allow_hosts, detail="", args=(), timeout=None):
         metrics.swarm_event(self.conn, role, "egress_lock", "dns_locked")
         metrics.swarm_event(self.conn, role, "run", detail)
-        if payload["kind"] == "email":  # a careless label from a worker: the stream must still scrub it
-            self.conn.execute(
-                "INSERT INTO swarm_events (at, sprite_role, event, detail, duration_ms) VALUES (?, 'advocate', 'run', ?, 5)",
-                (db.now(), f"sent to {LEAKY_EMAIL} via {LEAKY_URL}"),
-            )
+        if payload["kind"] == "email":  # a careless label: metrics must reduce it to a generic one
+            metrics.swarm_event(self.conn, role, "run", f"sent to {payload['to']} via https://smokeco.test/x")
         try:
             return await super().run_job(role, payload, allow_hosts=allow_hosts, detail=detail, args=args, timeout=timeout)
         finally:
@@ -215,20 +205,10 @@ def _fresh_caches():
 
 
 @pytest.fixture
-def web_app(tmp_path, monkeypatch):
-    """The FastAPI app on a fresh database file: the server thread gets its own connection to it
-    (SQLite connections stay on their thread), the test gets another. Sign-in links point at fp.test."""
-    monkeypatch.setattr(sessions, "settings", settings.model_copy(update={"public_url": "https://fp.test"}))
-    path = tmp_path / "smoke.db"
-    conn = db.connect(path)
-    with TestClient(app, base_url="https://testserver") as client:
-        original = app.state.conn
-        app.state.conn = client.portal.call(db.connect, path)
-        try:
-            yield SimpleNamespace(client=client, conn=conn)
-        finally:
-            client.portal.call(app.state.conn.close)
-            app.state.conn = original
+def conn(tmp_path):
+    """A fresh database file, so the final table dump sees only this scenario's rows."""
+    conn = db.connect(tmp_path / "smoke.db")
+    yield conn
     conn.close()
 
 
@@ -276,15 +256,8 @@ def tapped(message: dict, prefix: str) -> str:
     return data
 
 
-def magic_token(message: dict) -> str:
-    m = re.search(r'href="https://fp\.test/auth/magic\?token=([^"]+)"', message["text"])
-    assert m, message["text"]
-    return m.group(1)
-
-
 @respx.mock
-async def test_end_to_end_smoke(web_app, pages, monkeypatch):
-    conn, client = web_app.conn, web_app.client
+async def test_end_to_end_smoke(conn, pages, monkeypatch):
     jev = Jev()
     routes = mock_providers(jev)
     monkeypatch.setattr(ar.shutil, "which", lambda name: None)  # no LibreOffice here: .docx only
@@ -349,11 +322,6 @@ async def test_end_to_end_smoke(web_app, pages, monkeypatch):
     assert CONTRACT_MARK not in dump(conn) and CONTRACT_CLAUSE not in dump(conn)
 
     # --- 3. An arbitration change with an email opt-out: draft, fill in, approve once ------------------------
-    # The SSE stream starts now: it shows only events from here on.
-    disconnect = _Disconnect(polls=3)
-    stream = web.swarm_stream(conn, disconnect, poll=0.01)
-    assert await stream.__anext__() == "retry: 5000\n\n"
-
     pages[TERMS_URL] = f"{TERMS}\n{DISPUTES}"
     jev.opt_out, jev.contradicts = 0.9, 0.1
     result = await agent.tick(conn, cl)
@@ -411,39 +379,17 @@ async def test_end_to_end_smoke(web_app, pages, monkeypatch):
     await tap(A_CHAT, tones, dict(buttons_of(tones))["Balanced"])  # again: nothing left to build from
     assert tg.texts(A_CHAT)[-1] == advocate.CONTRACT_GONE and len(sw.jobs) == 4
 
-    # --- 5. Control Room: magic link, member-scoped Terms Radar, SSE telemetry -------------------------------
-    await say(A_CHAT, "/dashboard")
-    signed_in = client.get("/auth/magic", params={"token": magic_token(tg.to(A_CHAT)[-1])}, follow_redirects=False)
-    assert signed_in.status_code == 303 and signed_in.headers["location"] == "/room"
-    a_session = {"cookie": f"{sessions.COOKIE}={signed_in.cookies[sessions.COOKIE]}"}
-    client.cookies.clear()
-    page = client.get("/room", headers=a_session)
-    assert page.status_code == 200 and page.headers["cache-control"] == "no-store"
-    room = page.text
-    assert "Smokeco" in room and "Otherco" not in room  # only A's service
-    assert "We never use your content to train our artificial intelligence models." in room  # the contradiction
-    assert "arbitration-optout@smokeco.test" in room and "opt out email" in room  # the receipt
-    assert "<strong>US-CA</strong>" in room and f"/changes/{change_id}" in room
-    for private in (CONTRACT_MARK, CONTRACT_CLAUSE, NOTICE_MARK, LEAKY_URL, LEAKY_EMAIL, "Bob"):
-        assert private not in room
-    assert client.get(f"/changes/{change_id}", headers=a_session).status_code == 200
-
-    await say(B_CHAT, "/dashboard", name="Bob")
-    b_in = client.get("/auth/magic", params={"token": magic_token(tg.to(B_CHAT)[-1])}, follow_redirects=False)
-    b_session = {"cookie": f"{sessions.COOKIE}={b_in.cookies[sessions.COOKIE]}"}
-    client.cookies.clear()
-    assert client.get(f"/changes/{change_id}", headers=b_session).status_code == 404
-    b_room = client.get("/room", headers=b_session).text
-    assert "Otherco" in b_room and "Smokeco" not in b_room and "arbitration-optout" not in b_room
-
-    frames = [frame async for frame in stream]
-    events = [json.loads(f.split("data: ", 1)[1]) for f in frames if "data: " in f]
-    runs = [e["detail"] for e in events if e["role"] == "advocate" and e["event"] == "run"]
-    assert runs[:2] == ["agentmail_send", "sent to [redacted] via [redacted]"]
+    # --- 5. What is kept: A's receipt only, and swarm telemetry with generic labels only -------------------
+    assert [r["user_id"] for r in conn.execute("SELECT user_id FROM action_receipts")] == [a["id"]]
+    assert conn.execute("SELECT COUNT(*) FROM action_receipts WHERE user_id = ?", (b["id"],)).fetchone()[0] == 0
+    assert conn.execute("SELECT service_id FROM changes WHERE id = ?", (change_id,)).fetchone()[0] == svc.id
+    events = swarm.events_after(conn)
+    runs = [e.detail for e in events if e.sprite_role == "advocate" and e.event == "run"]
+    assert runs[:2] == ["agentmail_send", "other"]  # the careless label was reduced to a generic one
     assert {"counterparty_counsel", "consumer_counsel", "redline_build"} <= set(runs)
-    assert {e["event"] for e in events} == {"egress_lock", "run", "checkpoint_restore"}
-    blob = "".join(frames)
-    assert LEAKY_URL not in blob and LEAKY_EMAIL not in blob and "@" not in blob and "https://" not in blob
+    assert {e.event for e in events} == {"egress_lock", "run", "checkpoint_restore"}
+    blob = " ".join(f"{e.sprite_role} {e.event} {e.detail}" for e in events)
+    assert "@" not in blob and "https://" not in blob and "smokeco" not in blob
 
     # --- 6. Retention: no private document text anywhere in SQLite, nor upserted to Pinecone ---------------
     stored = dump(conn)
