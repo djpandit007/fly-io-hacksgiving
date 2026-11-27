@@ -81,14 +81,19 @@ async def wayback_versions(client: httpx.AsyncClient, url: str, since: datetime,
     return versions
 
 
-async def backfill(service: str, url: str, days: int = 365) -> list[Version]:
+async def backfill(service: str, url: str, days: int = 365, document: str | None = "Terms of Service") -> list[Version]:
+    """A year of past versions: Open Terms Archive's `document` for the service, else the Wayback Machine.
+
+    `document=None` skips the archive (it tracks no such document type) and goes straight to Wayback.
+    """
     since = datetime.now(UTC) - timedelta(days=days)
     async with httpx.AsyncClient(follow_redirects=True, timeout=45, headers={"User-Agent": USER_AGENT}) as client:
-        try:
-            versions = await ota_versions(client, service, since)
-        except httpx.HTTPError as exc:
-            log.info("OTA lookup failed for %s: %s", service, exc)
-            versions = []
+        versions: list[Version] = []
+        if document is not None:
+            try:
+                versions = await ota_versions(client, service, since, document)
+            except httpx.HTTPError as exc:
+                log.info("OTA lookup failed for %s: %s", service, exc)
         if not versions:
             try:
                 versions = await wayback_versions(client, url, since)

@@ -278,6 +278,75 @@ async def red_flags(gw: Gateway, title: str, text: str) -> dict[str, float]:
     return {key: resp.noul(key) for key in RED_FLAGS}
 
 
+# --- Policy Bundles: does a changed section contradict another document of the same service -----
+
+CONTRADICTION_SECTION_CHARS = 6_000
+MAX_CONTRADICTION_CANDIDATES = 3  # sections of other documents weighed against one changed section
+
+CONTRADICTION_SEVERITY = [
+    "The two texts differ only in wording or detail; a consumer would reach the same understanding from either.",
+    "The two texts disagree on a minor detail, such as a contact address or a procedural step.",
+    "The two texts disagree on something a consumer would want to know, such as how their data or content may be used.",
+    "The two texts disagree on a significant right, cost or data use, so a consumer cannot tell what they agreed to.",
+]
+
+
+class ContradictionVerdict(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    contradicts: Probability
+    severity: float = Field(ge=0, le=len(CONTRADICTION_SEVERITY) - 1)
+
+
+async def contradictions(
+    gw: Gateway, service: str, document_a: str, section_a: str, others: list[tuple[str, str]]
+) -> list[ContradictionVerdict]:
+    """One verdict per (document, section text) in `others`, in order, on whether it contradicts
+    `section_a` from `document_a`. All are asked in one request; every text is a state field (data)."""
+    if not others:
+        return []
+    state: dict[str, Any] = {
+        "service": service,
+        "document_a": document_a,
+        "section_a": section_a[:CONTRADICTION_SECTION_CHARS],
+    }
+    questions: dict[str, dict[str, Any]] = {}
+    for n, (document_b, section_b) in enumerate(others, start=1):
+        state[f"document_b_{n}"] = document_b
+        state[f"section_b_{n}"] = section_b[:CONTRADICTION_SECTION_CHARS]
+        questions[f"contradicts_{n}"] = {
+            "type": "noul",
+            "instructions": (
+                f"`section_a` comes from the company's `document_a` and `section_b_{n}` from its "
+                f"`document_b_{n}`; both apply to the same consumer of `service`. Do the two texts make "
+                "statements about the same matter that cannot both be true, or that give the consumer "
+                "conflicting rights or obligations?"
+            ),
+            "criteria": {
+                "true": "Following one text would break or undercut what the other promises or requires.",
+                "false": "The texts agree, cover different matters, or one only adds detail the other allows.",
+            },
+        }
+        questions[f"severity_{n}"] = {
+            "type": "score",
+            "instructions": f"How much does any disagreement between `section_a` and `section_b_{n}` matter to a consumer?",
+            "criteria": CONTRADICTION_SEVERITY,
+        }
+    body = {"model": settings.judge_model, "state": state, "questions": questions}
+    data = await gw.post(SYSTEMONE_PATH, json=body)
+    _report_usage(gw, data)
+    resp = SystemOneResponse.model_validate(data)
+    verdicts = []
+    for n in range(1, len(others) + 1):
+        p = resp.answers.get(f"contradicts_{n}")
+        s = resp.answers.get(f"severity_{n}")
+        verdicts.append(ContradictionVerdict(
+            contradicts=p.noul if isinstance(p, NoulAnswer) else 0.0,
+            severity=min(s.score, len(CONTRADICTION_SEVERITY) - 1) if isinstance(s, ScoreAnswer) else 0.0,
+        ))
+    return verdicts
+
+
 # --- "Ask about terms": how relevant is each candidate clause to a member's question ------------
 
 RELEVANCE_CLAUSE_CHARS = 4_000

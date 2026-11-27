@@ -321,11 +321,11 @@ async def test_terms_update_subscribes_checks_and_fans_out(conn, tg, member, mon
         return svc, []
 
     async def fake_check(conn_, cl, s):
-        return [change]
+        return agent.BundleCheck(changes=[change])
 
     monkeypatch.setattr(intake, "find_terms_url", fake_find)
     monkeypatch.setattr(agent, "subscribe", fake_subscribe)
-    monkeypatch.setattr(agent, "check_service", fake_check)
+    monkeypatch.setattr(agent, "check_bundle", fake_check)
     await process(conn, tg)
     assert asked == ["spotify.com"]
     assert any("New arbitration clause" in t for t in tg.to(7))   # the sender
@@ -491,7 +491,7 @@ async def test_email_overview_covers_only_the_cards_shown(conn, member, monkeypa
         return svc, past
 
     async def no_fresh(conn_, cl, s):
-        return []
+        return agent.BundleCheck()
 
     async def spy_overview(cl, s, reports):
         seen.append([r.heading for r in reports])
@@ -499,7 +499,7 @@ async def test_email_overview_covers_only_the_cards_shown(conn, member, monkeypa
 
     monkeypatch.setattr(intake, "find_terms_url", fake_find)
     monkeypatch.setattr(agent, "subscribe", fake_subscribe)
-    monkeypatch.setattr(agent, "check_service", no_fresh)
+    monkeypatch.setattr(agent, "check_bundle", no_fresh)
     monkeypatch.setattr(agent, "overview", spy_overview)
     cards = await intake._terms_update(conn, agent.Clients(), None, member, "svc.test")
     assert seen == [["H3", "H4", "H5"]]

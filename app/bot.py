@@ -223,7 +223,7 @@ async def _watch(conn: sqlite3.Connection, cl: Clients, tg: Telegram, user: User
             name = _name_for(urlparse(url).hostname or arg)
             svc, reports = await agent.subscribe(conn, cl, user, name, url, on_stage=w.stage)
             buttons = [[agent.unwatch_button(svc)]]
-            watching = f"Watching <b>{esc(svc.name)}</b> — {esc(url)}"
+            watching = f"Watching <b>{esc(svc.name)}</b> — {esc(url)}\n{agent.documents_line(conn, svc)}"
             messages: list[str | Outgoing]
             if not reports:
                 messages = [f"{watching}\nNo material changes to {esc(svc.name)}'s terms in the past year. I'll check daily."]
