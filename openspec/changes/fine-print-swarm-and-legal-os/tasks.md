@@ -25,9 +25,9 @@
 
 ## 4. Closed-Loop Legal Counter-Measures & Advocate Redline Kits
 
-- [ ] 4.1 Implement opt-out and statutory-rights extraction (`extract_opt_out` with verbatim quote verification) and single-use, member-bound, expiring `approval_tokens` management in `app/advocate.py`, adding `[Review & Draft Opt-Out]` and `[Approve & Send]` callback handlers in `app/bot.py` and `app/taps.py`; verify unit tests confirm replay/cross-member token rejection and postal-only fallback messaging.
-- [ ] 4.2 Create `workers/advocate_runner.py` supporting (a) AgentMail send-scoped opt-out dispatch (CC'ing member's verified email) and (b) domain-locked Playwright web-form opt-out execution returning a confirmation screenshot PNG, followed by base-checkpoint restore and metadata-only `action_receipts` logging; verify unit tests cover both dispatch paths and confirm notice bodies are never stored in SQLite.
-- [ ] 4.3 Implement the Adversarial Dual-Sprite redline pipeline in `app/advocate.py` and `workers/advocate_runner.py` (Counterparty Counsel exploit pass, Consumer Counsel counter-clause pass, Jev risk-delta scoring, OOXML tracked-changes `.docx` via `python-docx`, LibreOffice headless `.pdf` export, and `Polite`/`Balanced`/`Firm` negotiation email) backed by a 10-minute RAM-only ephemeral cache and Telegram `sendDocument` delivery in `app/telegram.py` and `app/bot.py`; verify unit tests validate generated `.docx` tracked-change XML (`w:ins`/`w:del`), cache eviction, and immediate cleanup.
+- [x] 4.1 Implement opt-out and statutory-rights extraction (`extract_opt_out` with verbatim quote verification) and single-use, member-bound, expiring `approval_tokens` management in `app/advocate.py`, adding `[Review & Draft Opt-Out]` and `[Approve & Send]` callback handlers in `app/bot.py` and `app/taps.py`; verify unit tests confirm replay/cross-member token rejection and postal-only fallback messaging.
+- [x] 4.2 Create `workers/advocate_runner.py` supporting (a) AgentMail send-scoped opt-out dispatch (CC'ing member's verified email) and (b) domain-locked Playwright web-form opt-out execution returning a confirmation screenshot PNG, followed by base-checkpoint restore and metadata-only `action_receipts` logging; verify unit tests cover both dispatch paths and confirm notice bodies are never stored in SQLite.
+- [x] 4.3 Implement the Adversarial Dual-Sprite redline pipeline in `app/advocate.py` and `workers/advocate_runner.py` (Counterparty Counsel exploit pass, Consumer Counsel counter-clause pass, Jev risk-delta scoring, OOXML tracked-changes `.docx` via `python-docx`, LibreOffice headless `.pdf` export, and `Polite`/`Balanced`/`Firm` negotiation email) backed by a 10-minute RAM-only ephemeral cache and Telegram `sendDocument` delivery in `app/telegram.py` and `app/bot.py`; verify unit tests validate generated `.docx` tracked-change XML (`w:ins`/`w:del`), cache eviction, and immediate cleanup.
 
 ## 5. Live Control Room Web App, Member Terms Radar & Bot Guidance
 
@@ -38,7 +38,7 @@
 
 ## 6. Cross-Cutting Integration Verification
 
-- [ ] 6.1 Run the full test suite (`uv run pytest`) and linter (`uv run ruff check .`) and verify every existing and new spec scenario passes with zero warnings or regressions.
+- [x] 6.1 Run the full test suite (`uv run pytest`) and linter (`uv run ruff check .`) and verify every existing and new spec scenario passes with zero warnings or regressions.
 - [ ] 6.2 Run an end-to-end local smoke test covering Policy Bundle watch + contradiction alert -> domain playbook verdict + statutory note + ephemeral conflict check -> signed opt-out approval + receipt -> redline kit `.docx` generation -> magic-link Control Room with member Terms Radar + SSE telemetry, verifying zero private document retention in SQLite after completion.
 
 ## Workflow follow-up
