@@ -98,7 +98,7 @@ print(sorted(mine, key=lambda c: c["create_time"])[-1]["id"])
 setup_scout() {
   echo "== Scout: $SCOUT (no connectors)"
   ensure_sprite "$SCOUT" fineprint-scout
-  set_policy "$SCOUT" '[{"include": "defaults"}, {"action": "allow", "domain": "*.playwright.dev"}, {"action": "allow", "domain": "playwright.azureedge.net"}, {"action": "allow", "domain": "*.ubuntu.com"}, {"action": "allow", "domain": "astral.sh"}, {"action": "deny", "domain": "*"}]'
+  set_policy "$SCOUT" '[{"include": "defaults"}, {"action": "allow", "domain": "*.playwright.dev"}, {"action": "allow", "domain": "playwright.azureedge.net"}, {"action": "allow", "domain": "playwright.download.prss.microsoft.com"}, {"action": "allow", "domain": "*.ubuntu.com"}, {"action": "allow", "domain": "astral.sh"}, {"action": "allow", "domain": "github.com"}, {"action": "allow", "domain": "*.githubusercontent.com"}, {"action": "allow", "domain": "pypi.org"}, {"action": "allow", "domain": "files.pythonhosted.org"}, {"action": "deny", "domain": "*"}]'
   push_runners "$SCOUT" "playwright"
   smoke_test "$SCOUT" scout_runner.py
   # Idle with no egress at all; each job opens only its target's site.
@@ -113,7 +113,7 @@ setup_scout() {
 setup_advocate() {
   echo "== Advocate: $ADVOCATE (send-scoped AgentMail + OpenCode connectors)"
   ensure_sprite "$ADVOCATE" fineprint-advocate
-  set_policy "$ADVOCATE" '[{"include": "defaults"}, {"action": "allow", "domain": "*.playwright.dev"}, {"action": "allow", "domain": "playwright.azureedge.net"}, {"action": "allow", "domain": "*.ubuntu.com"}, {"action": "allow", "domain": "*.debian.org"}, {"action": "allow", "domain": "astral.sh"}, {"action": "deny", "domain": "*"}]'
+  set_policy "$ADVOCATE" '[{"include": "defaults"}, {"action": "allow", "domain": "*.playwright.dev"}, {"action": "allow", "domain": "playwright.azureedge.net"}, {"action": "allow", "domain": "playwright.download.prss.microsoft.com"}, {"action": "allow", "domain": "*.ubuntu.com"}, {"action": "allow", "domain": "*.debian.org"}, {"action": "allow", "domain": "astral.sh"}, {"action": "allow", "domain": "github.com"}, {"action": "allow", "domain": "*.githubusercontent.com"}, {"action": "allow", "domain": "pypi.org"}, {"action": "allow", "domain": "files.pythonhosted.org"}, {"action": "deny", "domain": "*"}]'
   sprite exec -s "$ADVOCATE" --no-stdin -- bash -lc "
     set -euo pipefail
     command -v soffice >/dev/null || {
@@ -164,7 +164,10 @@ print(json.dumps({
     "access_token": os.environ["SPRITES_API_TOKEN"],
     "access_policy": {"name_prefix": p, "sprite_labels": ["fineprint"], "allowed_endpoints": endpoints},
 }))' > "$body"
-  sprite api /v1/oauth/connections/custom_api -- -sS -X POST -H 'Content-Type: application/json' -d "@$body" >/dev/null
+  # Outside any directory with a .sprite file: with a sprite selected, `sprite api` would prefix the
+  # path with /v1/sprites/<that sprite>/. Without one, paths are relative to /v1/.
+  (cd "$(mktemp -d)" && sprite api /oauth/connections/custom_api -- -sS --fail-with-body -X POST \
+    -H 'Content-Type: application/json' -d "@$body" >/dev/null)
   rm -f "$body"
   echo "Created the sprites-swarm connector. Run ./scripts/connectors.sh and set FP_SPRITES_API_BASE."
 }
