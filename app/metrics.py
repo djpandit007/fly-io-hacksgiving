@@ -16,6 +16,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import re
 import sqlite3
 import time
 from collections.abc import Callable
@@ -106,6 +107,62 @@ def prune(conn: sqlite3.Connection, days: int = RETENTION_DAYS) -> None:
     conn.execute("DELETE FROM metric_usage WHERE day < ?", (day,))
     conn.execute("DELETE FROM metric_runs WHERE ran_at < ?", (stamp,))
     conn.execute("DELETE FROM metric_failures WHERE at < ?", (stamp,))
+    conn.execute("DELETE FROM swarm_events WHERE at < ?", (stamp,))
+
+
+# --- Swarm and counter-measure telemetry ---------------------------------------------------------
+# Everything written here comes from closed vocabularies: a role, an event, a lowercase label and a
+# duration. Anything else is replaced, so a URL, file name or member id can never be stored.
+
+SWARM_ROLES = ("gateway", "scout", "advocate")
+SWARM_EVENTS = ("wake", "egress_lock", "run", "checkpoint_restore", "sleep", "error")
+# What a swarm counter measures: `<role>_<step>` in metric_counts under kind "swarm".
+SWARM_STEPS = ("job", "egress_lock", "restore")
+COUNTERMEASURES = ("redline_kit", "opt_out")
+OUTCOMES = ("ok", "error", "timeout", "unavailable", "cancelled")
+_LABEL = re.compile(r"[a-z][a-z0-9_]{0,39}")
+
+
+def label(text: str) -> str:
+    """A generic lowercase label (`playwright_crawl`, `http_status_error`), or `other`."""
+    text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", text or "").lower()
+    return text if _LABEL.fullmatch(text) else "other"
+
+
+def _outcome(outcome: str) -> str:
+    return outcome if outcome in OUTCOMES else "error"
+
+
+@_safe
+def swarm_event(
+    conn: sqlite3.Connection, role: str, event: str, detail: str = "", ms: int | None = None
+) -> None:
+    """One sanitized swarm_events row (the Control Room's live activity strip reads these)."""
+    if role not in SWARM_ROLES or event not in SWARM_EVENTS:
+        raise ValueError("unknown swarm role or event")
+    conn.execute(
+        "INSERT INTO swarm_events (at, sprite_role, event, detail, duration_ms) VALUES (?, ?, ?, ?, ?)",
+        (db.now(), role, event, label(detail) if detail else "", None if ms is None else max(0, int(ms))),
+    )
+
+
+def swarm_count(conn: sqlite3.Connection, role: str, step: str, outcome: str = "ok", ms: int = 0) -> None:
+    """Daily count of a Scout/Advocate job, DNS egress lock, or base-checkpoint restore."""
+    if role not in SWARM_ROLES or step not in SWARM_STEPS:
+        log.warning("metric swarm_count not recorded: unknown role or step")
+        return
+    count(conn, "swarm", f"{role}_{step}", _outcome(outcome), max(0, int(ms)))
+
+
+def countermeasure(conn: sqlite3.Connection, kind: str, outcome: str = "ok", ms: int = 0) -> None:
+    """Daily count of an Advocate redline kit (`redline_kit`) or approved opt-out dispatch (`opt_out`).
+
+    Never pass a target address, notice text or member: only the kind and how it ended.
+    """
+    if kind not in COUNTERMEASURES:
+        log.warning("metric countermeasure not recorded: unknown kind")
+        return
+    count(conn, "countermeasure", kind, _outcome(outcome), max(0, int(ms)))
 
 
 class Recorder:
@@ -244,6 +301,8 @@ def report(conn: sqlite3.Connection, days: int = REPORT_DAYS) -> str:
         f"Buttons: {tap_text or 'none'}"
     )
 
+    out.append("\n<b>Swarm</b>\n" + "\n".join(_swarm_lines(conn, day)))
+
     from app import (
         feedback,  # here, not at the top: feedback -> taps -> judge -> metrics would be a cycle
     )
@@ -251,3 +310,40 @@ def report(conn: sqlite3.Connection, days: int = REPORT_DAYS) -> str:
     rated = feedback.summary(conn, days)
     out.append("\n<b>Answer feedback</b>\n" + ("\n".join(rated) if rated else "No feedback yet."))
     return "\n".join(out)
+
+
+def _swarm_lines(conn: sqlite3.Connection, day: str) -> list[str]:
+    """Scout/Advocate runs, DNS egress locks, checkpoint restore timings, and counter-measures."""
+    rows_ = conn.execute(
+        "SELECT kind, name, SUM(n) AS n, SUM(total_ms) AS total, MAX(max_ms) AS slowest, "
+        "SUM(CASE WHEN outcome = 'ok' THEN 0 ELSE n END) AS failed FROM metric_counts "
+        "WHERE kind IN ('swarm', 'countermeasure') AND day >= ? GROUP BY kind, name", (day,),
+    ).fetchall()
+    got = {(r["kind"], r["name"]): r for r in rows_}
+
+    def runs(kind: str, names: tuple[str, ...]) -> tuple[int, int, int, int]:
+        picked = [got[(kind, n)] for n in names if (kind, n) in got]
+        return (
+            sum(r["n"] for r in picked), sum(r["failed"] for r in picked),
+            sum(r["total"] for r in picked), max((r["slowest"] for r in picked), default=0),
+        )
+
+    def failed(n: int) -> str:
+        return f" ({n} failed)" if n else ""
+
+    if not got:
+        return ["No Scout or Advocate activity."]
+    lines = []
+    for role in ("scout", "advocate"):
+        n, bad, _, _ = runs("swarm", (f"{role}_job",))
+        locks_n, locks_bad, _, _ = runs("swarm", (f"{role}_egress_lock",))
+        restores, restore_bad, total, slowest = runs("swarm", (f"{role}_restore",))
+        restore = f", avg {_ms(total / restores)}, max {_ms(slowest)}" if restores else ""
+        lines.append(
+            f"• {role.title()}: {n} runs{failed(bad)}, {locks_n} DNS egress locks{failed(locks_bad)}, "
+            f"{restores} checkpoint restores{failed(restore_bad)}{restore}"
+        )
+    kits, kits_bad, _, _ = runs("countermeasure", ("redline_kit",))
+    opt, opt_bad, _, _ = runs("countermeasure", ("opt_out",))
+    lines.append(f"Counter-measures: {kits} redline kits{failed(kits_bad)}, {opt} opt-out dispatches{failed(opt_bad)}")
+    return lines
