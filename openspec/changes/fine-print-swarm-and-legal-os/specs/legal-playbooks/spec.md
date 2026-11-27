@@ -29,7 +29,7 @@ The system SHALL evaluate each classified document against the red-flag question
 - **THEN** the verdict checks flags including uncapped indemnification, asymmetric liability limits, extended payment windows, pre-payment work-for-hire transfer, and unilateral termination without kill fee
 
 ### Requirement: Per-member legal jurisdiction setting
-The system SHALL allow each member to set or clear their legal jurisdiction via `/jurisdiction` (supporting at minimum `US-CA`, `US-NY`, `US-OTHER`, `EU`, and `UK`) and SHALL store only the selected jurisdiction code on the member's profile.
+The system SHALL allow each member to set or clear their legal jurisdiction via `/jurisdiction` (supporting at minimum `US-CA`, `US-NY`, `US-OTHER`, `EU`, `UK`, `IN`, and each Indian state and union territory by its ISO 3166-2:IN code, which uses the India-wide rules) and SHALL store only the selected jurisdiction code on the member's profile.
 
 #### Scenario: Member sets jurisdiction to California
 - **WHEN** a member sends `/jurisdiction US-CA`

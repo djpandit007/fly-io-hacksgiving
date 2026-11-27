@@ -90,7 +90,7 @@ HELP = """<b>Fine Print</b> watches the fine print you've agreed to.
 /ask <i>question</i> — ask about the terms you watch, answered with quotes from them
 /deadlines — your opt-out windows, renewals and notice periods, plus your calendar link
 /wrapped — your year in accepted terms
-/jurisdiction <i>region</i> — where you live (US-CA, US-NY, US-OTHER, EU, UK), for local consumer-law notes
+/jurisdiction <i>region</i> — where you live (US-CA, US-NY, US-OTHER, EU, UK, IN or an Indian state such as IN-MH), for local consumer-law notes
 /redline — then send a lease, job offer or client contract for a tracked-changes redline kit
 {email}
 Send a link or a file (PDF, screenshot, photo) to check it <b>before you agree</b>.
@@ -362,7 +362,12 @@ async def _verify(conn: sqlite3.Connection, tg: Telegram, user: User, arg: str) 
 
 
 def _jurisdiction_codes() -> str:
-    return "\n".join(f"<code>{code}</code> — {esc(where)}" for code, where in playbooks.JURISDICTIONS.items())
+    main = "\n".join(
+        f"<code>{code}</code> — {esc(where)}"
+        for code, where in playbooks.JURISDICTIONS.items() if code not in playbooks.INDIA_STATES
+    )
+    states = ", ".join(f"<code>{code}</code> {esc(name)}" for code, name in playbooks.INDIA_STATES.items())
+    return f"{main}\n\nIndian states and union territories (India-wide rules apply): {states}"
 
 
 async def _jurisdiction(conn: sqlite3.Connection, tg: Telegram, user: User, arg: str) -> None:

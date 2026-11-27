@@ -1193,14 +1193,26 @@ async def verdict_card(
     parts.append(DISCLAIMER)
     asked = bool(found)
     rate = rated("verdict", quotes_ok=(bool(offered) and len(passed) == len(offered)) if asked else None) if card else None
-    check = playbooks.ContractCheck(domain=legal_domain, found=found)
+    unclear = [k for k, p in flags.items() if UNCLEAR <= p < FOUND]
+    check = playbooks.ContractCheck(domain=legal_domain, found=found, unclear=unclear)
+    if check.personal and not found and user is not None and user.chat_id:
+        # Say why a kit is (or isn't) offered, rather than leaving the button silently missing.
+        parts.insert(len(parts) - 1, (
+            "No clear red flags, but some clauses are unclear. You can still ask for a redline kit with suggested edits."
+            if unclear else "No red flags found in this contract, so there's no redline kit to suggest."
+        ))
     # Counter-measures (Telegram members only): a redline kit for a personal contract with found flags
     # (the text waits in RAM only), or an opt-out for a policy with a verified opt-out path.
     actions = advocate.offer_redline(user, title, text, check, passed)
-    if user is not None and user.chat_id and legal_domain == "privacy_and_ai" and _offers_opt_out(found):
+    if user is not None and legal_domain == "privacy_and_ai" and _offers_opt_out(found):
+        # Always say how to opt out (the verified quote and where to act); offer to send only an email or
+        # form on the service's own verified domain, and only to a Telegram member.
         on_stage("Looking for an opt-out…")
-        if opt := await advocate.extract_opt_out(cl, title, text):
-            actions += advocate.offer_opt_out(user, title, discover.registrable_domain(domain) if domain else None, opt)
+        site = discover.registrable_domain(domain) if domain else None
+        opt = await advocate.extract_opt_out(cl, title, text)
+        parts.insert(len(parts) - 1, advocate.how_to_opt_out(opt, site) if opt else advocate.NO_OPT_OUT_PATH)
+        if opt and advocate.dispatchable(opt, site):
+            actions += advocate.offer_opt_out(user, title, site, opt)
     return Outgoing(text="\n\n".join(parts), buttons=_explain_buttons(flags) + actions, rate=rate, check=check)
 
 

@@ -157,6 +157,7 @@ def set_jurisdiction(conn: sqlite3.Connection, user: User, code: str) -> str | N
     Only the code is stored. Raises ValueError for anything not in playbooks.JURISDICTIONS.
     """
     wanted = code.strip().upper().replace("_", "-")
+    wanted = playbooks.JURISDICTION_ALIASES.get(wanted, wanted)
     if wanted.lower() in playbooks.CLEAR_WORDS:
         stored = None
     elif wanted in playbooks.JURISDICTIONS:

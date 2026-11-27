@@ -224,6 +224,40 @@ async def test_member_without_jurisdiction_gets_a_pointer_and_no_notes(conn, mem
     assert not any("jurisdiction" in b["state"] for b in jev.bodies)
 
 
+@respx.mock
+async def test_indian_state_member_gets_india_wide_notes(conn, members):
+    a = _set(conn, members[0], "IN-KA")
+    found = ("non_compete_clause",)
+    jev = Jev("employment_or_nda", found)
+    mock(jev, found)
+    card = await card_for("Offer", OFFER, conn=conn, user=a)
+    assert "<b>Where you live (Karnataka, India)</b>" in card.text
+    assert "Indian Contract Act, 1872, s. 27" in card.text and "may be void under Indian law" in card.text
+    assert "Information, not legal advice." in card.text
+
+
+def test_india_rules_apply_to_every_state_and_union_territory():
+    assert len(playbooks.INDIA_STATES) == 36 and all(c.startswith("IN-") for c in playbooks.INDIA_STATES)
+    for code in ("IN", *playbooks.INDIA_STATES):
+        assert code in playbooks.JURISDICTIONS
+        rules = playbooks.statutes_for(code, "privacy_and_ai", ["ai_model_training", "no_deletion_right"])
+        assert {r.law for r in rules.values()} == {
+            "Digital Personal Data Protection Act, 2023, s. 6", "Digital Personal Data Protection Act, 2023, s. 12"}
+    assert playbooks.statutes_for("US-CA", "privacy_and_ai", ["ai_model_training"]) == {}  # no fallback elsewhere
+    for flag in ("non_compete_clause",):
+        assert playbooks.statutes_for("IN-MH", "employment_or_nda", [flag])[flag].law == "Indian Contract Act, 1872, s. 27"
+
+
+def test_set_jurisdiction_accepts_indian_codes_and_old_aliases(conn, members):
+    a = members[0]
+    assert users.set_jurisdiction(conn, a, "in") == "IN"
+    assert users.set_jurisdiction(conn, a, "in-mh") == "IN-MH"
+    assert users.set_jurisdiction(conn, a, "IN-TG") == "IN-TS"  # Telangana's pre-2023 ISO code
+    assert users.set_jurisdiction(conn, a, "IN-UT") == "IN-UK"  # Uttarakhand's
+    with pytest.raises(ValueError):
+        users.set_jurisdiction(conn, a, "IN-XX")
+
+
 def test_set_jurisdiction_validates_and_clears(conn, members):
     a = members[0]
     assert users.set_jurisdiction(conn, a, "us-ca") == "US-CA"

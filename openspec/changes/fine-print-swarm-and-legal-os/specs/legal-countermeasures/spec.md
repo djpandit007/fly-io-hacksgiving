@@ -17,6 +17,14 @@ The system SHALL, when a material terms change or checked document includes an a
 - **WHEN** a clause permits opting out only by physical mail
 - **THEN** the system drafts the printable notice text and clearly states that electronic dispatch is not available
 
+#### Scenario: Opt-out is an account setting
+- **WHEN** a checked privacy or AI policy says the person opts out by changing a setting in their account
+- **THEN** the card shows a "How to opt out" section with the verified instruction and where the setting is, says there is nothing to send, and offers no dispatch
+
+#### Scenario: Policy gives no way to opt out
+- **WHEN** a checked privacy or AI policy has an AI-training or deletion red flag but states no way to opt out
+- **THEN** the card says the policy doesn't say how to opt out
+
 ### Requirement: Cryptographically signed single-use human approval before dispatch
 The system SHALL NOT send any outbound opt-out email or submit any external web form without an explicit confirmation tap from the owning member carrying a short-lived, single-use, member-bound signed approval token.
 
@@ -46,6 +54,10 @@ The system SHALL allow a member checking a personal contract (`residential_lease
 - **WHEN** a member uploads a lease PDF with found red flags and taps `[Generate Redline Kit]` then `Balanced`
 - **THEN** the Advocate Sprite produces a tracked-changes `.docx` and annotated `.pdf` addressing the found flags plus a balanced email to the landlord, delivers them in Telegram, and deletes the temporary contract files
 
+#### Scenario: Only unclear red flags found
+- **WHEN** a checked personal contract has no red flag above the "found" threshold but some flags are unclear
+- **THEN** the card says no clear red flags were found but some clauses are unclear, and still offers `[Generate Redline Kit]` for those clauses
+
 #### Scenario: No actionable red flags found
-- **WHEN** a checked contract has zero found red flags
-- **THEN** the `[Generate Redline Kit]` button is not offered
+- **WHEN** a checked contract has no found or unclear red flags
+- **THEN** the `[Generate Redline Kit]` button is not offered and the card says why

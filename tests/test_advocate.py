@@ -310,6 +310,18 @@ async def test_postal_only_gives_a_printable_notice_and_no_dispatch(conn, member
     assert reply.buttons is None and conn.execute("SELECT COUNT(*) FROM approval_tokens").fetchone()[0] == 0
 
 
+async def test_settings_only_opt_out_on_an_alert_gives_instructions_not_a_notice(conn, members):
+    a, _ = members
+    text = "To opt out of AI training, turn off AI Improvement in Settings > Privacy."
+    change_id = watched_change(conn, a, text=f"AI. {text}")
+    opt = OptOut(channel="account_setting", target="Settings > Privacy", verbatim_instruction=text)
+    with extraction(opt):
+        reply = await advocate.draft_change(conn, agent.Clients(), a, change_id)
+    assert "<b>How to opt out</b>" in reply.text and "Settings &gt; Privacy" in reply.text
+    assert "Print this notice" not in reply.text and reply.buttons is None
+    assert conn.execute("SELECT COUNT(*) FROM approval_tokens").fetchone()[0] == 0
+
+
 async def test_email_from_an_unverified_document_is_never_offered_for_dispatch(conn, members):
     """An uploaded file has no verified service domain, so an address in it is untrusted text: the
     member gets a printable notice to check themselves, no Approve button and no approval token."""
@@ -558,10 +570,18 @@ async def test_verdict_card_offers_the_kit_only_with_found_flags(members):
     cl = agent.Clients()
     card = await agent.verdict_card(cl, "Lease", LEASE, conn=None, user=a)
     assert card.buttons[-1][0][0] == "📝 Generate Redline Kit" and len(advocate.CONTRACTS) == 1
+    assert "no redline kit" not in card.text
+    # Unclear (borderline) flags still get a kit, and the card says why.
+    state["found"] = 0.5
+    card = await agent.verdict_card(cl, "Lease", LEASE, conn=None, user=a)
+    assert card.buttons[-1][0][0] == "📝 Generate Redline Kit" and card.check.kit_flags == ["repair_cost_shifting"]
+    assert "some clauses are unclear" in card.text and len(advocate.CONTRACTS) == 2
+    # Nothing found or unclear: no kit, and the card says so instead of leaving it out silently.
     state["found"] = 0.1
     card = await agent.verdict_card(cl, "Lease", LEASE, conn=None, user=a)
     await cl.aclose()
-    assert not any("Redline" in b[0] for row in card.buttons for b in row) and len(advocate.CONTRACTS) == 1
+    assert not any("Redline" in b[0] for row in card.buttons for b in row) and len(advocate.CONTRACTS) == 2
+    assert "No red flags found in this contract, so there's no redline kit to suggest." in card.text
 
 
 @respx.mock
@@ -691,6 +711,57 @@ async def test_checked_ai_policy_with_an_opt_out_path_offers_a_draft(conn, membe
     await cl.aclose()
     label, data = card.buttons[-1][0]
     assert label == "✉️ Review & Draft Opt-Out" and data.startswith("v1:od:")
+    assert "<b>How to opt out</b>" in card.text and "Nothing is sent until you approve it" in card.text
     reply = advocate.draft_offer(conn, a, data.split(":")[2])
     assert "privacy.acme.com" in reply.text and reply.buttons[0][0][0] == "✅ Approve & Send"
     assert advocate.draft_offer(conn, users.by_id(conn, members[1].id), data.split(":")[2]).buttons is None  # not B's
+
+
+def _ai_policy_mocks():
+    def jev(request):
+        questions = json.loads(request.content)["questions"]
+        if "domain" in questions:
+            answer = {"type": "choice", "choice": "privacy_and_ai", "confidence": 0.9, "probabilities": {}}
+            return httpx.Response(200, json={"model": "jev", "answers": {"domain": answer}})
+        return httpx.Response(200, json={"model": "jev", "answers": {
+            k: {"type": "noul", "noul": 0.9 if k == "ai_model_training" else 0.05} for k in questions}})
+
+    respx.post(JEV).mock(side_effect=jev)
+    respx.post(CHAT).mock(return_value=httpx.Response(200, json={"choices": [{"message": {"content": "PUSH BACK"}}]}))
+    respx.get(url__startswith="https://api.tosdr.org/").mock(return_value=httpx.Response(404))
+
+
+SETTING_TEXT = "To stop us using your data for AI training, turn off Data for AI Improvement in Settings > Data privacy."
+
+
+@respx.mock
+async def test_settings_only_opt_out_is_explained_with_no_send_button(conn, members):
+    a, _ = members
+    _ai_policy_mocks()
+    cl = agent.Clients()
+    opt = OptOut(channel="account_setting", target="Settings > Data privacy", verbatim_instruction=SETTING_TEXT)
+    with extraction(opt):
+        card = await agent.verdict_card(cl, "Privacy at linkedin.com", SETTING_TEXT, "linkedin.com", conn=conn, user=a)
+    await cl.aclose()
+    assert "<b>How to opt out</b>" in card.text and "Settings &gt; Data privacy" in card.text
+    assert "a setting you change yourself" in card.text
+    assert not any(d.startswith("v1:od:") for row in card.buttons for _, d in row)
+    assert conn.execute("SELECT COUNT(*) FROM approval_tokens").fetchone()[0] == 0
+
+
+@respx.mock
+async def test_ai_policy_without_an_opt_out_path_says_so(conn, members):
+    a, _ = members
+    _ai_policy_mocks()
+    cl = agent.Clients()
+    with extraction(None):
+        card = await agent.verdict_card(cl, "Privacy at acme.com", "We train AI on your data.", "acme.com", conn=conn, user=a)
+    await cl.aclose()
+    assert advocate.NO_OPT_OUT_PATH in card.text
+
+
+def test_settings_path_not_in_the_text_is_not_shown():
+    opt = OptOut(channel="account_setting", target="Settings > Secret menu", verbatim_instruction=SETTING_TEXT)
+    verified = advocate.verify_opt_out(opt, SETTING_TEXT)
+    assert verified is not None and verified.target == advocate.SETTINGS_FALLBACK
+    assert advocate.verify_opt_out(opt.model_copy(update={"verbatim_instruction": "Invented instruction text."}), SETTING_TEXT) is None

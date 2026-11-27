@@ -206,17 +206,40 @@ class ContractCheck(BaseModel):
 
     domain: Domain = DEFAULT_DOMAIN
     found: list[str] = Field(default_factory=list)
+    unclear: list[str] = Field(default_factory=list)  # flags the judge was unsure about (borderline clauses)
 
     @property
     def personal(self) -> bool:
         return self.domain in PERSONAL_DOMAINS
 
     @property
+    def kit_flags(self) -> list[str]:
+        """The flags a redline kit works on: found ones first, then unclear ones."""
+        return [*self.found, *(f for f in self.unclear if f not in self.found)]
+
+    @property
     def offers_redline(self) -> bool:
-        return self.personal and bool(self.found)
+        return self.personal and bool(self.kit_flags)
 
 
 # --- Jurisdictions and the statutory ruleset -------------------------------------------------------
+
+# Indian states and union territories by ISO 3166-2:IN code (as revised in 2023). Each falls back to the
+# India-wide ("IN") rules; there are no state-specific rules yet (state tenancy laws vary).
+INDIA_STATES: dict[str, str] = {
+    "IN-AP": "Andhra Pradesh", "IN-AR": "Arunachal Pradesh", "IN-AS": "Assam", "IN-BR": "Bihar",
+    "IN-CG": "Chhattisgarh", "IN-GA": "Goa", "IN-GJ": "Gujarat", "IN-HR": "Haryana",
+    "IN-HP": "Himachal Pradesh", "IN-JH": "Jharkhand", "IN-KA": "Karnataka", "IN-KL": "Kerala",
+    "IN-MP": "Madhya Pradesh", "IN-MH": "Maharashtra", "IN-MN": "Manipur", "IN-ML": "Meghalaya",
+    "IN-MZ": "Mizoram", "IN-NL": "Nagaland", "IN-OD": "Odisha", "IN-PB": "Punjab",
+    "IN-RJ": "Rajasthan", "IN-SK": "Sikkim", "IN-TN": "Tamil Nadu", "IN-TS": "Telangana",
+    "IN-TR": "Tripura", "IN-UP": "Uttar Pradesh", "IN-UK": "Uttarakhand", "IN-WB": "West Bengal",
+    "IN-AN": "Andaman and Nicobar Islands", "IN-CH": "Chandigarh",
+    "IN-DH": "Dadra and Nagar Haveli and Daman and Diu", "IN-DL": "Delhi", "IN-JK": "Jammu and Kashmir",
+    "IN-LA": "Ladakh", "IN-LD": "Lakshadweep", "IN-PY": "Puducherry",
+}
+# Codes ISO replaced in 2023, still accepted when a member types them.
+JURISDICTION_ALIASES: dict[str, str] = {"IN-CT": "IN-CG", "IN-OR": "IN-OD", "IN-TG": "IN-TS", "IN-UT": "IN-UK"}
 
 JURISDICTIONS: dict[str, str] = {
     "US-CA": "California, USA",
@@ -224,8 +247,15 @@ JURISDICTIONS: dict[str, str] = {
     "US-OTHER": "elsewhere in the USA",
     "EU": "the European Union",
     "UK": "the United Kingdom",
+    "IN": "India",
+    **{code: f"{name}, India" for code, name in INDIA_STATES.items()},
 }
 CLEAR_WORDS = frozenset({"clear", "none", "off", "unset", "remove"})
+
+
+def parent_jurisdiction(code: str) -> str | None:
+    """The jurisdiction whose rules also apply: India for an Indian state or union territory."""
+    return "IN" if code in INDIA_STATES else None
 
 
 class StatutoryRule(NamedTuple):
@@ -326,14 +356,53 @@ STATUTES: dict[tuple[str, str, str], StatutoryRule] = {
         "may be restricted under UK data protection law: AI training needs a lawful basis, and you can object to processing based on legitimate interests",
         "Does `clause` use personal data to train or improve AI models?",
     ),
+    # India-wide rules; every Indian state and union territory falls back to these.
+    ("IN", "employment_or_nda", "non_compete_clause"): StatutoryRule(
+        "Indian Contract Act, 1872, s. 27",
+        "may be void under Indian law, which treats agreements in restraint of trade as void; courts generally do not enforce non-competes after the job ends",
+        "Does `clause` restrain the person from working in a lawful profession, trade or business after the job ends?",
+    ),
+    ("IN", "consumer_tos", "arbitration"): StatutoryRule(
+        "Consumer Protection Act, 2019",
+        "may be no bar under Indian law to filing a complaint before a Consumer Commission, despite the arbitration clause",
+        "Does `clause` require a consumer to take disputes to arbitration?",
+    ),
+    ("IN", "consumer_tos", "auto_renews"): StatutoryRule(
+        "RBI e-mandate framework for recurring payments",
+        "may be restricted by Reserve Bank of India rules, which require your e-mandate with extra authentication and a pre-debit notice before recurring card or UPI charges",
+        "Does `clause` describe a subscription or trial that renews or converts to paid automatically and charges the user's card or account?",
+    ),
+    ("IN", "privacy_and_ai", "ai_model_training"): StatutoryRule(
+        "Digital Personal Data Protection Act, 2023, s. 6",
+        "may be allowed only with your consent under Indian data protection law as its provisions come into force, and you can withdraw consent at any time",
+        "Does `clause` use personal data to train or improve AI models?",
+    ),
+    ("IN", "privacy_and_ai", "no_deletion_right"): StatutoryRule(
+        "Digital Personal Data Protection Act, 2023, s. 12",
+        "may be restricted under Indian data protection law as its provisions come into force, which gives you a right to have personal data corrected and erased",
+        "Does `clause` deny or restrict the user's ability to have their personal data deleted?",
+    ),
+    ("IN", "privacy_and_ai", "indefinite_retention"): StatutoryRule(
+        "Digital Personal Data Protection Act, 2023, s. 8(7)",
+        "may be restricted under Indian data protection law as its provisions come into force, which requires erasure once the purpose is served or consent is withdrawn",
+        "Does `clause` let the company keep personal data with no time limit or longer than needed for its purpose?",
+    ),
 }
 
 
 def statutes_for(jurisdiction: str | None, domain: str, found: list[str]) -> dict[str, StatutoryRule]:
-    """The rules (by flag) that a member's jurisdiction maps to the flags found on this document."""
+    """The rules (by flag) that a member's jurisdiction maps to the flags found on this document: its
+    own rules first, then its parent's (India's for an Indian state)."""
     if not jurisdiction:
         return {}
-    return {f: rule for f in found if (rule := STATUTES.get((jurisdiction, domain, f)))}
+    codes = [jurisdiction] + ([parent] if (parent := parent_jurisdiction(jurisdiction)) else [])
+    out: dict[str, StatutoryRule] = {}
+    for f in found:
+        for code in codes:
+            if rule := STATUTES.get((code, domain, f)):
+                out[f] = rule
+                break
+    return out
 
 
 # --- Cross-contract conflicts: picking candidate clauses by keyword -------------------------------

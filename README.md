@@ -77,7 +77,7 @@ Each member's watchlist, deadlines, calendar feed and Wrapped are private to the
 | `/ask <question>` | members | ask about the terms you watch; answered with quotes from them. A plain question typed without `/ask` works too. Answers come from each watched service's terms page only (not its privacy policy), and asking about a service you don't watch offers to watch it |
 | `/deadlines` | members | your upcoming deadlines and your private calendar link |
 | `/wrapped` | members | your year in accepted terms |
-| `/jurisdiction <region>` | members | where you live (`US-CA`, `US-NY`, `US-OTHER`, `EU`, `UK`), for local consumer-law notes on checks |
+| `/jurisdiction <region>` | members | where you live (`US-CA`, `US-NY`, `US-OTHER`, `EU`, `UK`, `IN`, or an Indian state or union territory such as `IN-MH`, `IN-KA`, `IN-DL`; states use the India-wide rules), for local consumer-law notes on checks |
 | `/redline` | members | then send a lease, job offer or client contract within 10 minutes for a tracked-changes redline kit |
 | `/email <address>`, `/verify <code>` | members | link your email so forwarded mail reaches you |
 | `/members` | owner | who has joined |
