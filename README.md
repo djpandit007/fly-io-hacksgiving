@@ -77,6 +77,8 @@ Each member's watchlist, deadlines, calendar feed and Wrapped are private to the
 | `/ask <question>` | members | ask about the terms you watch; answered with quotes from them. A plain question typed without `/ask` works too. Answers come from each watched service's terms page only (not its privacy policy), and asking about a service you don't watch offers to watch it |
 | `/deadlines` | members | your upcoming deadlines and your private calendar link |
 | `/wrapped` | members | your year in accepted terms |
+| `/jurisdiction <region>` | members | where you live (`US-CA`, `US-NY`, `US-OTHER`, `EU`, `UK`, `IN`, or an Indian state or union territory such as `IN-MH`, `IN-KA`, `IN-DL`; states use the India-wide rules), for local consumer-law notes on checks |
+| `/redline` | members | then send a lease, job offer or client contract within 10 minutes for a tracked-changes redline kit |
 | `/email <address>`, `/verify <code>` | members | link your email so forwarded mail reaches you |
 | `/members` | owner | who has joined |
 | `/remove <id>` | owner | remove a member |
@@ -123,6 +125,47 @@ uv run uvicorn app.main:app --reload --port 8080
    The job page shows each run's summary, and the job fails (so GitHub emails you) when a service
    could not be checked or the Sprite could not be reached.
 
+### Worker Sprites (optional)
+
+Without them Fine Print runs on one Sprite: pages a direct fetch cannot read go to Exa and LlamaParse.
+With them, the Gateway hands untrusted work to two private workers through the Sprites API:
+
+| Sprite | Connectors | Does |
+|---|---|---|
+| `fly-io-hacksgiving-scout` | none | Renders bot-walled or JavaScript-only legal pages in headless Chromium, expands accordions, finds companion policy links, returns normalised text, a SHA-256 digest and (for public service pages only) a PNG evidentiary screenshot |
+| `fly-io-hacksgiving-advocate` | AgentMail (send only), OpenCode | Member-approved counter-measures: opt-out notices and redline kits |
+
+Every job locks the worker's DNS to the exact hosts of the page (where its URL lands after HTTP redirects)
+and sends Chromium through a local egress proxy that only tunnels to those hosts at checked public addresses;
+it runs the runner
+script, then closes egress and restores the worker's clean base checkpoint, even when the job fails.
+
+1. Label the Gateway (`sprite config update -s fly-io-hacksgiving --label fineprint`) and make every
+   existing connector require the sprite label `fineprint`, not only the name prefix, since
+   `fly-io-hacksgiving-scout` matches the prefix too. Check the label is on the Gateway *before*
+   requiring it, or the bot loses its connectors.
+2. Give the Advocate its own AgentMail and OpenCode connectors, both with name prefix
+   `fly-io-hacksgiving-advocate` and required label `fineprint-advocate`. The dashboard has no field for
+   allowed endpoints; set them through the API (`PATCH /v1/oauth/connections/<id>` with the full
+   `access_policy`): AgentMail to `/v0/inboxes/<inbox>/messages/send` only, OpenCode to
+   `/openai/v1/chat/completions` only.
+3. `ADVOCATE_AGENTMAIL_BASE=… ADVOCATE_AGENTMAIL_INBOX_ID=… ADVOCATE_OPENCODE_BASE=…
+   ./scripts/setup_swarm.sh` creates both workers (Python 3.12, Playwright + Chromium; the Advocate also
+   gets `python-docx` and LibreOffice), writes the Advocate's connector URLs, takes each one's base
+   checkpoint and saves `FP_SCOUT_BASE_CHECKPOINT` / `FP_ADVOCATE_BASE_CHECKPOINT` into `.env.sprite`.
+4. Add `FP_SPRITES_API_BASE=https://api.sprites.dev` and `FP_SPRITES_TOKEN=<Sprites API token>` to
+   `.env.sprite` and redeploy the Gateway (`./scripts/setup_sprite.sh`). A connector can't do this: the
+   connector gateway refuses Custom API connectors whose base is the Sprites API itself. The token
+   appears to be org-wide, so keep Fine Print's Sprites in an org of their own.
+
+Workers sleep when idle. The first job after a quiet spell waits for the worker to wake (a restore took
+~48 s cold, ~15 s warm), so a Scout crawl can add a minute to a check before it falls back.
+
+Re-run `./scripts/setup_swarm.sh scout` (or `advocate`) after changing `workers/`: it takes a new base
+checkpoint. Evidentiary screenshots are kept under `$FP_DATA_DIR/evidence/<service>/<document>/<sha>.png`;
+nothing is kept from members' own links or files. `/stats` shows worker runs, DNS locks, checkpoint
+restore times and counter-measures, as counts only.
+
 The database upgrades itself on start-up (`PRAGMA user_version`); a `fineprint.db.v1.bak` copy is kept
 when a single-owner database is migrated.
 
@@ -156,6 +199,8 @@ How members use it:
 - Documents and links members send are read by the operator's AI providers; Fine Print keeps only
   extracted deadlines, watchlists and verified email addresses — not message bodies or attachments.
 - Questions you ask are read by the operator's AI providers and are not stored.
+- Worker Sprite activity (`swarm_events`) and counters store only roles, generic labels and durations:
+  never URLs, file names or who asked. Kept 90 days.
 - Answer feedback (👍/👎) keeps only the kind of answer, the writer model and prompt version, and for
   public terms changes the change id: never the answer text, a URL, or who rated it. Kept 90 days.
 - Button data is never trusted: every tap is checked against the tapping member's own data.

@@ -16,11 +16,10 @@ and `/list` SHALL show only the sender's services with their community grade whe
 - **THEN** YouTube is on that member's watchlist and on no other member's
 
 ### Requirement: Shared judging
-The system SHALL fetch, compare and judge each service's terms once per check, regardless of how many
-members watch it.
+The system SHALL fetch, compare and judge each document in a service's policy bundle once per check, regardless of how many members watch that service.
 
 #### Scenario: Three members watch one service
-- **WHEN** three members watch the same service and its terms change
+- **WHEN** three members watch the same service and any document in its policy bundle changes
 - **THEN** each changed section is judged once, not three times
 
 ### Requirement: Fan-out of material changes
@@ -108,3 +107,50 @@ member unwatched.
 #### Scenario: Forged undo for another member's service
 - **WHEN** member A sends an Undo tap for a service only member B watches or unwatched
 - **THEN** A's watchlist is unchanged and A is told it can't be restored
+
+### Requirement: Multi-document Policy Bundle per service
+The system SHALL track a Policy Bundle per watched service supporting distinct document roles (`terms`, `privacy`, `ai_terms`, `billing`, `dpa`), backfilling and diffing each discovered document independently while keeping backward compatibility with services that currently have only a primary terms document.
+
+#### Scenario: Watching a service with multiple legal pages
+- **WHEN** a member watches a service whose Policy Bundle includes both Terms of Service and a Privacy Policy
+- **THEN** both documents are stored, diffed on daily checks, and labelled with their document role in change alerts
+
+#### Scenario: Service with only a single terms URL
+- **WHEN** discovery finds only a primary terms page for a service
+- **THEN** the service is watched with its `terms` document and operates without error
+
+### Requirement: Version history kept per document
+The system SHALL keep each document's version history separately, treating a stored version as a duplicate only when the same document had the same text at the same time, so that a document returning to earlier wording and two documents with identical text are both recorded.
+
+#### Scenario: A service walks back a change
+- **WHEN** a watched document changes a clause and a later check finds the earlier wording restored
+- **THEN** the restored wording is stored as a new version, judged against the changed wording, and alerted like any other material change
+
+#### Scenario: Two documents with identical text
+- **WHEN** two documents in a service's bundle serve the same text
+- **THEN** each document keeps its own baseline and history
+
+### Requirement: Companion documents looked for again periodically
+The system SHALL look for companion documents again for every watched service at most every 30 days, including services watched before Policy Bundles existed, and SHALL record a document found this way with a live baseline only: no history backfill and no alert about anything before it was found.
+
+#### Scenario: Service watched before Policy Bundles gains its AI Terms
+- **WHEN** the daily run checks a service that has only its terms document and has never had a companion check
+- **THEN** discovered companion documents are attached with a live baseline, no watcher is alerted about them, and later changes to them are alerted as usual
+
+#### Scenario: Companion check not yet due
+- **WHEN** a service's companions were looked for less than 30 days ago
+- **THEN** the daily run checks only the documents already in its bundle
+
+### Requirement: Cross-document contradiction detection
+The system SHALL compare newly updated sections in a service's Policy Bundle against the other active documents in that same service's bundle and alert watchers when Jev detects a material contradiction between them.
+
+#### Scenario: AI addendum contradicts Terms of Service
+- **WHEN** a service's Terms of Service state that user content is never used for training, while a new AI Terms document claims a broad model-training licence
+- **THEN** the system records a shared contradiction finding and delivers a contradiction alert citing both documents and their verbatim clauses to every watcher
+
+### Requirement: Questions answered across the full Policy Bundle
+The system SHALL allow `/ask` and free-text questions to search and cite verified clauses across every active document in each watched service's Policy Bundle (`terms`, `privacy`, `ai_terms`, `billing`, `dpa`), attributing each quote to its service, document role, section heading, and date.
+
+#### Scenario: Member asks a privacy or AI question about a watched service
+- **WHEN** a member asks whether a watched service uses their data to train AI models and the answer sits in that service's Privacy Policy or AI Terms
+- **THEN** the system answers from the verified clauses in that document and labels the quote with the document role

@@ -154,16 +154,20 @@ async def _terms_update(
     if not url:
         return [f"I couldn't find the terms page for {esc(domain)}. Send me the link and I'll watch it."]
     svc, past = await agent.subscribe(conn, cl, user, domain.split(".")[0].capitalize(), url)
-    cards: list[str | Outgoing] = [f"Now watching <b>{esc(svc.name)}</b> — {esc(svc.terms_url)}"]
+    cards: list[str | Outgoing] = [
+        f"Now watching <b>{esc(svc.name)}</b> — {esc(svc.terms_url)}\n{agent.documents_line(conn, svc)}"
+    ]
     # Check right away; anything new goes to *every* watcher, not just the sender.
-    fresh = await agent.check_service(conn, cl, svc)
-    if fresh:
+    checked = await agent.check_bundle(conn, cl, svc)
+    fresh = checked.changes
+    if fresh or checked.contradictions:
         fan_out: dict[int, list[str | Outgoing]] = {}
         vectors: dict[int, list[float]] = {}
-        for change in fresh:
-            for watcher in agent.subscribers(conn, svc.id):
-                report = await agent.report_for(conn, cl, change, svc, watcher, vectors)
-                (cards if watcher.id == user.id else fan_out.setdefault(watcher.id, [])).append(agent.alert(report, svc))
+        for watcher in agent.subscribers(conn, svc.id):
+            out = cards if watcher.id == user.id else fan_out.setdefault(watcher.id, [])
+            for change in fresh:
+                out.append(agent.alert(await agent.report_for(conn, cl, change, svc, watcher, vectors), svc))
+            out += [agent.contradiction_alert(conn, c, svc) for c in checked.contradictions]
         await deliver(conn, tg, cl, fan_out, f"Fine Print: {svc.name} changed its terms")
     else:
         shown = past[-3:]
@@ -195,9 +199,10 @@ async def process(
         elif UPDATE_SUBJECT.search(subject) and (domain := original_sender_domain(msg, text)):
             cards = await _terms_update(conn, cl, tg, user, domain)
         elif (link := next((u for u in URL.findall(text) if TERMS_LINK.search(urlparse(u).path)), None)):
-            cards = [await agent.check_url(cl, link)]
+            cards = [await agent.check_url(cl, link, conn=conn, user=user)]
         elif len(text) >= MIN_BODY_CHARS:
-            cards = [await agent.verdict_card(cl, subject.removeprefix("Fwd: ").removeprefix("Fw: ") or "Forwarded email", text)]
+            title = subject.removeprefix("Fwd: ").removeprefix("Fw: ") or "Forwarded email"
+            cards = [await agent.verdict_card(cl, title, text, conn=conn, user=user)]
         else:
             cards = []
     except Exception as exc:  # noqa: BLE001

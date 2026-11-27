@@ -170,3 +170,27 @@ def test_split_packs_paragraphs_and_cuts_only_oversized_ones():
     assert split("aaaa\n\nbbbb\n\ncccc", limit=10) == ["aaaa\n\nbbbb", "cccc"]
     assert split("x" * 25, limit=10) == ["x" * 10, "x" * 10, "x" * 5]
     assert split("") == []
+
+
+@respx.mock
+async def test_send_document_uploads_multipart_from_memory():
+    route = _route("sendDocument", {"message_id": 77})
+    tg = Telegram(token="T")
+    sent = await tg.send_document(42, "redline.docx", b"PK\x03\x04docx-bytes", caption="Your <b>kit</b>", mime="application/x-test")
+    await tg.aclose()
+    assert sent == 77
+    request = route.calls[0].request
+    assert request.headers["content-type"].startswith("multipart/form-data")
+    body = request.content
+    assert b'name="chat_id"' in body and b"42" in body and b'filename="redline.docx"' in body
+    assert b"PK\x03\x04docx-bytes" in body and b"application/x-test" in body and b'name="parse_mode"' in body
+
+
+@respx.mock
+async def test_send_document_failure_raises_without_the_token():
+    respx.post(f"{API}/botT/sendDocument").mock(return_value=httpx.Response(200, json={"ok": False, "description": "too big"}))
+    tg = Telegram(token="T")
+    with pytest.raises(Exception, match="sendDocument failed: too big") as info:
+        await tg.send_document(42, "x.pdf", b"%PDF")
+    await tg.aclose()
+    assert "botT" not in str(info.value)

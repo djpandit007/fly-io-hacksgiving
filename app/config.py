@@ -83,7 +83,17 @@ class Settings(BaseSettings):
     exa_base: str = ""
     exa_key: SecretStr = SecretStr("")
 
-    @field_validator("public_url")
+    # Multi-Sprite swarm (Scout + Advocate workers). All optional: when unset, Fine Print runs as a
+    # single Sprite and Scout/Advocate actions degrade gracefully. The Gateway calls the Sprites API
+    # directly with a token: the connector gateway refuses connectors that target the Sprites API.
+    sprites_api_base: str = ""
+    sprites_token: SecretStr = SecretStr("")
+    scout_sprite: str = "fly-io-hacksgiving-scout"
+    scout_base_checkpoint: str = ""
+    advocate_sprite: str = "fly-io-hacksgiving-advocate"
+    advocate_base_checkpoint: str = ""
+
+    @field_validator("public_url", "sprites_api_base")
     @classmethod
     def _strip_slash(cls, v: str) -> str:
         return v.strip().rstrip("/")
@@ -118,6 +128,14 @@ class Settings(BaseSettings):
     @property
     def llama(self) -> Provider:
         return Provider(name="llama", base_url=self.llama_base, key=self.llama_key)
+
+    @property
+    def sprites(self) -> Provider:
+        return Provider(name="sprites", base_url=self.sprites_api_base, key=self.sprites_token)
+
+    @property
+    def evidence_dir(self) -> Path:
+        return self.data_dir / "evidence"
 
 
 settings = Settings()

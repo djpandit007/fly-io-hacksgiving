@@ -31,7 +31,7 @@ from app import ask_tools, judge, taps, writer
 from app.agent import Clients
 from app.ask_tools import AskDeps, ChangeHit, Clause, Evidence, Hit
 from app.config import settings
-from app.db import User
+from app.db import DOC_ROLE_LABELS, User
 from app.llm import model_for
 
 log = logging.getLogger(__name__)
@@ -54,8 +54,8 @@ ASK_TIMEOUT_S = 150           # for all the model work in one answer
 
 NO_SERVICES = "You're not watching any services yet. Send /watch &lt;name&gt; first, then ask me about its terms."
 NOT_FOUND = (
-    "I couldn't find that in the terms you watch. "
-    "I read each service's terms page only, not its privacy policy or other policies."
+    "I couldn't find that in the policies you watch. I read each service's terms and the companion "
+    "policies I found for it (privacy, AI terms, billing terms, DPA); /watch shows which ones."
 )
 NO_CLEAR_ANSWER = (
     "I couldn't find a clear answer in the terms you watch. Try asking about one service and one topic at a time."
@@ -107,18 +107,24 @@ class AskResult(BaseModel):
 # --- Agents (built without a model; `answer` supplies one per run) ----------------------------------
 
 # Version of the researcher, writer and verifier instructions below, recorded with answer feedback.
-PROMPT_VERSION = "v2"
+PROMPT_VERSION = "v3"
 
 RESEARCHER_INSTRUCTIONS = (
-    "You find the clauses in a person's watched terms of service that answer their question.\n"
+    "You find the clauses in a person's watched terms of service and related policies that answer "
+    "their question.\n"
     "- Call list_services first: only those services exist for this person.\n"
     "- If the question is about a service that is not in that list, set unwatched_service to that "
     "service's name, return no clauses and stop: do not search the other services' terms for it.\n"
-    "- Use search_terms, list_sections, read_section and recent_changes to find the relevant text.\n"
+    "- Each service has one or more documents: terms, and possibly privacy, ai_terms, billing and dpa. "
+    "list_documents shows which; list_sections and read_section take a `document` (default terms). "
+    "Questions about personal data or AI training are often answered in privacy or ai_terms.\n"
+    "- Use search_terms (it covers every document), list_sections, read_section and recent_changes to "
+    "find the relevant text.\n"
     "- A long section comes back in parts, starting with a line like `[part 1 of 3]`: call "
     "read_section again with part=2, part=3 and so on to read the rest. That line is not terms text.\n"
-    "- Quote each clause word for word, copied exactly from read_section (source 'current') or from "
-    "a recent change's text (source 'change' with its change_id). Never paraphrase or join quotes.\n"
+    "- Quote each clause word for word, copied exactly from read_section (source 'current', with the "
+    "`document` you read it from) or from a recent change's text (source 'change' with its change_id). "
+    "Never paraphrase or join quotes.\n"
     "- similar_clauses results are leads from other documents, not quotable evidence.\n"
     "- Search at most three times for a topic. If the sections you have read do not answer the "
     "question, stop, set answerable to false and say in `missing` what the terms do not cover. Do "
@@ -161,29 +167,37 @@ async def list_services(ctx: RunContext[AskDeps]) -> list[str]:
 
 
 @researcher.tool
-async def list_sections(ctx: RunContext[AskDeps], service: str) -> list[str]:
-    """Section headings of a watched service's current terms."""
-    return ask_tools.list_sections(ctx.deps, service)
+async def list_documents(ctx: RunContext[AskDeps], service: str) -> list[str]:
+    """The documents of a watched service that can be read: terms, privacy, ai_terms, billing, dpa."""
+    return ask_tools.list_documents(ctx.deps, service)
 
 
 @researcher.tool
-async def read_section(ctx: RunContext[AskDeps], service: str, heading: str, part: int = 1) -> str:
-    """The text of one section of a watched service's current terms.
+async def list_sections(ctx: RunContext[AskDeps], service: str, document: str = "terms") -> list[str]:
+    """Section headings of one current document (default: terms) of a watched service."""
+    return ask_tools.list_sections(ctx.deps, service, document)
+
+
+@researcher.tool
+async def read_section(
+    ctx: RunContext[AskDeps], service: str, heading: str, part: int = 1, document: str = "terms"
+) -> str:
+    """The text of one section of one current document (default: terms) of a watched service.
 
     A long section comes in parts and starts with `[part N of M]`; pass `part` to read the others.
     """
-    return ask_tools.read_section(ctx.deps, service, heading, part)
+    return ask_tools.read_section(ctx.deps, service, heading, part, document)
 
 
 @researcher.tool
 async def search_terms(ctx: RunContext[AskDeps], query: str) -> list[Hit]:
-    """Sections across all watched services that share words with `query`, best first."""
+    """Sections across every document of all watched services that share words with `query`, best first."""
     return ask_tools.search_terms(ctx.deps, query)
 
 
 @researcher.tool
 async def recent_changes(ctx: RunContext[AskDeps], service: str) -> list[ChangeHit]:
-    """Material changes to a watched service's terms, with the new text and a change_id."""
+    """Material changes to a watched service's documents, with the new text, document and a change_id."""
     return ask_tools.recent_changes(ctx.deps, service)
 
 
@@ -212,6 +226,11 @@ def is_question(text: str) -> bool:
 
 # --- Prompts ----------------------------------------------------------------------------------------
 
+def _source(clause: Clause) -> str:
+    """The service and the document a clause is from: "Notion (AI Terms)"."""
+    return f"{clause.service} ({DOC_ROLE_LABELS.get(clause.document, clause.document)})"
+
+
 def _label(clause: Clause, on: date | None, heading_chars: int | None = None) -> str:
     """`heading_chars` cuts the heading for display; the prompts get it whole."""
     heading = clause.heading if heading_chars is None else _cut(clause.heading, heading_chars)
@@ -220,7 +239,7 @@ def _label(clause: Clause, on: date | None, heading_chars: int | None = None) ->
         # A current clause's date is when its whole document was last stored, not when the clause began.
         verb = "changed on" if clause.source == "change" else "as of"
         when = f" · {verb} {on.day} {on:%b %Y}"
-    return f"{clause.service} · {heading}{when}"
+    return f"{_source(clause)} · {heading}{when}"
 
 
 def _tag_text(text: str) -> str:
@@ -360,7 +379,7 @@ def _not_found(deps: AskDeps, evidence: Evidence) -> AskResult:
 async def _relevant(cl: Clients, question: str, clauses: list[Clause]) -> list[Clause]:
     assert cl.ai is not None
     try:
-        scores = await judge.relevance(cl.ai, question, [f"{c.service} · {c.heading}: {c.quote}" for c in clauses])
+        scores = await judge.relevance(cl.ai, question, [f"{_source(c)} · {c.heading}: {c.quote}" for c in clauses])
     except Exception as exc:  # noqa: BLE001 — relevance only ranks; without it keep what was verified
         log.warning("ask relevance failed: %s", type(exc).__name__)
         return clauses[:MAX_CLAUSES]

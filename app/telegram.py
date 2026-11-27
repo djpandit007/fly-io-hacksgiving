@@ -19,6 +19,7 @@ MAX_LEN = 4000
 # Inline keyboard: rows of (label, callback data). Callback data is at most 64 bytes (Telegram's limit).
 Buttons = list[list[tuple[str, str]]]
 CALLBACK_DATA_MAX = 64
+CAPTION_MAX = 1024  # sendDocument captions
 
 
 def keyboard(buttons: Buttons | None) -> dict:
@@ -147,6 +148,31 @@ class Telegram:
             if isinstance(result, dict) and isinstance(result.get("message_id"), int):
                 ids.append(result["message_id"])
         return ids
+
+    async def send_document(
+        self, chat_id: int | str, filename: str, content: bytes, *, caption: str = "", mime: str = "application/octet-stream",
+    ) -> int | None:
+        """Upload a file to the chat (`sendDocument`, multipart) and return the sent message id.
+
+        The bytes go straight from memory to Telegram; nothing is written to disk."""
+        started = time.monotonic()
+        data: dict[str, str] = {"chat_id": str(chat_id)}
+        if caption:
+            data |= {"caption": caption[:CAPTION_MAX], "parse_mode": "HTML"}
+        try:
+            resp = await self.client.post(
+                f"{API}/bot{self.token}/sendDocument", data=data, files={"document": (filename, content, mime)}, timeout=60
+            )
+            result = _Result.model_validate(resp.json())
+        except (httpx.HTTPError, ValueError) as exc:
+            self._count("error", started)
+            raise TelegramError(f"Telegram sendDocument failed: {type(exc).__name__}") from None
+        if not result.ok:
+            self._count("error", started)
+            raise TelegramError(f"Telegram sendDocument failed: {result.description}")
+        self._count("ok", started)
+        sent = result.result
+        return sent.get("message_id") if isinstance(sent, dict) and isinstance(sent.get("message_id"), int) else None
 
     async def answer_callback(self, callback_id: str, text: str = "", alert: bool = False) -> None:
         """Stop a tapped button's spinner, optionally with a toast (or a pop-up when `alert`)."""

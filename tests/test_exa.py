@@ -44,6 +44,13 @@ def test_user_content_rules():
     assert not discover.is_user_content("https://www.linkedin.com/legal/user-agreement")
     assert not discover.is_user_content("https://x.com/en/tos")      # X's own terms
     assert discover.is_user_content("https://gitlab.com/terms123/project")  # no prefix trick
+    # The server and registrable_domain normalise what a plain comparison wouldn't: fail closed.
+    assert discover.is_user_content("https://github.com./attacker/terms")
+    assert discover.is_user_content("https://github.com/site-policy/../attacker/terms")
+    assert discover.is_user_content("https://github.com/site-policy/%2e%2e/attacker/terms")
+    assert discover.is_user_content("https://github.com/site-policy/..%2Fattacker")
+    assert discover.is_user_content("https://medium.com./@x/terms")
+    assert not discover.is_user_content("https://github.com/site-policy/github-terms")  # still official
     assert not discover.is_user_content("https://gitlab.com/terms")
     assert discover.is_user_content("https://x.com/someone/status/1")  # a post
 

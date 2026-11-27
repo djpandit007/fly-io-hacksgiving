@@ -1,6 +1,7 @@
 """Find the terms-of-service page for a service, from a name ("notion") or a domain ("notion.so").
 
-Web search (Exa) first; the service's own home page links and common paths as fallback.
+Web search (Exa) first; the service's own home page links and common paths as fallback. Then the
+service's Policy Bundle: companion legal documents linked from that terms page or its legal hub.
 """
 
 from __future__ import annotations
@@ -15,7 +16,8 @@ import tldextract
 from bs4 import BeautifulSoup
 
 from app import exa
-from app.netguard import safe_client
+from app.db import DOC_ROLES
+from app.netguard import BlockedURL, resolve_public, safe_client
 
 if TYPE_CHECKING:
     from app.agent import Clients
@@ -85,10 +87,19 @@ def _path_under(path: str, prefix: str) -> bool:
     return not prefix or path == prefix or path.startswith(prefix + "/")
 
 
+_SUSPECT_PATH = re.compile(r"(^|/)\.{1,2}(/|$)|\\|%2f|%5c|%2e", re.IGNORECASE)
+
+
 def is_user_content(url: str) -> bool:
+    """True for pages users write on a shared host. Fails closed: the host is compared without trailing
+    dots (as `registrable_domain` sees it), and a path the server might resolve differently from how it
+    reads here (dot segments, backslashes, encoded separators or dots) counts as user content."""
     u = urlparse(url)
-    host = (u.hostname or "").lower().removeprefix("www.")
+    host = (u.hostname or "").lower().rstrip(".").removeprefix("www.")
     path = u.path or "/"
+    shared = any(_host_is(host, h) for h, _ in USER_CONTENT) or host in USER_PATH_HOSTS
+    if shared and _SUSPECT_PATH.search(path):
+        return True
     if any(_host_is(host, h) and _path_under(path, prefix) for h, prefix in USER_CONTENT):
         return True
     for h, official in USER_PATH_HOSTS.items():
@@ -187,3 +198,193 @@ async def _scrape_terms_url(domain: str, client: httpx.AsyncClient | None = None
     finally:
         if own:
             await client.aclose()
+
+
+# --- Policy Bundles: the companion documents linked from a service's terms page ---------------------
+
+COMPANION_ROLES = ("dpa", "ai_terms", "billing", "privacy")  # most specific first: one role per link
+# Link text is stronger evidence than the URL path; a path match alone ranks below any text match.
+COMPANION_TEXT: dict[str, re.Pattern[str]] = {
+    "dpa": re.compile(r"\bdata\s+processing\s+(addendum|agreement|terms)\b|\bDPA\b", re.IGNORECASE),
+    "ai_terms": re.compile(
+        r"\b(ai|artificial\s+intelligence|generative\s+ai|machine\s+learning)\b.{0,30}?"
+        r"\b(terms|policy|addendum|supplement|agreement|principles)\b",
+        re.IGNORECASE,
+    ),
+    "billing": re.compile(r"\b(billing|payments?|subscriptions?|refunds?)\s+(terms|policy|agreement)\b", re.IGNORECASE),
+    "privacy": re.compile(r"\bprivacy\s+(policy|notice|statement)\b|^privacy$", re.IGNORECASE),
+}
+COMPANION_PATH: dict[str, re.Pattern[str]] = {
+    "dpa": re.compile(r"(^|[/_-])dpa([/_.-]|$)|data[-_]processing", re.IGNORECASE),
+    "ai_terms": re.compile(r"(^|[/_-])(ai|genai|generative-ai)[-_]?(terms|policy|addendum|supplement)", re.IGNORECASE),
+    "billing": re.compile(r"(billing|payments?|subscriptions?|refunds?)[-_]?(terms|policy)", re.IGNORECASE),
+    "privacy": re.compile(r"privacy([-_](policy|notice|statement))?([/_.-]|$)", re.IGNORECASE),
+}
+NOT_COMPANION = re.compile(r"cookie|/blog|/news|/help/article|/community|/forum|\.(png|jpe?g|svg|zip)$", re.IGNORECASE)
+LEGAL_HUB_TEXT = re.compile(r"^(legal|legal\s+(center|centre|hub|information|policies)|policies)$", re.IGNORECASE)
+LEGAL_HUB_PATH = re.compile(r"/(legal|policies)/?$", re.IGNORECASE)
+
+# Bound the work one discovery does: the terms page plus at most one linked legal hub.
+MAX_DISCOVERY_PAGES = 2
+
+
+def _plain_url(url: str) -> str:
+    """https, host and path only: no credentials, query or fragment (the shape services are stored in)."""
+    u = urlparse(url.strip())
+    host = (u.hostname or "").lower()
+    port = f":{u.port}" if u.port and u.port not in (80, 443) else ""
+    return f"https://{host}{port}{u.path.rstrip('/') or '/'}"
+
+
+def _same_page(a: str, b: str) -> bool:
+    def key(url: str) -> str:
+        u = urlparse(url)
+        return f"{(u.hostname or '').lower().removeprefix('www.')}{u.path.rstrip('/')}"
+
+    return key(a) == key(b)
+
+
+def _on_domain(url: str, domain: str) -> bool:
+    u = urlparse(url)
+    return u.scheme in ("http", "https") and bool(u.hostname) and registrable_domain(u.hostname or "") == domain
+
+
+def companion_links(html: str, base_url: str, domain: str) -> dict[str, tuple[int, str]]:
+    """Candidate companion documents linked from one page: role -> (rank, url), rank 0 best.
+
+    Only http(s) links on `domain` (the service's registrable domain) that are not user content are
+    considered. Their addresses are checked later, before any is kept.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    found: dict[str, tuple[int, str]] = {}
+    for a in soup.find_all("a", href=True):
+        _keep_best(found, _classify(urljoin(base_url, a["href"]), a.get_text(" ", strip=True), domain))
+    return found
+
+
+def _classify(href: str, text: str, domain: str) -> tuple[str, int, str] | None:
+    """(role, rank, plain URL) for one link that may be a companion document on `domain`, else None.
+    Rank 0: its text names the role; rank 1: only its path does."""
+    path = urlparse(href).path
+    if not _on_domain(href, domain) or is_user_content(href) or NOT_COMPANION.search(path):
+        return None
+    text = " ".join(text.split())
+    if "cookie" in text.lower():
+        return None
+    for role in COMPANION_ROLES:  # one role per link: a "Data Processing Addendum" is not also the privacy policy
+        if COMPANION_TEXT[role].search(text):
+            return role, 0, _plain_url(href)
+        if COMPANION_PATH[role].search(path):
+            return role, 1, _plain_url(href)
+    return None
+
+
+def _keep_best(found: dict[str, tuple[int, str]], item: tuple[str, int, str] | None) -> None:
+    if item is not None:
+        role, rank, url = item
+        if role not in found or rank < found[role][0]:
+            found[role] = (rank, url)
+
+
+async def _bundle(best: dict[str, tuple[int, str]], terms_url: str) -> dict[str, str]:
+    """The best link per role, skipping the terms page itself, duplicates, and non-public addresses."""
+    bundle: dict[str, str] = {}
+    for role in DOC_ROLES:
+        if role not in best:
+            continue
+        url = best[role][1]
+        if _same_page(url, terms_url) or any(_same_page(url, kept) for kept in bundle.values()):
+            continue
+        if await _is_public(url):
+            bundle[role] = url
+    return bundle
+
+
+async def companions_from_links(links: list[tuple[str, str]], terms_url: str) -> dict[str, str]:
+    """Companion documents among (url, link text) pairs the Scout found on the rendered terms page.
+
+    The Scout crawled a page the Gateway doesn't trust, so its own labels are ignored: every link goes
+    through the same domain, user-content, path and public-address checks as `discover_companions`."""
+    host = urlparse(terms_url).hostname or ""
+    if not host:
+        return {}
+    domain = registrable_domain(host)
+    best: dict[str, tuple[int, str]] = {}
+    for url, text in links:
+        _keep_best(best, _classify(url, text, domain))
+    return await _bundle(best, terms_url)
+
+
+def legal_hub(html: str, base_url: str, domain: str) -> str | None:
+    """The page's link to the service's legal hub ("Legal", /legal, /policies) on `domain`, if any."""
+    soup = BeautifulSoup(html, "html.parser")
+    for a in soup.find_all("a", href=True):
+        href = urljoin(base_url, a["href"])
+        if not _on_domain(href, domain) or is_user_content(href):
+            continue
+        text = " ".join(a.get_text(" ", strip=True).split())
+        if LEGAL_HUB_TEXT.match(text) or LEGAL_HUB_PATH.search(urlparse(href).path):
+            return _plain_url(href)
+    return None
+
+
+async def _is_public(url: str) -> bool:
+    try:
+        await resolve_public(urlparse(url).hostname or "")
+        return True
+    except BlockedURL:
+        log.info("skipped a companion link that is not on a public address")
+        return False
+
+
+async def discover_companions(terms_url: str, client: httpx.AsyncClient | None = None) -> dict[str, str]:
+    """Companion legal documents (privacy, ai_terms, billing, dpa) linked from the terms page or its
+    legal hub, on the terms page's own registrable domain: role -> URL.
+
+    Pages are fetched through the netguard client, and every link kept must resolve to public
+    addresses only; one that does not is skipped and never fetched. Failures give {}.
+    """
+    host = urlparse(terms_url).hostname or ""
+    if not host:
+        return {}
+    domain = registrable_domain(host)
+    own = client is None
+    client = client or safe_client(timeout=20)
+    best: dict[str, tuple[int, str]] = {}
+    try:
+        pages, fetched = [terms_url], 0
+        while pages and fetched < MAX_DISCOVERY_PAGES:
+            page = pages.pop(0)
+            fetched += 1
+            try:
+                resp = await client.get(page)
+            except httpx.HTTPError as exc:
+                log.info("companion discovery fetch failed: %s", type(exc).__name__)
+                continue
+            if resp.status_code != 200 or "html" not in resp.headers.get("content-type", "text/html"):
+                continue
+            if registrable_domain(resp.url.host or "") != domain:  # redirected off the service's domain
+                continue
+            base = str(resp.url)
+            for role, (rank, url) in companion_links(resp.text, base, domain).items():
+                if role not in best or rank < best[role][0]:
+                    best[role] = (rank, url)
+            if fetched == 1 and (hub := legal_hub(resp.text, base, domain)) and not _same_page(hub, terms_url):
+                pages.append(hub)
+    finally:
+        if own:
+            await client.aclose()
+    return await _bundle(best, terms_url)
+
+
+async def discover_bundle(
+    query: str, cl: Clients | None = None, client: httpx.AsyncClient | None = None
+) -> dict[str, str] | None:
+    """A service's Policy Bundle from a name, domain or terms URL: role -> URL, always with `terms`.
+
+    None when no terms page is found (the member is then asked for the URL).
+    """
+    terms = query if query.startswith("http") else await find_terms_url(query, cl, client)
+    if not terms:
+        return None
+    return {"terms": terms, **await discover_companions(terms, client)}

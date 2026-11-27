@@ -63,12 +63,16 @@ def history(monkeypatch):
         return [Version(taken_at=now - timedelta(days=200), text=text(OLD_HTML), origin="wayback"),
                 Version(taken_at=now - timedelta(days=1), text=text(NEW_HTML), origin="wayback")]
 
-    async def fake_page_text(cl, url):
+    async def fake_page_text(cl, url, public=None, **kw):
         return text(NEW_HTML)
 
     async def no_grade(q, client=None):
         return None
 
+    async def no_companions(terms_url, client=None):
+        return {}
+
+    monkeypatch.setattr(agent.discover, "discover_companions", no_companions)
     monkeypatch.setattr(agent, "backfill", fake_backfill)
     monkeypatch.setattr(agent, "page_text", fake_page_text)
     monkeypatch.setattr(agent.tosdr, "lookup", no_grade)
@@ -89,7 +93,7 @@ async def test_first_subscriber_gets_judged_history_with_their_deadline(conn, me
     assert arb.deadline == (datetime.now(UTC) - timedelta(days=1)).date() + timedelta(days=30)
     assert [e.title for e in ledger.upcoming(conn, a.id)] == ["Opt out: Acme — 3. Arbitration"]
     assert [s.name for s in agent.services_for(conn, a.id)] == ["Acme"]
-    assert m["jev"].call_count == 2  # one per changed section
+    assert m["jev"].call_count == 4  # per changed section: its verdict, then its clause severity for the index
     assert json.loads(m["jev"].calls[0].request.content)["model"] == "jev-1.14"
     assert json.loads(m["upsert"].calls[0].request.content)["vectors"][0]["metadata"]["service"] == "Acme"
     assert not m["query"].called  # A watches nothing else, so there is nothing to compare with
@@ -167,7 +171,7 @@ async def test_tick_fans_out_one_judgment_to_each_subscriber_only(conn, members,
 
     changed = text(NEW_HTML).replace("individual arbitration", "individual arbitration in Texas, with no right to appeal")
 
-    async def page(cl_, url):
+    async def page(cl_, url, public=None, **kw):
         return changed
 
     monkeypatch.setattr(agent, "page_text", page)
@@ -175,7 +179,8 @@ async def test_tick_fans_out_one_judgment_to_each_subscriber_only(conn, members,
     await cl.aclose()
 
     assert result.checked == 1 and result.changes == 1
-    assert m["jev"].call_count == judged + 1  # judged once for two watchers
+    # Once for two watchers: the verdict, the clause severity it is indexed with, and the one it is benchmarked on.
+    assert m["jev"].call_count == judged + 3
     assert set(result.deliveries) == {a.id, b.id} and c.id not in result.deliveries
     assert all("Acme" in msgs[0].text for msgs in result.deliveries.values())
     assert all(msgs[0].buttons[0][0][0] == "🗑 Unwatch Acme" for msgs in result.deliveries.values())
@@ -387,7 +392,7 @@ async def test_check_url_reports_its_stages(monkeypatch):
     respx.post(JEV).mock(return_value=httpx.Response(200, json=flags))
     respx.post(CHAT).mock(return_value=httpx.Response(200, json={"choices": [{"message": {"content": "SIGN"}}]}))
 
-    async def page(cl_, url):
+    async def page(cl_, url, public=None, **kw):
         return "Terms text"
 
     async def no_grade(q, client=None):
@@ -540,7 +545,7 @@ async def test_tick_alert_is_not_rated_when_the_writer_fails(conn, members, hist
     m["chat"].mock(return_value=httpx.Response(200, json={"choices": [{"message": {"content": None}, "finish_reason": "length"}]}))
     changed = text(NEW_HTML).replace("individual arbitration", "individual arbitration in Texas, with no right to appeal")
 
-    async def page(cl_, url):
+    async def page(cl_, url, public=None, **kw):
         return changed
 
     monkeypatch.setattr(agent, "page_text", page)

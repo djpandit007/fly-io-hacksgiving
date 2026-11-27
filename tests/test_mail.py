@@ -196,7 +196,7 @@ async def test_join_code_email_needs_a_reply_proving_the_mailbox(conn, tg, monke
                             "text": "Terms text. " * 60})
     checked = []
 
-    async def fake_card(cl, title, text, domain=None):
+    async def fake_card(cl, title, text, domain=None, **kw):
         checked.append(title)
         return "<b>Card</b>"
 
@@ -321,11 +321,11 @@ async def test_terms_update_subscribes_checks_and_fans_out(conn, tg, member, mon
         return svc, []
 
     async def fake_check(conn_, cl, s):
-        return [change]
+        return agent.BundleCheck(changes=[change])
 
     monkeypatch.setattr(intake, "find_terms_url", fake_find)
     monkeypatch.setattr(agent, "subscribe", fake_subscribe)
-    monkeypatch.setattr(agent, "check_service", fake_check)
+    monkeypatch.setattr(agent, "check_bundle", fake_check)
     await process(conn, tg)
     assert asked == ["spotify.com"]
     assert any("New arbitration clause" in t for t in tg.to(7))   # the sender
@@ -337,11 +337,11 @@ async def test_terms_update_subscribes_checks_and_fans_out(conn, tg, member, mon
 async def test_terms_link_and_long_body_and_short_body(conn, tg, member, monkeypatch):
     calls = []
 
-    async def fake_url(cl, url):
+    async def fake_url(cl, url, **kw):
         calls.append(("url", url))
         return "<b>URL card</b>"
 
-    async def fake_card(cl, title, text, domain=None):
+    async def fake_card(cl, title, text, domain=None, **kw):
         calls.append(("text", title))
         return "<b>Text card</b>"
 
@@ -366,7 +366,7 @@ async def test_email_contents_are_not_stored(conn, tg, member, monkeypatch):
     marker = "UNIQUE-BODY-MARKER-12345"
     mock_message(subject="Fwd: contract", text=(marker + " ") * 50)
 
-    async def fake_card(cl, title, text, domain=None):
+    async def fake_card(cl, title, text, domain=None, **kw):
         return "<b>ok</b>"
 
     monkeypatch.setattr(agent, "verdict_card", fake_card)
@@ -491,7 +491,7 @@ async def test_email_overview_covers_only_the_cards_shown(conn, member, monkeypa
         return svc, past
 
     async def no_fresh(conn_, cl, s):
-        return []
+        return agent.BundleCheck()
 
     async def spy_overview(cl, s, reports):
         seen.append([r.heading for r in reports])
@@ -499,7 +499,7 @@ async def test_email_overview_covers_only_the_cards_shown(conn, member, monkeypa
 
     monkeypatch.setattr(intake, "find_terms_url", fake_find)
     monkeypatch.setattr(agent, "subscribe", fake_subscribe)
-    monkeypatch.setattr(agent, "check_service", no_fresh)
+    monkeypatch.setattr(agent, "check_bundle", no_fresh)
     monkeypatch.setattr(agent, "overview", spy_overview)
     cards = await intake._terms_update(conn, agent.Clients(), None, member, "svc.test")
     assert seen == [["H3", "H4", "H5"]]

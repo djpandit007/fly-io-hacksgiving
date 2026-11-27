@@ -7,6 +7,10 @@
 
 Services, snapshots and changes are shared: each service is judged once however many members
 watch it. Everything shown to a member is rendered for that member.
+
+A service is a Policy Bundle: its terms plus any companion documents found on its own domain
+(privacy, ai_terms, billing, dpa). Each document is fetched, diffed and judged on its own; a material
+change in one is then weighed against the others for contradictions (`find_contradictions`).
 """
 
 from __future__ import annotations
@@ -16,15 +20,47 @@ import html
 import logging
 import re
 import sqlite3
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from urllib.parse import urlparse
 
 import httpx
 from pydantic import BaseModel, Field
 
-from app import exa, judge, ledger, memory, parse, quotes, taps, tosdr, writer
+from app import (
+    advocate,
+    benchmark,
+    discover,
+    exa,
+    judge,
+    ledger,
+    memory,
+    parse,
+    playbooks,
+    quota,
+    quotes,
+    swarm,
+    taps,
+    tosdr,
+    writer,
+)
+from app.benchmark import Benchmark
 from app.config import settings
-from app.db import Change, Service, Snapshot, User, now, one, rows
+from app.db import (
+    DOC_ROLE_LABELS,
+    DOC_ROLES,
+    Change,
+    Contradiction,
+    Service,
+    ServiceDocument,
+    Snapshot,
+    User,
+    get_kv,
+    now,
+    one,
+    rows,
+    set_kv,
+)
 from app.gateway import Gateway, Recorder
 from app.history import backfill
 from app.judge import Verdict
@@ -35,6 +71,7 @@ from app.outgoing import Answer, AnswerKind, Outgoing
 from app.progress import Stage, no_stage
 from app.telegram import MAX_LEN, Buttons, esc, rich
 from app.watch import (
+    Section,
     SectionChange,
     diff,
     fetch,
@@ -43,6 +80,7 @@ from app.watch import (
     normalise,
     opt_out_days,
     redline,
+    sections,
     sha,
 )
 
@@ -76,9 +114,11 @@ class Clients:
         # LlamaCloud has a default direct URL, so it counts as configured only with a key or a gateway URL.
         llama = settings.llama
         self.llama = Gateway(llama, recorder=recorder) if llama.key.get_secret_value() or "sprites.dev" in llama.base_url else None
+        # Worker Sprites (Scout/Advocate); None in single-Sprite mode.
+        self.swarm: swarm.Swarm | None = swarm.Swarm.from_settings(recorder)
 
     async def aclose(self) -> None:
-        for gw in (self.ai, self.pinecone, self.exa, self.mail, self.llama):
+        for gw in (self.ai, self.pinecone, self.exa, self.mail, self.llama, self.swarm):
             if gw:
                 await gw.aclose()
 
@@ -111,6 +151,13 @@ class ChangeReport(BaseModel):
     precedents: list[Precedent] = Field(default_factory=list)
     deadline: date | None = None
     written: bool = True  # False when the summary is the raw redline (no writer, or the writer failed)
+    doc_role: str = "terms"  # which document of the service's Policy Bundle changed
+    benchmark: Benchmark | None = None  # how the clause compares with public peers, when the cohort is big enough
+
+    @property
+    def source(self) -> str:
+        """The service, and the document when it is not the terms: "Notion (Privacy Policy)"."""
+        return doc_name(self.service, self.doc_role)
 
     def to_html(self) -> str:
         v = self.verdict
@@ -120,8 +167,9 @@ class ChangeReport(BaseModel):
         )
         if v and v.partial:
             badge += " · large change, partly judged: please skim it"
+        untitled = "its terms" if self.doc_role == "terms" else "the document"
         lines = [
-            f"<b>{esc(self.service)}</b> changed <i>{esc(self.heading or 'its terms')}</i> ({self.effective_at:%d %b %Y})",
+            f"<b>{esc(self.source)}</b> changed <i>{esc(self.heading or untitled)}</i> ({self.effective_at:%d %b %Y})",
             f"<code>{esc(badge)}</code>",
             rich(self.summary),
         ]
@@ -130,6 +178,8 @@ class ChangeReport(BaseModel):
         if self.precedents:
             others = ", ".join(sorted({p.service for p in self.precedents}))
             lines.append(f"📚 You already accepted similar wording from: {esc(others)}")
+        if self.benchmark and v:
+            lines.append(f"📊 {esc(self.benchmark.line(v.category))}")
         return "\n".join(lines)
 
 
@@ -188,7 +238,77 @@ def add_service(conn: sqlite3.Connection, name: str, url: str) -> Service:
     )
     svc = one(Service, conn.execute("SELECT * FROM services WHERE name = ?", (display,)))
     assert svc
+    documents_for(conn, svc)  # its Policy Bundle starts with the terms document
     return svc
+
+
+# --- Policy Bundles --------------------------------------------------------------------------------
+
+# Open Terms Archive document types to backfill each role from; other roles use the Wayback Machine.
+OTA_DOCUMENTS = {"terms": "Terms of Service", "privacy": "Privacy Policy"}
+
+
+def doc_name(service: str, role: str) -> str:
+    """How a document is named to members and to the judge: "Notion", or "Notion (Privacy Policy)"."""
+    return service if role == "terms" else f"{service} ({DOC_ROLE_LABELS.get(role, role)})"
+
+
+def documents_for(conn: sqlite3.Connection, svc: Service) -> list[ServiceDocument]:
+    """A service's Policy Bundle, terms first. Creates the terms row if the service has none yet."""
+    def load() -> list[ServiceDocument]:
+        return rows(ServiceDocument, conn.execute("SELECT * FROM service_documents WHERE service_id = ?", (svc.id,)))
+
+    docs = load()
+    if not any(d.role == "terms" for d in docs):
+        conn.execute(
+            "INSERT OR IGNORE INTO service_documents (service_id, role, url, added_at) VALUES (?, 'terms', ?, ?)",
+            (svc.id, svc.terms_url, now()),
+        )
+        docs = load()
+    return sorted(docs, key=lambda d: DOC_ROLES.index(d.role))
+
+
+def add_documents(conn: sqlite3.Connection, svc: Service, bundle: dict[str, str]) -> None:
+    """Attach discovered companion documents (role -> URL) to a service. The terms URL never changes,
+    and a role or URL the service already has is left as it is."""
+    terms_key = normalise_url(svc.terms_url)
+    for role, url in bundle.items():
+        if role == "terms" or role not in DOC_ROLES or normalise_url(url) == terms_key:
+            continue
+        conn.execute(
+            "INSERT OR IGNORE INTO service_documents (service_id, role, url, added_at) VALUES (?, ?, ?, ?)",
+            (svc.id, role, canonical_url(url), now()),
+        )
+
+
+def role_of(conn: sqlite3.Connection, document_id: int | None) -> str:
+    """The role of a snapshot's or change's document; NULL (rows from before bundles) is the terms."""
+    if document_id is None:
+        return "terms"
+    row = conn.execute("SELECT role FROM service_documents WHERE id = ?", (document_id,)).fetchone()
+    return row["role"] if row else "terms"
+
+
+def documents_line(conn: sqlite3.Connection, svc: Service) -> str:
+    """What a /watch reply says is watched (Telegram HTML)."""
+    return "📄 Documents watched: " + esc(", ".join(d.label for d in documents_for(conn, svc)))
+
+
+def _doc_scope(doc: ServiceDocument) -> tuple[str, tuple[int, ...]]:
+    """SQL condition (and its argument) for one document's snapshots; the terms also own NULL rows."""
+    if doc.role == "terms":
+        return "(document_id IS NULL OR document_id = ?)", (doc.id,)
+    return "document_id = ?", (doc.id,)
+
+
+def latest_text(conn: sqlite3.Connection, svc: Service, doc: ServiceDocument) -> str:
+    """The newest stored text of one document of a service's bundle, or "" if it has none."""
+    scope, args = _doc_scope(doc)
+    row = conn.execute(
+        f"SELECT text FROM snapshots WHERE service_id = ? AND {scope} ORDER BY taken_at DESC, id DESC LIMIT 1",
+        (svc.id, *args),
+    ).fetchone()
+    return row["text"] if row else ""
 
 
 def services_for(conn: sqlite3.Connection, user_id: int) -> list[Service]:
@@ -264,22 +384,34 @@ def verdict_of(change: Change) -> Verdict | None:
 
 
 async def record_version(
-    conn: sqlite3.Connection, cl: Clients, svc: Service, text: str, taken_at: datetime, origin: str
+    conn: sqlite3.Connection, cl: Clients, svc: Service, text: str, taken_at: datetime, origin: str,
+    doc: ServiceDocument | None = None,
 ) -> list[Change]:
-    """Store a version of a service's terms; judge what changed once; return the material changes."""
+    """Store a version of one document of a service's bundle (the terms by default); judge what
+    changed once; return the material changes.
+
+    Each document is compared only with its own latest version at `taken_at`. Since v7 snapshots are
+    unique per (document, time, text): a return to earlier wording is stored and diffed like any other
+    change, two documents may hold identical text, and only re-recording the same version at the same
+    time (a repeated backfill) is ignored.
+    """
+    doc = doc or documents_for(conn, svc)[0]
+    scope, args = _doc_scope(doc)
     digest = sha(text)
     prev = one(
         Snapshot,
         conn.execute(
-            "SELECT * FROM snapshots WHERE service_id = ? AND taken_at <= ? ORDER BY taken_at DESC LIMIT 1",
-            (svc.id, taken_at.isoformat()),
+            f"SELECT * FROM snapshots WHERE service_id = ? AND {scope} AND taken_at <= ? ORDER BY taken_at DESC LIMIT 1",
+            (svc.id, *args, taken_at.isoformat()),
         ),
     )
     if prev and prev.sha == digest:
         return []
     cur = conn.execute(
-        "INSERT OR IGNORE INTO snapshots (service_id, taken_at, origin, sha, text) VALUES (?, ?, ?, ?, ?)",
-        (svc.id, taken_at.isoformat(), origin, digest, text),
+        """INSERT OR IGNORE INTO snapshots (service_id, taken_at, origin, sha, text, document_id, evidence_path)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (svc.id, taken_at.isoformat(), origin, digest, text, doc.id,
+         swarm.evidence_for(svc.id, doc.role, digest) if origin == "live" else None),
     )
     if cur.rowcount == 0 or prev is None:  # duplicate text, or the first baseline
         return []
@@ -289,31 +421,37 @@ async def record_version(
         log.info("%s: re-baselined on %s after archive history", svc.name, origin)
         return []
     snap_id = cur.lastrowid
+    name = doc_name(svc.name, doc.role)  # the judge and writer are told which document this is
 
     material: list[Change] = []
     for change in diff(prev.text, text)[:MAX_SECTIONS_PER_VERSION]:
-        verdict = await _judge(cl, svc.name, change)
+        verdict = await _judge(cl, name, change)
         change_id = conn.execute(
             """INSERT INTO changes (service_id, from_snap, to_snap, detected_at, effective_at, heading, kind,
-                                    before_text, after_text, material, category, opt_out, severity, favours, partial)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    before_text, after_text, material, category, opt_out, severity, favours, partial,
+                                    document_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 svc.id, prev.id, snap_id, now(), taken_at.isoformat(), change.heading, change.kind,
                 change.before, change.after,
                 verdict.material if verdict else None, verdict.category if verdict else None,
                 verdict.opt_out if verdict else None, verdict.severity if verdict else None,
                 verdict.favours if verdict else None, int(verdict.partial) if verdict else 0,
+                doc.id,
             ),
         ).lastrowid
         if verdict and not verdict.is_material():
             continue
-        summary = await _summary(cl, svc.name, change)
+        summary = await _summary(cl, name, change)
         conn.execute("UPDATE changes SET summary = ? WHERE id = ?", (summary, change_id))
         if cl.pinecone and change.after:
+            heading = change.heading if doc.role == "terms" else f"{doc.label} · {change.heading}"
             try:
+                severity = await _clause_severity(cl, change.after)
                 await memory.remember(
-                    cl.pinecone, f"chg-{change_id}", svc.name, change.heading, change.after,
+                    cl.pinecone, f"chg-{change_id}", svc.name, heading, change.after,
                     verdict.category if verdict else "other",
+                    **benchmark.clause_metadata(verdict, clause_severity=severity),
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning("pinecone remember failed: %s", exc)
@@ -323,12 +461,27 @@ async def record_version(
     return material
 
 
+async def _clause_severity(cl: Clients, text: str) -> float | None:
+    """How much one clause matters on its own (Jev, 0-3), or None without Jev or on failure."""
+    if not cl.ai:
+        return None
+    try:
+        return (await judge.clause_severity(cl.ai, [text]))[0]
+    except Exception as exc:  # noqa: BLE001 — the clause is indexed without a benchmark severity
+        log.warning("clause severity failed: %s", type(exc).__name__)
+        return None
+
+
 async def report_for(
     conn: sqlite3.Connection, cl: Clients, change: Change, svc: Service, user: User,
-    vectors: dict[int, list[float]] | None = None,
+    vectors: dict[int, list[float]] | None = None, benchmarks: dict[int, Benchmark | None] | None = None,
 ) -> ChangeReport:
-    """Render one stored change for one member: their precedents, their opt-out deadline."""
+    """Render one stored change for one member: their precedents, their opt-out deadline.
+
+    Pass `benchmarks` (shared across members, like `vectors`) to add a public peer comparison; each
+    change is benchmarked once however many members it goes to."""
     verdict = verdict_of(change)
+    bench = await _change_benchmark(cl, change, svc, verdict, vectors, benchmarks)
     precedents: list[Precedent] = []
     if cl.pinecone and change.after_text:
         try:
@@ -344,22 +497,49 @@ async def report_for(
         except Exception as exc:  # noqa: BLE001
             log.warning("pinecone similar failed: %s", exc)
 
+    role = role_of(conn, change.document_id)
     deadline = None
     if verdict and verdict.needs_action and (days := opt_out_days(change.after_text)):
         due = change.effective_at.date() + timedelta(days=days)
         if due >= date.today():
             deadline = due
             ledger.add(
-                conn, user.id, f"Opt out: {svc.name} — {change.heading or 'terms change'}", due, "opt_out",
-                detail=change.summary or "", service_id=svc.id, change_id=change.id,
+                conn, user.id, f"Opt out: {doc_name(svc.name, role)} — {change.heading or 'terms change'}", due,
+                "opt_out", detail=change.summary or "", service_id=svc.id, change_id=change.id,
             )
     fallback = redline(change.before_text, change.after_text)[:600]  # what _summary stores without a writer
     return ChangeReport(
-        change_id=change.id, service=svc.name, heading=change.heading, kind=change.kind,
+        change_id=change.id, service=svc.name, heading=change.heading, kind=change.kind, doc_role=role,
         effective_at=change.effective_at, verdict=verdict,
         summary=change.summary or fallback, written=bool(change.summary) and change.summary != fallback,
         redline=redline(change.before_text, change.after_text)[:1500], precedents=precedents, deadline=deadline,
+        benchmark=bench,
     )
+
+
+async def _change_benchmark(
+    cl: Clients, change: Change, svc: Service, verdict: Verdict | None,
+    vectors: dict[int, list[float]] | None, benchmarks: dict[int, Benchmark | None] | None,
+) -> Benchmark | None:
+    if benchmarks is None or not cl.pinecone or not verdict or verdict.category == "other" or not change.after_text:
+        return None
+    if change.id not in benchmarks:
+        benchmarks[change.id] = None
+        try:
+            vector = vectors.get(change.id) if vectors is not None else None
+            if vector is None:
+                vector = await memory.embed(cl.pinecone, change.after_text, "query")
+                if vectors is not None:
+                    vectors[change.id] = vector
+            # Compared on the clause's own severity, the scale the index holds (not the change's).
+            severity = await _clause_severity(cl, change.after_text)
+            if severity is not None:
+                benchmarks[change.id] = await benchmark.benchmark_clause(
+                    cl.pinecone, change.after_text, verdict.category, severity, exclude_service=svc.name, vector=vector,
+                )
+        except Exception as exc:  # noqa: BLE001 — the alert goes out without a benchmark
+            log.warning("benchmark failed for change %s: %s", change.id, type(exc).__name__)
+    return benchmarks[change.id]
 
 
 def past_material_changes(conn: sqlite3.Connection, service_id: int, days: int = 365) -> list[Change]:
@@ -374,12 +554,50 @@ def past_material_changes(conn: sqlite3.Connection, service_id: int, days: int =
     return [c for c in found if _is_material(c)]
 
 
-async def page_text(cl: Clients, url: str) -> str:
+async def scout_text(
+    cl: Clients, url: str, public: swarm.PublicPage | None = None, links: list[tuple[str, str]] | None = None,
+) -> str:
+    """The page rendered by the Scout Sprite (headless browser under a DNS lock), or "" when the
+    Scout is not configured or fails. Only a public service page (`public`) keeps its evidentiary
+    screenshot; a private check asks for none and keeps nothing. When `links` is given, the policy
+    links the Scout saw are added to it as (url, text): untrusted, for `discover.companions_from_links`."""
+    sw = getattr(cl, "swarm", None)
+    if sw is None or not sw.available("scout"):
+        return ""
+    try:
+        result = await sw.scout(url, screenshot=public is not None)
+    except BlockedURL:
+        raise
+    except Exception as exc:  # noqa: BLE001 — the Scout is an optional step; fall back to Exa
+        log.warning("scout crawl failed: %s", type(exc).__name__)
+        return ""
+    text = normalise(html_to_markdown(result.html)) if result.html else ""
+    if len(text) < MIN_HTML_CHARS and len(result.text) > len(text):
+        text = normalise(result.text)
+    if public is not None and text and result.screenshot_png_b64:
+        try:
+            swarm.save_evidence(public, sha(text), result.screenshot_png_b64)
+        except OSError as exc:
+            log.warning("evidence not saved: %s", type(exc).__name__)
+    if links is not None:
+        links.extend((link.url, link.text) for link in result.links)
+    return text
+
+
+async def page_text(
+    cl: Clients, url: str, *, public: swarm.PublicPage | None = None, may_scout: Callable[[], bool] | None = None,
+    links: list[tuple[str, str]] | None = None,
+) -> str:
     """A terms page as normalised text.
 
-    1. Direct fetch (public addresses only). 2. Exa page contents when the fetch is refused, fails or
-    yields almost nothing (bot walls, JavaScript-only pages). 3. LlamaParse for PDFs and as last resort.
-    A URL that resolves to a non-public address is never fetched and never handed to a fallback.
+    1. Direct fetch (public addresses only). 2. The Scout Sprite when the fetch is refused, fails or
+    yields almost nothing (bot walls, JavaScript-only pages). 3. Exa page contents. 4. LlamaParse for
+    PDFs and as last resort. A URL that resolves to a non-public address is never fetched and never
+    handed to a fallback. Pass `public` only for a watched service's own page: its Scout screenshot is
+    kept as evidence under `<service_id>/<doc_role>/<sha>.png`; member checks keep nothing.
+    `may_scout`, when given, is asked just before a Scout crawl (a member's daily allowance); False
+    skips the Scout and goes on to the other fallbacks. `links`, when given, collects the policy links a
+    Scout crawl saw (see `scout_text`).
     """
     text, is_pdf, error = "", False, None
     try:
@@ -394,6 +612,12 @@ async def page_text(cl: Clients, url: str) -> str:
     except httpx.HTTPError as exc:
         error = exc
         log.info("direct fetch of %s failed (%s); trying fallbacks", url, type(exc).__name__)
+
+    if not is_pdf and (may_scout is None or may_scout()):
+        candidate = await scout_text(cl, url, public, links)
+        if len(candidate) >= MIN_HTML_CHARS:
+            return candidate
+        text = max(text, candidate, key=len)
 
     if not is_pdf and cl.exa:
         try:
@@ -411,24 +635,299 @@ async def page_text(cl: Clients, url: str) -> str:
     raise RuntimeError(f"couldn't read {url}" + (f": {type(error).__name__}" if error else ""))
 
 
-async def check_service(conn: sqlite3.Connection, cl: Clients, svc: Service) -> list[Change]:
+class BundleCheck(BaseModel):
+    changes: list[Change] = Field(default_factory=list)
+    contradictions: list[Contradiction] = Field(default_factory=list)  # newly found: alert each once
+
+
+async def check_bundle(conn: sqlite3.Connection, cl: Clients, svc: Service) -> BundleCheck:
+    """Fetch, diff and judge every document of a service's bundle once, then look for contradictions
+    between each material change and the bundle's other documents.
+
+    The terms must be readable (otherwise this raises, as before bundles); a companion document that
+    can't be read this time is skipped and tried again on the next check.
+    """
     async with locks.hold(f"service:{svc.id}"):
-        text = await page_text(cl, svc.terms_url)
-        return await record_version(conn, cl, svc, text, datetime.now(UTC), "live")
+        taken = datetime.now(UTC)
+        changes: list[Change] = []
+        due = companions_due(conn, svc, taken)
+        links: list[tuple[str, str]] = []
+        for doc in documents_for(conn, svc):
+            url = svc.terms_url if doc.role == "terms" else doc.url
+            try:
+                text = await page_text(
+                    cl, url, public=swarm.PublicPage(service_id=svc.id, doc_role=doc.role),
+                    links=links if due and doc.role == "terms" else None,
+                )
+            except Exception as exc:
+                if doc.role == "terms":
+                    raise
+                log.warning("check of %s's %s failed: %s", svc.name, doc.role, type(exc).__name__)
+                continue
+            changes += await record_version(conn, cl, svc, text, taken, "live", doc)
+        if due:
+            await refresh_companions(conn, cl, svc, links, taken)
+        found = await find_contradictions(conn, cl, svc, changes)
+    return BundleCheck(changes=changes, contradictions=found)
+
+
+async def check_service(conn: sqlite3.Connection, cl: Clients, svc: Service) -> list[Change]:
+    """The material changes from `check_bundle` (contradictions are stored; see `check_bundle`)."""
+    return (await check_bundle(conn, cl, svc)).changes
+
+
+# --- Cross-document contradictions -----------------------------------------------------------------
+
+CONTRADICTION_THRESHOLD = 0.75  # how sure Jev must be that two documents contradict each other
+MAX_CONTRADICTION_CHANGES = 4   # changed sections per service per check weighed against the bundle
+MIN_SHARED_WORDS = 3            # a candidate section must share this many words with the change
+_STOP_WORDS = frozenset({
+    "that", "this", "with", "from", "your", "have", "will", "which", "such", "these", "those", "their",
+    "there", "they", "them", "were", "been", "being", "into", "than", "then", "also", "only", "other",
+    "about", "under", "upon", "when", "where", "what", "while", "would", "could", "should", "shall",
+    "must", "each", "some", "more", "most", "very", "terms", "section", "including", "include", "means",
+})
+# Words that mark a section as being about one category, so candidates on the change's topic rank first.
+CATEGORY_WORDS: dict[str, frozenset[str]] = {
+    "data": frozenset({"data", "personal", "information", "train", "training", "model", "models", "share",
+                       "sell", "privacy", "process", "processing", "artificial", "intelligence"}),
+    "content": frozenset({"content", "licence", "license", "ownership", "owns", "upload", "intellectual",
+                          "property", "rights", "train", "training", "model", "models"}),
+    "fees": frozenset({"fees", "price", "prices", "charge", "charges", "refund", "refunds", "billing", "payment"}),
+    "renewal": frozenset({"renew", "renewal", "renews", "cancel", "cancellation", "trial", "subscription"}),
+    "arbitration": frozenset({"arbitration", "dispute", "disputes", "court", "class", "waiver", "governing"}),
+    "liability": frozenset({"liability", "liable", "warranty", "warranties", "indemnify", "indemnity", "damages"}),
+    "termination": frozenset({"terminate", "termination", "suspend", "suspension", "account", "close"}),
+}
+_SENTENCE = re.compile(r"[^.!?\n]+[.!?]?")
+
+
+def _key_words(text: str) -> set[str]:
+    return set(re.findall(r"[a-z]{4,}", text.lower())) - _STOP_WORDS
+
+
+def contradiction_candidates(
+    change: Change, others: list[tuple[ServiceDocument, str]], limit: int = judge.MAX_CONTRADICTION_CANDIDATES
+) -> list[tuple[ServiceDocument, str, str]]:
+    """The sections of the other documents (doc, heading, body) most likely to speak to the same matter
+    as the change: shared words, with the change's category words counting double. Best first."""
+    words = _key_words(change.after_text) | _key_words(change.heading)
+    focus = CATEGORY_WORDS.get(change.category or "", frozenset())
+    scored: list[tuple[int, int, tuple[ServiceDocument, str, str]]] = []
+    for doc, text in others:
+        for sec in sections(text):
+            if not sec.body.strip():
+                continue
+            theirs = _key_words(sec.body) | _key_words(sec.heading)
+            shared = len(words & theirs)
+            if shared < MIN_SHARED_WORDS:
+                continue
+            scored.append((shared + 2 * len(focus & words & theirs), -len(scored), (doc, sec.heading, sec.body)))
+    scored.sort(key=lambda s: (s[0], s[1]), reverse=True)
+    return [item for _, _, item in scored[:limit]]
+
+
+def _quote_from(text: str, other: str) -> str:
+    """The sentence of `text` sharing the most words with `other`, verbatim, cut at a word if long."""
+    theirs = _key_words(other)
+    best, score = "", -1
+    for m in _SENTENCE.finditer(text):
+        sentence = m.group().strip()
+        if len(sentence) < quotes.MIN_CHARS or len(sentence.split()) < quotes.MIN_WORDS:
+            continue
+        shared = len(_key_words(sentence) & theirs)
+        if shared > score:
+            best, score = sentence, shared
+    best = best or " ".join(text.split()[:60])
+    if len(best) > quotes.MAX_SHOWN_CHARS:
+        best = best[: quotes.MAX_SHOWN_CHARS].rsplit(" ", 1)[0]
+    return best
+
+
+def _verified(quote: str, document: str) -> bool:
+    return bool(quotes.verify([quotes.Quote("contradiction", quote)], document))
+
+
+async def find_contradictions(
+    conn: sqlite3.Connection, cl: Clients, svc: Service, changes: list[Change]
+) -> list[Contradiction]:
+    """Weigh each material change against the other documents of the same bundle; store and return the
+    contradictions Jev is sure of (>= CONTRADICTION_THRESHOLD) that were not already stored.
+
+    Bounded: at most MAX_CONTRADICTION_CHANGES changes, each against at most
+    judge.MAX_CONTRADICTION_CANDIDATES sections in one Jev request. Both quotes are verbatim sentences
+    checked against the stored documents. Pairs are stored with the lower document id first, so a
+    contradiction found from either side is stored (and alerted) once.
+    """
+    if cl.ai is None or not changes:
+        return []
+    docs = documents_for(conn, svc)
+    if len(docs) < 2:
+        return []
+    by_id = {d.id: d for d in docs}
+    texts = {d.id: latest_text(conn, svc, d) for d in docs}
+    stored: list[Contradiction] = []
+    for change in [c for c in changes if c.after_text.strip()][:MAX_CONTRADICTION_CHANGES]:
+        doc_a = by_id.get(change.document_id) if change.document_id is not None else docs[0]
+        if doc_a is None:
+            continue
+        others = [(d, texts[d.id]) for d in docs if d.id != doc_a.id and texts[d.id]]
+        picked = contradiction_candidates(change, others)
+        if not picked:
+            continue
+        section_a = f"## {change.heading}\n{change.after_text}" if change.heading else change.after_text
+        try:
+            verdicts = await judge.contradictions(
+                cl.ai, svc.name, doc_a.label, section_a,
+                [(doc_b.label, f"## {heading}\n{body}" if heading else body) for doc_b, heading, body in picked],
+            )
+        except Exception as exc:  # noqa: BLE001 — one failed check must not sink the run
+            log.warning("contradiction check failed for %s: %s", svc.name, type(exc).__name__)
+            continue
+        for (doc_b, heading_b, body_b), v in zip(picked, verdicts):
+            if v.contradicts < CONTRADICTION_THRESHOLD:
+                continue
+            quote_a, quote_b = _quote_from(change.after_text, body_b), _quote_from(body_b, change.after_text)
+            if not (_verified(quote_a, texts[doc_a.id]) and _verified(quote_b, texts[doc_b.id])):
+                log.info("dropped a contradiction for %s: quote not verified", svc.name)
+                continue
+            one_side = (doc_a, change.heading, quote_a)
+            other_side = (doc_b, heading_b, quote_b)
+            first, second = sorted((one_side, other_side), key=lambda side: side[0].id)
+            summary = (
+                f"The {first[0].label} ({first[1] or 'untitled section'}) and the {second[0].label} "
+                f"({second[1] or 'untitled section'}) say different things about the same matter. Until "
+                f"{svc.name} clarifies, it is unclear which one it will rely on."
+            )
+            cur = conn.execute(
+                """INSERT OR IGNORE INTO document_contradictions
+                       (service_id, doc_a_id, doc_b_id, heading_a, heading_b, quote_a, quote_b, summary, severity,
+                        detected_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (svc.id, first[0].id, second[0].id, first[1], second[1], first[2], second[2], summary,
+                 v.severity, now()),
+            )
+            if cur.rowcount:
+                row = one(Contradiction, conn.execute("SELECT * FROM document_contradictions WHERE id = ?",
+                                                      (cur.lastrowid,)))
+                if row:
+                    stored.append(row)
+    return stored
+
+
+def contradiction_alert(conn: sqlite3.Connection, c: Contradiction, svc: Service) -> Outgoing:
+    """A contradiction as delivered to one watcher: both documents' verbatim clauses and an unwatch button."""
+    labels = {d.id: d.label for d in documents_for(conn, svc)}
+    a, b = labels.get(c.doc_a_id, "Terms"), labels.get(c.doc_b_id, "Terms")
+    clauses = (
+        f"<b>{esc(a)} · {esc(c.heading_a or 'untitled section')}</b>\n“{esc(quotes.shown(c.quote_a))}”\n"
+        f"<b>{esc(b)} · {esc(c.heading_b or 'untitled section')}</b>\n“{esc(quotes.shown(c.quote_b))}”"
+    )
+    text = "\n".join([
+        f"⚠️ <b>{esc(svc.name)}</b>: its {esc(a)} and {esc(b)} contradict each other",
+        f"<code>{esc(judge.severity_label(c.severity))} ({c.severity:.1f}/3)</code>",
+        f"<blockquote expandable>{clauses}</blockquote>",
+        esc(c.summary),
+        DISCLAIMER,
+    ])
+    return Outgoing(text=text, buttons=[[unwatch_button(svc)]])
 
 
 def _has_history(conn: sqlite3.Connection, service_id: int) -> bool:
     return conn.execute("SELECT 1 FROM snapshots WHERE service_id = ? LIMIT 1", (service_id,)).fetchone() is not None
 
 
-async def onboard_service(conn: sqlite3.Connection, cl: Clients, svc: Service) -> None:
-    """Once per service: backfill a year of history, take the live version, fetch the community grade."""
-    for version in await backfill(svc.name, svc.terms_url):
-        await record_version(conn, cl, svc, version.text, version.taken_at, version.origin)
+async def _discover_companions(conn: sqlite3.Connection, svc: Service) -> None:
     try:
-        await record_version(conn, cl, svc, await page_text(cl, svc.terms_url), datetime.now(UTC), "live")
+        add_documents(conn, svc, await discover.discover_companions(svc.terms_url))
+    except Exception as exc:  # noqa: BLE001 — the terms alone are still worth watching
+        log.warning("companion discovery failed for %s: %s", svc.name, type(exc).__name__)
+
+
+async def _onboard_document(
+    conn: sqlite3.Connection, cl: Clients, svc: Service, doc: ServiceDocument,
+    links: list[tuple[str, str]] | None = None,
+) -> None:
+    """Backfill a year of one document's history, then take its live version."""
+    if doc.role == "terms":
+        url, versions = svc.terms_url, await backfill(svc.name, svc.terms_url)
+    else:
+        url, versions = doc.url, await backfill(svc.name, doc.url, document=OTA_DOCUMENTS.get(doc.role))
+    for version in versions:
+        await record_version(conn, cl, svc, version.text, version.taken_at, version.origin, doc)
+    try:
+        text = await page_text(cl, url, public=swarm.PublicPage(service_id=svc.id, doc_role=doc.role), links=links)
+        await record_version(conn, cl, svc, text, datetime.now(UTC), "live", doc)
     except Exception as exc:  # noqa: BLE001
-        log.warning("live fetch failed for %s: %s", svc.name, exc)
+        log.warning("live fetch failed for %s (%s): %s", svc.name, doc.role, exc)
+
+
+async def _companions_from_scout(conn: sqlite3.Connection, svc: Service, links: list[tuple[str, str]]) -> None:
+    """Attach companion documents among the links the Scout saw on the terms page (pages that need a
+    browser), after the Gateway's own checks. Roles found by plain discovery are kept as they are."""
+    if not links:
+        return
+    try:
+        add_documents(conn, svc, await discover.companions_from_links(links, svc.terms_url))
+    except Exception as exc:  # noqa: BLE001 — the terms alone are still worth watching
+        log.warning("scout companion links failed for %s: %s", svc.name, type(exc).__name__)
+
+
+# Companion documents are looked for again on this cadence, so services watched before Policy Bundles
+# (and services that publish a new policy later) gain them. A late find is baselined live only: no
+# backfill and no alert for anything before it was found.
+REDISCOVER_EVERY = timedelta(days=30)
+
+
+def _companions_key(svc: Service) -> str:
+    return f"companions_checked:{svc.id}"
+
+
+def companions_due(conn: sqlite3.Connection, svc: Service, at: datetime | None = None) -> bool:
+    last = get_kv(conn, _companions_key(svc))
+    return last is None or (at or datetime.now(UTC)) - datetime.fromisoformat(last) >= REDISCOVER_EVERY
+
+
+def _companions_checked(conn: sqlite3.Connection, svc: Service, at: datetime | None = None) -> None:
+    set_kv(conn, _companions_key(svc), (at or datetime.now(UTC)).isoformat(timespec="seconds"))
+
+
+async def refresh_companions(
+    conn: sqlite3.Connection, cl: Clients, svc: Service, links: list[tuple[str, str]], taken: datetime,
+) -> None:
+    """The periodic companion check: plain discovery plus the Scout's links from this check's terms
+    crawl; each newly found document gets a live baseline only (no history, so no alerts)."""
+    _companions_checked(conn, svc, taken)  # once per period, even if this check fails
+    known = {d.id for d in documents_for(conn, svc)}
+    await _discover_companions(conn, svc)
+    await _companions_from_scout(conn, svc, links)
+    for doc in documents_for(conn, svc):
+        if doc.id in known:
+            continue
+        try:
+            text = await page_text(cl, doc.url, public=swarm.PublicPage(service_id=svc.id, doc_role=doc.role))
+            await record_version(conn, cl, svc, text, taken, "live", doc)  # the first version: a baseline
+        except Exception as exc:  # noqa: BLE001 — tried again on the next daily check
+            log.warning("baseline of %s's new %s failed: %s", svc.name, doc.role, type(exc).__name__)
+
+
+async def onboard_service(conn: sqlite3.Connection, cl: Clients, svc: Service) -> None:
+    """Once per service: find its Policy Bundle, then for each document backfill a year of history and
+    take the live version; finally fetch the community grade. The terms go first, so companion links
+    the Scout sees on a page that needs a browser join the bundle before it is onboarded."""
+    await _discover_companions(conn, svc)
+    links: list[tuple[str, str]] = []
+    terms = documents_for(conn, svc)[0]
+    await _onboard_document(conn, cl, svc, terms, links)
+    await _companions_from_scout(conn, svc, links)
+    _companions_checked(conn, svc)
+    for doc in documents_for(conn, svc):
+        if doc.role == "terms":
+            continue
+        try:  # a companion that can't be read (bad archive reply, judge error) never blocks the watch
+            await _onboard_document(conn, cl, svc, doc)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("onboarding %s's %s failed: %s", svc.name, doc.role, type(exc).__name__)
     if rating := await tosdr.lookup(svc.domain or svc.name):
         conn.execute("UPDATE services SET tosdr_grade = ? WHERE id = ?", (rating.grade, svc.id))
 
@@ -514,7 +1013,10 @@ def rated(kind: AnswerKind, **meta) -> Answer:
 def alert(report: ChangeReport, svc: Service) -> Outgoing:
     """A material change as delivered to one watcher: the report, an unwatch button, and 👍/👎 when the
     writer wrote its summary (a raw redline isn't the writer's answer to rate)."""
-    return Outgoing(text=report.to_html(), buttons=[[unwatch_button(svc)]],
+    buttons: Buttons = [[unwatch_button(svc)]]
+    if report.verdict and advocate.wants_change_button(report.verdict.opt_out):
+        buttons.append([advocate.change_button(report.change_id)])
+    return Outgoing(text=report.to_html(), buttons=buttons,
                     rate=rated("alert", change_id=report.change_id) if report.written else None)
 
 
@@ -535,8 +1037,11 @@ def pack(parts: list[str], limit: int = MAX_LEN, sep: str = "\n\n") -> list[str]
 
 def _overview_fact(r: ChangeReport) -> str:
     v = r.verdict
+    where = r.heading or "terms"
+    if r.doc_role != "terms":
+        where = f"{DOC_ROLE_LABELS.get(r.doc_role, r.doc_role)}: {r.heading or 'untitled section'}"
     fields = [
-        f"{r.effective_at:%d %b %Y}", r.heading or "terms", v.category if v else "unjudged",
+        f"{r.effective_at:%d %b %Y}", where, v.category if v else "unjudged",
         judge.severity_label(v.severity) if v else "—", FAVOURS_TEXT[v.favours] if v else "—", r.summary,
     ]
     line = "- " + " · ".join(" ".join(f.split()) for f in fields)
@@ -580,24 +1085,185 @@ async def watch_messages(cl: Clients, svc: Service, reports: list[ChangeReport])
 DISCLAIMER = "<i>Information, not legal advice.</i>"
 
 
+def _offers_opt_out(found: list[str]) -> bool:
+    """A checked policy whose found flags (AI training, no deletion right) make an opt-out worth looking for."""
+    return bool(advocate.OPT_OUT_FLAGS.intersection(found))
+
+
 def _explain_buttons(flags: dict[str, float]) -> Buttons:
     """A 💡 button per flag found or unclear, two to a row."""
     shown = [(f"💡 {k.replace('_', ' ')}", taps.build("fx", k)) for k, p in flags.items() if p >= UNCLEAR]
     return [shown[i : i + 2] for i in range(0, len(shown), 2)]
 
 
+STATUTE_CONFIRM = 0.7      # how sure Jev must be that a quoted clause triggers a statutory rule
+STATUTE_CONTEXT_CHARS = 12_000
+MAX_BENCHMARKS = 2         # found clauses benchmarked per verdict card
+JURISDICTION_HINT = "<i>Tip: set /jurisdiction to see where clauses like these may be restricted by law.</i>"
+
+
+async def _classify(cl: Clients, title: str, text: str) -> playbooks.Domain:
+    """The document's legal domain; consumer terms when Jev is unavailable, unsure or fails."""
+    if not cl.ai:
+        return playbooks.DEFAULT_DOMAIN
+    try:
+        found, _confidence = await judge.classify_domain(cl.ai, title, text)
+        return found
+    except Exception as exc:  # noqa: BLE001 — the consumer battery still gives a useful verdict
+        log.warning("classifying %s failed: %s", title, type(exc).__name__)
+        return playbooks.DEFAULT_DOMAIN
+
+
+async def _statutory(
+    cl: Clients, user: User | None, legal_domain: str, found: list[str], passed: list[quotes.Quote], text: str
+) -> str:
+    """Statutory notes for the member's jurisdiction, each confirmed by Jev against the quoted clause.
+
+    No member: nothing. A member with no jurisdiction: a one-line pointer to /jurisdiction."""
+    if user is None:
+        return ""
+    if not user.jurisdiction:
+        return JURISDICTION_HINT
+    rules = playbooks.statutes_for(user.jurisdiction, legal_domain, found)
+    if not rules or not cl.ai:
+        return ""
+    quoted = {q.flag: q.text for q in passed}
+    state: dict[str, str] = {"jurisdiction": playbooks.JURISDICTIONS[user.jurisdiction]}
+    asks: dict[str, str] = {}
+    for n, (flag, rule) in enumerate(rules.items(), start=1):
+        # The verified clause when there is one; otherwise the document's opening, where Jev looks itself.
+        state[f"clause_{n}"] = quoted.get(flag) or text[:STATUTE_CONTEXT_CHARS]
+        asks[flag] = rule.question.replace("`clause`", f"`clause_{n}`")
+    try:
+        sure = await judge.nouls(cl.ai, state, asks)
+    except Exception as exc:  # noqa: BLE001 — omit notes rather than show unconfirmed ones
+        log.warning("statutory check failed: %s", type(exc).__name__)
+        return ""
+    lines = [
+        f"⚖️ <b>{esc(flag.replace('_', ' '))}</b> {esc(rule.note)} ({esc(rule.law)})."
+        for flag, rule in rules.items() if sure.get(flag, 0.0) >= STATUTE_CONFIRM
+    ]
+    if not lines:
+        return ""
+    where = esc(playbooks.JURISDICTIONS[user.jurisdiction])
+    return f"<b>Where you live ({where})</b>\n" + "\n".join(lines)
+
+
+def _bundle_texts(conn: sqlite3.Connection, svc: Service) -> list[tuple[str, str]]:
+    """(document role, latest stored text) for each document of a service's bundle. Pre-v6 snapshots
+    (no document_id) count as the terms document's, through `latest_text`, never as a second copy."""
+    out: list[tuple[str, str]] = []
+    for doc in documents_for(conn, svc):
+        if text := latest_text(conn, svc, doc):
+            out.append((doc.role, text))
+    return out
+
+
+async def _conflicts(
+    conn: sqlite3.Connection | None, cl: Clients, user: User | None, legal_domain: str, text: str
+) -> str:
+    """Clauses in the member's watched services that the uploaded contract may forbid, checked in RAM.
+
+    The contract text stays in this function's locals and the Jev request (never logged); nothing is
+    written to SQLite or Pinecone, and the result goes only on this member's own card.
+    """
+    if conn is None or user is None or cl.ai is None or legal_domain not in playbooks.CONFLICT_DOMAINS:
+        return ""
+    contract = [
+        (p, t) for p in playbooks.parts(text) if (t := playbooks.topics(p.heading + "\n" + p.body, playbooks.CONTRACT_TOPICS))
+    ]
+    if not contract:
+        return ""
+    candidates: list[tuple[tuple[int, int], Service, str, Section, dict[str, int]]] = []
+    for svc in services_for(conn, user.id):
+        for role, stored in _bundle_texts(conn, svc):
+            for sec in sections(stored):
+                hits = playbooks.topics(sec.heading + "\n" + sec.body, playbooks.SERVICE_TOPICS)
+                if hits and ("ai" in hits or "licence" in hits):
+                    candidates.append(((len(hits), sum(hits.values())), svc, role, sec, hits))
+    candidates.sort(key=lambda c: c[0], reverse=True)
+    picked = candidates[: playbooks.MAX_CONFLICT_CANDIDATES]
+    if not picked:
+        return ""
+
+    def partner(hits: dict[str, int]) -> playbooks.Part:
+        # The contract part most about what this service clause touches: AI with AI, else secrecy and IP.
+        return max(contract, key=lambda pt: sum(pt[1].values()) + (5 if "ai" in hits and "ai" in pt[1] else 0))[0]
+
+    state: dict[str, str] = {}
+    asks: dict[str, str] = {}
+    pairs: list[tuple[Service, str, Section, playbooks.Part]] = []
+    for n, (_rank, svc, role, sec, hits) in enumerate(picked, start=1):
+        part = partner(hits)
+        state[f"contract_clause_{n}"] = part.body[: playbooks.CONTRACT_PART_CHARS]
+        state[f"service_clause_{n}"] = f"{svc.name} ({role}) · {sec.heading}: {sec.body[: playbooks.SERVICE_CLAUSE_CHARS]}"
+        asks[f"k{n}"] = (
+            f"`contract_clause_{n}` is from the member's own employment, NDA or client contract; `service_clause_{n}` "
+            "is from the terms of an online service the member uses. If the member put work covered by the contract "
+            f"into that service, would the service's terms let it use, train AI on, licence or disclose that work "
+            f"in a way `contract_clause_{n}` forbids?"
+        )
+        pairs.append((svc, role, sec, part))
+    try:
+        sure = await judge.nouls(cl.ai, state, asks)
+    except Exception as exc:  # noqa: BLE001 — never mention the exception text: it could echo the contract
+        log.warning("conflict check failed: %s", type(exc).__name__)
+        return ""
+    lines = []
+    for n, (svc, role, sec, part) in enumerate(pairs, start=1):
+        if sure.get(f"k{n}", 0.0) >= playbooks.CONFLICT_THRESHOLD:
+            doc = "" if role == "terms" else f" ({role.replace('_', ' ')})"
+            lines.append(
+                f"⚠️ <b>{esc(svc.name)}</b>{esc(doc)} · <i>{esc(sec.heading or 'terms')}</i> may conflict with your "
+                f"contract's <i>{esc(playbooks.part_label(part))}</i>: the service may use or licence work you put into it."
+            )
+    if not lines:
+        return ""
+    return "<b>Conflicts with services you use</b>\n" + "\n".join(lines)
+
+
+async def _benchmarks(cl: Clients, passed: list[quotes.Quote]) -> str:
+    """Peer comparisons for found clauses, from public clauses only; query-only, never an upsert."""
+    picked = [q for q in passed if q.flag in playbooks.FLAG_CATEGORY][:MAX_BENCHMARKS]
+    if not picked or not cl.ai or not cl.pinecone:
+        return ""
+    lines = []
+    try:
+        severities = await judge.clause_severity(cl.ai, [q.text for q in picked])
+        for q, severity in zip(picked, severities, strict=True):
+            if severity is None:
+                continue
+            category = playbooks.FLAG_CATEGORY[q.flag]
+            if b := await benchmark.benchmark_clause(cl.pinecone, q.text, category, severity):
+                lines.append(f"📊 <b>{esc(q.flag.replace('_', ' '))}</b>: {esc(b.line(category))}")
+    except Exception as exc:  # noqa: BLE001 — a benchmark is a nice-to-have
+        log.warning("benchmark failed: %s", type(exc).__name__)
+    return "\n".join(lines)
+
+
 async def verdict_card(
-    cl: Clients, title: str, text: str, domain: str | None = None, on_stage: Stage = no_stage
+    cl: Clients, title: str, text: str, domain: str | None = None, on_stage: Stage = no_stage,
+    *, conn: sqlite3.Connection | None = None, user: User | None = None, owner: str | None = "",
 ) -> Outgoing:
-    """A "before you agree" card: verdict, the clauses behind found flags (verified against `text`),
-    what was checked, the community grade, and a 💡 button per flag. Nothing of `text` is kept."""
+    """A "before you agree" card: detected kind of document, verdict, the clauses behind found flags
+    (verified against `text`), statutory notes for the member's jurisdiction, conflicts with their
+    watched services, what was checked, the community grade, and a 💡 button per flag.
+
+    `domain` is the website's host (for ToS;DR); the legal domain is classified here. `owner` is the
+    host whose own text this is, the only domain an opt-out notice may go to (defaults to `domain`;
+    None for pages users write). `conn` and `user` identify the requesting member (jurisdiction,
+    watchlist). Nothing of `text` is kept."""
+    if owner == "":
+        owner = domain
     flags: dict[str, float] = {}
     card = ""
     passed: list[quotes.Quote] = []
     offered: list[quotes.Quote] = []
+    legal_domain: playbooks.Domain = playbooks.DEFAULT_DOMAIN
     if cl.ai:
         on_stage("Checking for red flags…")
-        flags = await judge.red_flags(cl.ai, title, text[: judge.MAX_DOCUMENT_CHARS])
+        legal_domain = await _classify(cl, title, text)
+        flags = await judge.red_flags(cl.ai, title, text[: judge.MAX_DOCUMENT_CHARS], playbooks.battery(legal_domain))
         on_stage("Writing it up…")
         try:
             raw = await writer.verdict_card(cl.ai, title, flags, text)
@@ -607,12 +1273,23 @@ async def verdict_card(
                 log.info("dropped %d unverified clause quote(s) for %s", len(offered) - len(passed), title)
         except Exception as exc:  # noqa: BLE001 — the flags and grade are still worth sending
             log.warning("verdict card failed for %s: %s", title, exc)
-    parts = [f"<b>{esc(title)}</b>"]
+    found = [k for k, p in flags.items() if p >= FOUND]
+    head = f"<b>{esc(title)}</b>"
+    if cl.ai:
+        head += f"\n📂 <i>{esc(playbooks.label(legal_domain))}</i>"
+    parts = [head]
     if card:
         parts.append(rich(card))
     if passed:
         lines = "\n".join(f"<b>{esc(q.flag.replace('_', ' '))}</b>: “{esc(quotes.shown(q.text))}”" for q in passed)
         parts.append(f"<blockquote expandable><b>What the document says</b>\n{lines}</blockquote>")
+    for extra in (
+        await _statutory(cl, user, legal_domain, found, passed, text),
+        await _conflicts(conn, cl, user, legal_domain, text),
+        await _benchmarks(cl, passed),
+    ):
+        if extra:
+            parts.append(extra)
     if flags:
         checked = "\n".join(flag_line(k, p) for k, p in flags.items())
         parts.append(f"<blockquote expandable><b>What I checked for</b>\n{checked}</blockquote>")
@@ -620,16 +1297,46 @@ async def verdict_card(
         grade = rating.grade or "unrated"
         parts.append(f"ToS;DR community grade: <b>{grade}</b> — <a href=\"{rating.url}\">details</a>")
     parts.append(DISCLAIMER)
-    asked = any(p >= FOUND for p in flags.values())
+    asked = bool(found)
     rate = rated("verdict", quotes_ok=(bool(offered) and len(passed) == len(offered)) if asked else None) if card else None
-    return Outgoing(text="\n\n".join(parts), buttons=_explain_buttons(flags), rate=rate)
+    unclear = [k for k, p in flags.items() if UNCLEAR <= p < FOUND]
+    check = playbooks.ContractCheck(domain=legal_domain, found=found, unclear=unclear)
+    if check.personal and not found and user is not None and user.chat_id:
+        # Say why a kit is (or isn't) offered, rather than leaving the button silently missing.
+        parts.insert(len(parts) - 1, (
+            "No clear red flags, but some clauses are unclear. You can still ask for a redline kit with suggested edits."
+            if unclear else "No red flags found in this contract, so there's no redline kit to suggest."
+        ))
+    # Counter-measures (Telegram members only): a redline kit for a personal contract with found flags
+    # (the text waits in RAM only), or an opt-out for a policy with a verified opt-out path.
+    actions = advocate.offer_redline(user, title, text, check, passed)
+    if user is not None and legal_domain == "privacy_and_ai" and _offers_opt_out(found):
+        # Always say how to opt out (the verified quote and where to act); offer to send only an email or
+        # form on the service's own verified domain, and only to a Telegram member.
+        on_stage("Looking for an opt-out…")
+        site = discover.registrable_domain(owner) if owner else None
+        opt = await advocate.extract_opt_out(cl, title, text, about=advocate.opt_out_about(found))
+        offer = advocate.offer_opt_out(user, title, site, opt) if opt and advocate.dispatchable(opt, site) else []
+        actions += offer
+        parts.insert(len(parts) - 1, advocate.how_to_opt_out(opt, site, bool(offer)) if opt else advocate.NO_OPT_OUT_PATH)
+    return Outgoing(text="\n\n".join(parts), buttons=_explain_buttons(flags) + actions, rate=rate, check=check)
 
 
-async def check_url(cl: Clients, url: str, on_stage: Stage = no_stage) -> Outgoing:
+async def check_url(
+    cl: Clients, url: str, on_stage: Stage = no_stage,
+    *, conn: sqlite3.Connection | None = None, user: User | None = None,
+) -> Outgoing:
     on_stage("Fetching the page…")
-    text = await page_text(cl, url)
+    may_scout = None
+    if conn is not None and user is not None:
+        # One member's links can't keep the one Scout busy for everyone else: a daily allowance of crawls.
+        def may_scout() -> bool:
+            return quota.take(conn, "scout", user.id, quota.SCOUT_CHECKS_PER_DAY)
+    text = await page_text(cl, url, may_scout=may_scout)
     host = (urlparse(url).hostname or url).removeprefix("www.")
-    return await verdict_card(cl, f"Terms at {host}", text, host, on_stage)
+    # A page users write (a repository, a hosted doc) is checked as usual, but never authorizes a notice.
+    owner = None if discover.is_user_content(url) else host
+    return await verdict_card(cl, f"Terms at {host}", text, host, on_stage, conn=conn, user=user, owner=owner)
 
 
 async def intake_file(
@@ -655,7 +1362,7 @@ async def intake_file(
     except Exception as exc:  # noqa: BLE001
         log.warning("extract failed for %s: %s", filename, exc)
         title = filename
-    card = await verdict_card(cl, title, parsed.markdown, on_stage=on_stage)
+    card = await verdict_card(cl, title, parsed.markdown, on_stage=on_stage, conn=conn, user=user)
     if added:
         deadlines = "\n\n<b>Deadlines</b>\n" + "\n".join(added)
         card = card.model_copy(update={"text": card.text.replace(DISCLAIMER, deadlines.lstrip() + "\n\n" + DISCLAIMER)})
@@ -676,26 +1383,34 @@ class TickResult(BaseModel):
     failed: list[str] = Field(default_factory=list)
     changes: int = 0
     nudges: int = 0
+    contradictions: int = 0
     deliveries: dict[int, list[Outgoing]] = Field(default_factory=dict)  # user id -> messages (HTML + buttons)
 
 
 async def tick(conn: sqlite3.Connection, cl: Clients) -> TickResult:
-    """Check every watched service once and fan each material change out to its watchers."""
+    """Check every watched service's bundle once and fan each material change and each new
+    contradiction out to its watchers."""
     result = TickResult()
     for svc in watched_services(conn):
         try:
-            changes = await check_service(conn, cl, svc)
+            checked = await check_bundle(conn, cl, svc)
             result.checked += 1
         except Exception as exc:  # noqa: BLE001
             log.warning("check failed for %s: %s", svc.name, exc)
             result.failed.append(svc.name)
             continue
+        changes = checked.changes
         result.changes += len(changes)
+        result.contradictions += len(checked.contradictions)
         vectors: dict[int, list[float]] = {}
+        benchmarks: dict[int, Benchmark | None] = {}
         for change in changes:
             for user in subscribers(conn, svc.id):
-                report = await report_for(conn, cl, change, svc, user, vectors)
+                report = await report_for(conn, cl, change, svc, user, vectors, benchmarks)
                 result.deliveries.setdefault(user.id, []).append(alert(report, svc))
+        for found in checked.contradictions:
+            for user in subscribers(conn, svc.id):
+                result.deliveries.setdefault(user.id, []).append(contradiction_alert(conn, found, svc))
 
     due = ledger.due_for_nudge(conn)
     by_user: dict[int, list[str]] = {}

@@ -13,6 +13,7 @@ from collections.abc import Callable
 from urllib.parse import urlparse
 
 from app import (
+    advocate,
     agent,
     ask,
     feedback,
@@ -20,6 +21,7 @@ from app import (
     ledger,
     mail,
     metrics,
+    playbooks,
     progress,
     taps,
     users,
@@ -43,6 +45,8 @@ MEMBER_MENU = [
     ("ask", "Ask about your terms"),
     ("deadlines", "Your opt-out windows, renewals and calendar link"),
     ("wrapped", "Your year in accepted terms"),
+    ("jurisdiction", "Where you live, for local consumer-law notes"),
+    ("redline", "Redline kit for the next contract you send"),
     ("help", "What I can do"),
 ]
 EMAIL_MENU = [("email", "Link your email"), ("verify", "Confirm your email code")]
@@ -66,8 +70,9 @@ HELP_BUTTONS = [
 ]
 HOW_CHECKS_WORK = (
     "<b>How checks work</b>\n\nSend me a link to terms, a PDF, a screenshot or a photo of a contract. I'll "
-    "check it <b>before you agree</b>: red flags like auto-renewal, arbitration or data sharing, the clauses "
-    "behind them, and any deadlines in it (added to your calendar)."
+    "check it <b>before you agree</b>, with checks that fit the kind of document (a lease, a job offer, an app's "
+    "terms): red flags like auto-renewal, arbitration or data sharing, the clauses behind them, and any deadlines "
+    "in it (added to your calendar). Where it helps, you can ask for a redline kit with suggested edits."
 )
 WATCH_PROMPT = "Which service should I watch? Reply with a name, a domain or a link to its terms."
 WATCH_PLACEHOLDER = "e.g. notion or youtube.com"
@@ -85,6 +90,8 @@ HELP = """<b>Fine Print</b> watches the fine print you've agreed to.
 /ask <i>question</i> — ask about the terms you watch, answered with quotes from them
 /deadlines — your opt-out windows, renewals and notice periods, plus your calendar link
 /wrapped — your year in accepted terms
+/jurisdiction <i>region</i> — where you live (US-CA, US-NY, US-OTHER, EU, UK, IN or an Indian state such as IN-MH), for local consumer-law notes
+/redline — then send a lease, job offer or client contract for a tracked-changes redline kit
 {email}
 Send a link or a file (PDF, screenshot, photo) to check it <b>before you agree</b>.
 <i>Information, not legal advice.</i>"""
@@ -216,7 +223,7 @@ async def _watch(conn: sqlite3.Connection, cl: Clients, tg: Telegram, user: User
             name = _name_for(urlparse(url).hostname or arg)
             svc, reports = await agent.subscribe(conn, cl, user, name, url, on_stage=w.stage)
             buttons = [[agent.unwatch_button(svc)]]
-            watching = f"Watching <b>{esc(svc.name)}</b> — {esc(url)}"
+            watching = f"Watching <b>{esc(svc.name)}</b> — {esc(url)}\n{agent.documents_line(conn, svc)}"
             messages: list[str | Outgoing]
             if not reports:
                 messages = [f"{watching}\nNo material changes to {esc(svc.name)}'s terms in the past year. I'll check daily."]
@@ -352,6 +359,40 @@ async def _verify(conn: sqlite3.Connection, tg: Telegram, user: User, arg: str) 
         email=esc(pending.email_pending or "") if pending else "", inbox=esc(settings.agentmail_address)
     )
     await tg.send(user.chat_id, text)
+
+
+def _jurisdiction_codes() -> str:
+    main = "\n".join(
+        f"<code>{code}</code> — {esc(where)}"
+        for code, where in playbooks.JURISDICTIONS.items() if code not in playbooks.INDIA_STATES
+    )
+    states = ", ".join(f"<code>{code}</code> {esc(name)}" for code, name in playbooks.INDIA_STATES.items())
+    return f"{main}\n\nIndian states and union territories (India-wide rules apply): {states}"
+
+
+async def _jurisdiction(conn: sqlite3.Connection, tg: Telegram, user: User, arg: str) -> None:
+    """`/jurisdiction [code|clear]`: where the member lives, for statutory notes on their checks."""
+    usage = f"Send /jurisdiction <i>code</i>, or /jurisdiction clear. Supported codes:\n{_jurisdiction_codes()}"
+    if not arg:
+        now_set = (
+            f"Your jurisdiction is <b>{esc(user.jurisdiction)}</b> ({esc(playbooks.JURISDICTIONS[user.jurisdiction])})."
+            if user.jurisdiction in playbooks.JURISDICTIONS else "You haven't set a jurisdiction."
+        )
+        await tg.send(user.chat_id, f"{now_set}\n\n{usage}")
+        return
+    try:
+        code = users.set_jurisdiction(conn, user, arg)
+    except ValueError:
+        await tg.send(user.chat_id, f"I don't know the jurisdiction {esc(arg[:40])}. {usage}")
+        return
+    if code is None:
+        await tg.send(user.chat_id, "Cleared your jurisdiction. Checks will skip statutory notes.")
+        return
+    await tg.send(
+        user.chat_id,
+        f"Saved <b>{esc(code)}</b>. Future checks will include statutory notes for "
+        f"{esc(playbooks.JURISDICTIONS[code])} where a known rule applies.\n<i>Information, not legal advice.</i>",
+    )
 
 
 # --- Button taps ---------------------------------------------------------------------------------
@@ -501,8 +542,44 @@ async def _dispatch(conn: sqlite3.Connection, cl: Clients, tg: Telegram, t: _Tap
                 return
             await t.answer(f"Watching {svc.name} again")
             await t.swap(agent.unwatch_button(svc))
+        case taps.Tap("oc", change_id):
+            await t.answer("On it…")
+            await _send_reply(tg, user.chat_id, await advocate.draft_change(conn, cl, user, int(change_id)))
+        case taps.Tap("od", ref):
+            await t.answer()
+            await _send_reply(tg, user.chat_id, advocate.draft_offer(conn, user, ref))
+        case taps.Tap("oa", secret):
+            await t.answer("Sending…")
+            await t.drop_buttons()  # one approval, one dispatch (the token is single-use anyway)
+            await advocate.approve(conn, cl, tg, user, secret)
+        case taps.Tap("ox", secret):
+            await t.drop_buttons()
+            await t.answer("Cancelled. Nothing was sent." if advocate.cancel(conn, user, secret) else "Nothing to cancel.")
+        case taps.Tap("rk", ref):
+            await t.answer()
+            if advocate.CONTRACTS.get(user.id, ref) is None:
+                await tg.send(user.chat_id, advocate.CONTRACT_GONE)
+                return
+            await t.swap(None)
+            await tg.send(user.chat_id, "Which tone should the redline and the negotiation email take?",
+                          buttons=advocate.tone_buttons(ref))
+        case taps.Tap("rt", ref, tone):
+            await t.answer("On it…")
+            await t.drop_buttons()
+            if advocate.CONTRACTS.get(user.id, ref) is not None and advocate.advocate_ready(cl):
+                await tg.send(user.chat_id, f"Building your {advocate.TONE_LABELS[tone]} redline kit on the Advocate. "
+                                            "This can take a minute or two.")
+            await advocate.redline_kit(conn, cl, tg, user, ref, tone)
         case _:
             await t.answer(STALE_TAP)
+
+
+async def _send_reply(tg: Telegram, chat: int, reply: advocate.Reply) -> None:
+    """A counter-measure reply: text with its buttons, or a force-reply prompt for missing details."""
+    if reply.ask:
+        await tg.send(chat, esc(reply.text), markup={"force_reply": True, "input_field_placeholder": "Field: value"})
+    else:
+        await tg.send(chat, reply.text, buttons=reply.buttons)
 
 
 async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incoming) -> None:
@@ -529,6 +606,12 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
     chat = msg.chat_id
     if msg.reply_to_text == WATCH_PROMPT and msg.text.strip() and not msg.text.startswith("/") and not msg.file_id:
         cmd, arg = "/watch", msg.text.strip()
+    if (msg.reply_to_text or "").startswith(advocate.FIELDS_HEAD) and msg.text.strip() and not msg.text.startswith("/") and not msg.file_id:
+        # Details for a drafted opt-out notice: held in RAM with the draft, never logged or counted by value.
+        reply = advocate.answer_fields(conn, user, msg.text)
+        metrics.count(conn, "command", "opt_out_fields", "ok" if reply else "error")
+        await _send_reply(tg, chat, reply or advocate.Reply("That opt-out draft has expired. Tap Review & Draft Opt-Out again."))
+        return
     question = ""
     if msg.file_id:
         used = "check:file"
@@ -566,6 +649,11 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
             await _email(conn, cl, tg, user, arg)
         elif cmd == "/verify":
             await _verify(conn, tg, user, arg)
+        elif cmd == "/jurisdiction":
+            await _jurisdiction(conn, tg, user, arg)
+        elif cmd == "/redline":
+            advocate.arm_redline(user)
+            await tg.send(chat, advocate.REDLINE_ARMED)
         elif cmd == "/wrapped":
             async with progress.working(tg, chat, msg.message_id) as w:
                 w.stage("Looking back over your year…")
@@ -582,7 +670,7 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
                 await _remove(conn, tg, user, arg)
         elif m := URL.search(msg.text):
             async with progress.working(tg, chat, msg.message_id) as w:
-                card = await agent.check_url(cl, m.group(0), on_stage=w.stage)
+                card = await agent.check_url(cl, m.group(0), on_stage=w.stage, conn=conn, user=user)
             await _reply(conn, tg, chat, [card], msg.message_id)
         else:
             await _suggest_or_point(tg, chat, msg.text)
