@@ -78,7 +78,7 @@ def now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Version 2: members, per-member watchlists and deadlines, email dedupe, replayable verdicts.
 V2_MIGRATION = """
@@ -211,7 +211,87 @@ CREATE TABLE unwatched (
 );
 """
 
-MIGRATIONS = {2: V2_MIGRATION, 3: V3_MIGRATION, 4: V4_MIGRATION, 5: V5_MIGRATION}
+# Version 6: Policy Bundles (several legal documents per service), cross-document contradictions,
+# member jurisdiction, single-use approval tokens, metadata-only action receipts, Control Room
+# sessions, and sanitized swarm telemetry. Adds tables and nullable columns only, so restoring the
+# .v5.bak copy rolls back cleanly. Uploaded member contracts and notice bodies are never stored.
+V6_MIGRATION = """
+CREATE TABLE service_documents (
+    id          INTEGER PRIMARY KEY,
+    service_id  INTEGER NOT NULL REFERENCES services(id),
+    role        TEXT NOT NULL,                    -- terms | privacy | ai_terms | billing | dpa
+    url         TEXT NOT NULL,
+    added_at    TEXT NOT NULL,
+    UNIQUE (service_id, role),
+    UNIQUE (service_id, url)
+);
+INSERT INTO service_documents (service_id, role, url, added_at)
+    SELECT id, 'terms', terms_url, added_at FROM services;
+ALTER TABLE snapshots ADD COLUMN document_id INTEGER REFERENCES service_documents(id);
+ALTER TABLE snapshots ADD COLUMN evidence_path TEXT;
+ALTER TABLE changes ADD COLUMN document_id INTEGER REFERENCES service_documents(id);
+CREATE TABLE document_contradictions (
+    id          INTEGER PRIMARY KEY,
+    service_id  INTEGER NOT NULL REFERENCES services(id),
+    doc_a_id    INTEGER NOT NULL REFERENCES service_documents(id),
+    doc_b_id    INTEGER NOT NULL REFERENCES service_documents(id),
+    heading_a   TEXT NOT NULL,
+    heading_b   TEXT NOT NULL,
+    quote_a     TEXT NOT NULL,
+    quote_b     TEXT NOT NULL,
+    summary     TEXT NOT NULL,
+    severity    REAL NOT NULL,
+    detected_at TEXT NOT NULL,
+    UNIQUE (service_id, doc_a_id, doc_b_id, heading_a, heading_b)
+);
+ALTER TABLE users ADD COLUMN jurisdiction TEXT;
+CREATE TABLE approval_tokens (
+    token_hash   TEXT PRIMARY KEY,
+    user_id      INTEGER NOT NULL REFERENCES users(id),
+    action_kind  TEXT NOT NULL,                   -- opt_out_email | opt_out_form | redline_kit
+    payload_json TEXT NOT NULL,
+    expires_at   TEXT NOT NULL,
+    consumed_at  TEXT
+);
+CREATE TABLE action_receipts (
+    id           INTEGER PRIMARY KEY,
+    user_id      INTEGER NOT NULL REFERENCES users(id),
+    service_name TEXT NOT NULL,
+    action_kind  TEXT NOT NULL,                   -- opt_out_email | opt_out_form | gdpr_delete | ai_opt_out
+    target       TEXT NOT NULL,                   -- recipient address or form host
+    clause_sha   TEXT NOT NULL,
+    proof_ref    TEXT NOT NULL DEFAULT '',        -- AgentMail message id or screenshot sha256
+    executed_at  TEXT NOT NULL
+);
+CREATE TABLE dashboard_sessions (
+    token_hash  TEXT PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES users(id),
+    kind        TEXT NOT NULL,                    -- magic | session
+    expires_at  TEXT NOT NULL,
+    consumed_at TEXT
+);
+CREATE TABLE swarm_events (
+    id          INTEGER PRIMARY KEY,
+    at          TEXT NOT NULL,
+    sprite_role TEXT NOT NULL,                    -- gateway | scout | advocate
+    event       TEXT NOT NULL,                    -- wake | egress_lock | run | checkpoint_restore | sleep | error
+    detail      TEXT NOT NULL DEFAULT '',         -- generic label only, never URLs or member data
+    duration_ms INTEGER
+);
+CREATE INDEX swarm_events_at ON swarm_events(at)
+"""
+
+MIGRATIONS = {2: V2_MIGRATION, 3: V3_MIGRATION, 4: V4_MIGRATION, 5: V5_MIGRATION, 6: V6_MIGRATION}
+
+DOC_ROLES = ("terms", "privacy", "ai_terms", "billing", "dpa")
+DocRole = Literal["terms", "privacy", "ai_terms", "billing", "dpa"]
+DOC_ROLE_LABELS: dict[str, str] = {
+    "terms": "Terms",
+    "privacy": "Privacy Policy",
+    "ai_terms": "AI Terms",
+    "billing": "Billing Terms",
+    "dpa": "DPA",
+}
 
 
 def backup_path(path: Path, version: int) -> Path:
@@ -293,6 +373,8 @@ class Snapshot(Row):
     origin: Literal["live", "ota", "wayback"]
     sha: str
     text: str
+    document_id: int | None = None   # NULL: the service's primary terms document (pre-v6 rows)
+    evidence_path: str | None = None  # relative path of a public evidentiary PNG, if Scout captured one
 
 
 class Change(Row):
@@ -314,6 +396,7 @@ class Change(Row):
     notified_at: datetime | None = None
     favours: str | None = None
     partial: bool = False
+    document_id: int | None = None
 
 
 class LedgerEntry(Row):
@@ -344,6 +427,7 @@ class User(Row):
     status: Literal["active", "removed", "pending"] = "active"  # pending: email-only, address unconfirmed
     email_failures: int = 0
     email_locked_until: datetime | None = None
+    jurisdiction: str | None = None  # US-CA | US-NY | US-OTHER | EU | UK
 
     @property
     def is_owner(self) -> bool:
@@ -359,6 +443,68 @@ class Subscription(Row):
     service_id: int
     created_at: datetime
 
+
+class ServiceDocument(Row):
+    id: int
+    service_id: int
+    role: DocRole
+    url: str
+    added_at: datetime
+
+    @property
+    def label(self) -> str:
+        return DOC_ROLE_LABELS[self.role]
+
+
+class Contradiction(Row):
+    id: int
+    service_id: int
+    doc_a_id: int
+    doc_b_id: int
+    heading_a: str
+    heading_b: str
+    quote_a: str
+    quote_b: str
+    summary: str
+    severity: float
+    detected_at: datetime
+
+
+class ApprovalToken(Row):
+    token_hash: str
+    user_id: int
+    action_kind: Literal["opt_out_email", "opt_out_form", "redline_kit"]
+    payload_json: str
+    expires_at: datetime
+    consumed_at: datetime | None = None
+
+
+class ActionReceipt(Row):
+    id: int
+    user_id: int
+    service_name: str
+    action_kind: Literal["opt_out_email", "opt_out_form", "gdpr_delete", "ai_opt_out"]
+    target: str
+    clause_sha: str
+    proof_ref: str = ""
+    executed_at: datetime
+
+
+class DashboardSession(Row):
+    token_hash: str
+    user_id: int
+    kind: Literal["magic", "session"]
+    expires_at: datetime
+    consumed_at: datetime | None = None
+
+
+class SwarmEvent(Row):
+    id: int
+    at: datetime
+    sprite_role: Literal["gateway", "scout", "advocate"]
+    event: Literal["wake", "egress_lock", "run", "checkpoint_restore", "sleep", "error"]
+    detail: str = ""
+    duration_ms: int | None = None
 
 
 def rows[R: Row](model: type[R], cursor: sqlite3.Cursor) -> list[R]:
