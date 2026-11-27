@@ -46,14 +46,23 @@ class Benchmark(BaseModel):
         return text + "."
 
 
-def clause_metadata(verdict: Verdict | None, domain: str = "consumer_tos") -> dict[str, Any]:
-    """The benchmark metadata a public material clause is upserted with."""
-    if verdict is None:
-        return {"domain": domain}
-    return {
-        "domain": domain, "severity": verdict.severity, "favours": verdict.favours,
-        "has_opt_out": verdict.opt_out >= OPT_OUT_MIN,
-    }
+SCALE = "clause"  # severities are judge.clause_severity scores: how much the clause itself matters
+
+
+def clause_metadata(
+    verdict: Verdict | None, domain: str = "consumer_tos", clause_severity: float | None = None
+) -> dict[str, Any]:
+    """The benchmark metadata a public material clause is upserted with.
+
+    `severity` is the clause's own severity, the scale a private clause is benchmarked on; never the
+    change's severity (how much the wording moved, even in the reader's favour). Without a clause
+    severity the clause is indexed but stays out of benchmark cohorts."""
+    meta: dict[str, Any] = {"domain": domain}
+    if verdict is not None:
+        meta |= {"favours": verdict.favours, "has_opt_out": verdict.opt_out >= OPT_OUT_MIN}
+    if clause_severity is not None:
+        meta |= {"severity": clause_severity, "scale": SCALE}
+    return meta
 
 
 def percentile(severity: float, cohort: list[float]) -> float:
@@ -70,7 +79,7 @@ def from_matches(
     per_service: dict[str, memory.ClauseMetadata] = {}
     for m in sorted(matches, key=lambda m: -m.score):
         meta = m.metadata
-        if not meta.public or meta.service in ("", "?") or meta.service == exclude_service:
+        if not meta.public or meta.scale != SCALE or meta.service in ("", "?") or meta.service == exclude_service:
             continue
         per_service.setdefault(meta.service, meta)
     if len(per_service) < MIN_COHORT:
@@ -102,7 +111,8 @@ async def benchmark_clause(
             "vector": values,
             "topK": TOP_K,
             "includeMetadata": True,
-            "filter": {"public": True, "category": category},
+            # Only clauses scored on the same scale as `severity`: older vectors hold a change's severity.
+            "filter": {"public": True, "category": category, "scale": SCALE},
         },
     )
     gw.report("read_units", dig(data, "usage", "readUnits"))

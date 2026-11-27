@@ -39,7 +39,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app import metrics
 from app.config import Provider, settings
-from app.db import DOC_ROLES, SwarmEvent, rows
+from app.db import DOC_ROLES, SwarmEvent, get_kv, rows, set_kv
 from app.gateway import Gateway, Recorder
 from app.netguard import BlockedURL, resolve_public, safe_client
 
@@ -209,6 +209,10 @@ def extract_result(stdout: str) -> dict[str, Any]:
 
 # --- Client ---------------------------------------------------------------------------------------
 
+def _dirty_key(role: str) -> str:
+    return f"swarm_dirty:{role}"
+
+
 class Swarm:
     """Typed Sprites API calls for the worker Sprites, plus the lock → run → restore job wrapper."""
 
@@ -231,9 +235,13 @@ class Swarm:
         self.checkpoints = checkpoints if checkpoints is not None else {
             "scout": settings.scout_base_checkpoint, "advocate": settings.advocate_base_checkpoint,
         }
-        # Workers whose last clean-up (egress close or checkpoint restore) failed. Fail closed: no job
-        # runs on a quarantined worker until a fresh restore succeeds.
-        self.quarantined: set[str] = set()
+        # Workers whose last clean-up (egress close or checkpoint restore) failed, or whose job never
+        # reached clean-up. Fail closed: no job runs on a quarantined worker until a fresh restore
+        # succeeds. Kept in SQLite too, so a Gateway restart mid-job or after a failed restore doesn't
+        # forget a dirty worker.
+        self.quarantined: set[str] = {
+            role for role in self.sprites if conn is not None and get_kv(conn, _dirty_key(role)) == "1"
+        }
         self._busy: dict[str, asyncio.Lock] = {}  # per worker role: one job at a time
 
     @classmethod
@@ -269,10 +277,13 @@ class Swarm:
         )
 
     async def restore_checkpoint(self, role: str) -> None:
+        """Restore the base checkpoint. Only a stream that reports completion counts: an empty, cut-off
+        or unreadable response leaves the worker's state unknown, so it raises."""
         resp = await self.gw.request(
             "POST", self._path(role, f"checkpoints/{self.checkpoints[role]}/restore"),
             log_body=False, timeout=RESTORE_TIMEOUT,
         )
+        complete = False
         for line in resp.text.splitlines():
             if not line.strip():
                 continue
@@ -282,6 +293,17 @@ class Swarm:
                 continue
             if event.type == "error":
                 raise SwarmError("restore_failed")
+            complete = complete or event.type == "complete"
+        if not complete:
+            raise SwarmError("restore_incomplete")
+
+    def _set_dirty(self, role: str, dirty: bool) -> None:
+        if dirty:
+            self.quarantined.add(role)
+        else:
+            self.quarantined.discard(role)
+        if self.conn is not None:
+            set_kv(self.conn, _dirty_key(role), "1" if dirty else "0")
 
     async def exec(self, role: str, cmd: Sequence[str], stdin: bytes, timeout: float) -> ExecOutput:
         params = [("cmd", c) for c in cmd] + [("path", cmd[0]), ("stdin", "true")]
@@ -308,6 +330,10 @@ class Swarm:
         async with self._busy.setdefault(role, asyncio.Lock()):
             if role in self.quarantined:
                 await self._reset(role, close_egress=True)  # raises while the worker stays dirty
+            if self.conn is not None:
+                # Recorded before anything runs and cleared by a successful clean-up, so a Gateway that
+                # dies mid-job restarts knowing the worker needs a restore first.
+                set_kv(self.conn, _dirty_key(role), "1")
             try:
                 if allow_hosts is not None:
                     rules = lock_rules(allow_hosts)
@@ -345,15 +371,15 @@ class Swarm:
             log.error("swarm %s: base checkpoint restore failed: %s", role, type(exc).__name__)
             self._count(role, "restore", "error", ms)
             self._event(role, "error", "checkpoint_restore_failed", ms)
-            self.quarantined.add(role)
+            self._set_dirty(role, True)
             raise SwarmError("restore_failed") from exc
         ms = metrics.elapsed_ms(started)
         self._count(role, "restore", "ok", ms)
         self._event(role, "checkpoint_restore", "base_checkpoint", ms)
         if not egress_closed:
-            self.quarantined.add(role)
+            self._set_dirty(role, True)
             raise SwarmError("egress_close_failed")
-        self.quarantined.discard(role)
+        self._set_dirty(role, False)
 
     async def run_job(
         self,

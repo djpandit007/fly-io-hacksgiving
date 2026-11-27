@@ -290,11 +290,46 @@ async def test_job_without_hosts_leaves_policy_alone():
     adv = f"{API}/v1/sprites/fp-advocate"
     policy = respx.post(f"{adv}/policy/network").mock(return_value=httpx.Response(200))
     respx.post(f"{adv}/exec").mock(return_value=httpx.Response(200, content=framed({"ok": True})))
-    restore = respx.post(f"{adv}/checkpoints/v2/restore").mock(return_value=httpx.Response(200, text=""))
+    restore = respx.post(f"{adv}/checkpoints/v2/restore").mock(return_value=httpx.Response(200, text='{"type":"complete"}\n'))
     sw = make()
     assert await sw.run_job("advocate", {"kind": "redline"}, allow_hosts=None) == {"ok": True}
     await sw.aclose()
     assert not policy.called and restore.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize("body", ["", "not json\n", '{"type":"info","data":"Restoring"}\n'])
+async def test_a_restore_without_a_completion_event_fails_closed(conn, body):
+    routes = mock_api(httpx.Response(200, content=framed({"ok": True})))
+    routes["restore"].mock(return_value=httpx.Response(200, text=body))
+    sw = make(conn)
+    with pytest.raises(swarm.SwarmError, match="restore_failed"):
+        await sw.run_job("scout", {}, allow_hosts=["acme.test"])
+    await sw.aclose()
+    assert sw.quarantined == {"scout"}
+
+
+@respx.mock
+async def test_a_restarted_gateway_remembers_a_dirty_worker(conn):
+    routes = mock_api(httpx.Response(200, content=framed({"ok": True})))
+    routes["restore"].mock(return_value=httpx.Response(200, text='{"type":"error","error":"x"}\n'))
+    sw = make(conn)
+    with pytest.raises(swarm.SwarmError):
+        await sw.run_job("scout", {}, allow_hosts=["acme.test"])
+    await sw.aclose()
+    assert make(conn).quarantined == {"scout"}  # a new Gateway process starts with the worker blocked
+
+
+@respx.mock
+async def test_a_job_cut_off_before_clean_up_leaves_the_worker_marked_dirty(conn):
+    mock_api(httpx.Response(200, content=framed({"ok": True})))
+    sw = make(conn)
+    cm = sw.job("scout", ["acme.test"])
+    await cm.__aenter__()  # the Gateway dies here, mid-job: no clean-up runs
+    assert make(conn).quarantined == {"scout"}
+    await cm.__aexit__(None, None, None)
+    await sw.aclose()
+    assert make(conn).quarantined == set()
 
 
 async def test_unavailable_role_raises_without_calls():

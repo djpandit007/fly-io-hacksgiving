@@ -50,10 +50,10 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from pydantic_ai import Agent
 
-from app import judge, metrics, playbooks, quotes, swarm, taps
+from app import judge, metrics, playbooks, quota, quotes, swarm, taps
 from app.config import settings
 from app.db import ApprovalToken, User, one, transaction
-from app.discover import registrable_domain
+from app.discover import is_user_content, registrable_domain
 from app.llm import model_for
 from app.netguard import BlockedURL, resolve_public
 from app.telegram import Buttons, esc
@@ -427,10 +427,19 @@ def _is_email(label: str) -> bool:
     return "email" in low or "e-mail" in low
 
 
+ACCOUNT_EMAIL = "Email on your account"
+
+
 def _missing(user: User, offer: Offer) -> list[str]:
     need = ["Full name"] if not user.name else []
+    if not user.email:
+        # The notice goes out from Fine Print's shared inbox, so without an email the company can't match
+        # it to the member's account: ask for the one on the account.
+        need.append(ACCOUNT_EMAIL)
     for f in offer.opt.required_fields:
-        if _is_name(f) and need:  # "Full name" already asks for it
+        if _is_name(f) and "Full name" in need:  # "Full name" already asks for it
+            continue
+        if _is_email(f) and ACCOUNT_EMAIL in need:  # so does "Email on your account"
             continue
         if _known(user, f) is None and f not in offer.fields:
             need.append(f)
@@ -618,7 +627,10 @@ async def draft_change(conn: sqlite3.Connection, cl: Any, user: User, change_id:
         )
     host = urlparse(row["terms_url"]).hostname or row["domain"] or ""
     effective = datetime.fromisoformat(row["effective_at"]).date() if row["effective_at"] else None
-    offer = Offer(service=row["name"], domain=registrable_domain(host) if host else None, opt=opt, effective=effective)
+    # A page that users write (a repository, a hosted doc) isn't the service's own word: explain the
+    # opt-out, but never send a notice on its say-so.
+    owned = bool(host) and not is_user_content(row["terms_url"] or f"https://{host}/")
+    offer = Offer(service=row["name"], domain=registrable_domain(host) if owned else None, opt=opt, effective=effective)
     return finish(conn, user, offer)
 
 
@@ -802,9 +814,22 @@ async def _dispatch(conn: sqlite3.Connection, cl: Any, tg: Messenger, user: User
     except swarm.SwarmUnavailable:
         outcome = "unavailable"
         await tg.send(chat, UNAVAILABLE)
-    except (swarm.SwarmError, httpx.HTTPError, BlockedURL) as exc:
+    except BlockedURL as exc:  # refused before any job ran
         log.warning("opt-out dispatch failed: %s", type(exc).__name__)
-        await tg.send(chat, "The action worker failed, so I can't confirm the notice was sent. Please try again later.")
+        await tg.send(chat, "The form's address isn't reachable safely, so nothing was sent.")
+    except (swarm.SwarmError, httpx.HTTPError) as exc:
+        # The worker may have sent the notice before failing (a failed clean-up discards its result), so
+        # keep an unconfirmed receipt: the daily checks then stop a second, duplicate notice.
+        log.warning("opt-out dispatch failed: %s", type(exc).__name__)
+        kind = "opt_out_email" if d.channel == "email" else "opt_out_form"
+        at = _receipt(conn, user, d, kind, _target_key(d), "unconfirmed")
+        await tg.send(
+            chat,
+            f"⚠️ The action worker failed, so I can't tell whether the {esc(d.service)} opt-out went out.\n"
+            f"Time: {esc(at)} UTC\nClause SHA-256: <code>{d.clause_sha}</code>\n\n"
+            "Look for a confirmation email or a change in your account before sending it again. I won't "
+            "send it again from here for 24 hours.",
+        )
     finally:
         metrics.countermeasure(conn, "opt_out", outcome, metrics.elapsed_ms(started))
     return "ok" if outcome == "ok" else outcome
@@ -1068,6 +1093,11 @@ async def redline_kit(conn: sqlite3.Connection, cl: Any, tg: Messenger, user: Us
         metrics.countermeasure(conn, "redline_kit", "unavailable")
         await tg.send(chat, UNAVAILABLE)
         return "unavailable"
+    if not quota.take(conn, "redline", user.id, quota.REDLINE_KITS_PER_DAY):
+        CONTRACTS.pop(user.id, ref)
+        await tg.send(chat, f"You've had {quota.REDLINE_KITS_PER_DAY} redline kits today, the daily limit. "
+                            "Try again tomorrow. Your contract has been cleared from memory.")
+        return "error"
     tone = taps.TONES[tone_code]
     started = time.monotonic()
     outcome = "error"

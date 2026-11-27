@@ -29,7 +29,8 @@ CHAT = "https://opencode.test/inference/openai/v1/chat/completions"
 
 def match(service, severity, score=0.8, public=True, opt_out=False, category="arbitration"):
     return {"id": f"chg-{service}-{severity}", "score": score, "metadata": {
-        "service": service, "category": category, "severity": severity, "public": public, "has_opt_out": opt_out}}
+        "service": service, "category": category, "severity": severity, "scale": "clause", "public": public,
+        "has_opt_out": opt_out}}
 
 
 def matches(n, **kw):
@@ -72,6 +73,18 @@ def test_opt_out_share():
     assert from_matches(ms, 2.0).opt_out_share == pytest.approx(0.3)
 
 
+def jev_with_clause_severity(score):
+    """GOOD for change verdicts; `score` for clause-severity questions (s1, s2, ...)."""
+    def answer(request):
+        questions = json.loads(request.content)["questions"]
+        if "s1" in questions:
+            return httpx.Response(200, json={"model": "jev", "answers": {
+                k: {"type": "score", "score": score, "confidence": 0.7, "probabilities": {}} for k in questions}})
+        return httpx.Response(200, json=GOOD)
+
+    return answer
+
+
 def _gw():
     return Gateway(Provider(name="pinecone", base_url="https://pinecone.test", key="pc-key"))
 
@@ -87,7 +100,7 @@ async def test_benchmark_clause_only_queries_public_clauses_of_the_category():
     await gw.aclose()
     assert found and found.cohort_size == 12
     body = json.loads(query.calls.last.request.content)
-    assert body["topK"] == 50 and body["filter"] == {"public": True, "category": "arbitration"}
+    assert body["topK"] == 50 and body["filter"] == {"public": True, "category": "arbitration", "scale": "clause"}
     assert not upsert.called
 
 
@@ -110,7 +123,7 @@ def _text(html):
 @respx.mock
 async def test_public_material_clause_is_upserted_with_benchmark_metadata(tmp_path):
     conn = db.connect(tmp_path / "b.db")
-    respx.post(JEV).mock(return_value=httpx.Response(200, json=GOOD))
+    respx.post(JEV).mock(side_effect=jev_with_clause_severity(1.4))
     respx.post(CHAT).mock(return_value=httpx.Response(200, json={"choices": [{"message": {"content": "Summary"}}]}))
     respx.post(EMBED).mock(return_value=httpx.Response(200, json={"data": [{"values": [0.1] * 1024}]}))
     upsert = respx.post(UPSERT).mock(return_value=httpx.Response(200, json={"upsertedCount": 1}))
@@ -122,7 +135,14 @@ async def test_public_material_clause_is_upserted_with_benchmark_metadata(tmp_pa
     await cl.aclose()
     meta = json.loads(upsert.calls[0].request.content)["vectors"][0]["metadata"]
     assert meta["public"] is True and meta["domain"] == "consumer_tos"
-    assert (meta["severity"], meta["favours"], meta["has_opt_out"]) == (2.6, "company", True)
+    # The clause's own severity (1.4), not the change's (2.6): the scale private clauses are compared on.
+    assert (meta["severity"], meta["scale"], meta["favours"], meta["has_opt_out"]) == (1.4, "clause", "company", True)
+
+
+def test_vectors_without_the_clause_scale_stay_out_of_the_cohort():
+    old = [memory.Match.model_validate({**match(f"S{i}", 1.0), "metadata": {**match(f"S{i}", 1.0)["metadata"], "scale": ""}})
+           for i in range(12)]
+    assert from_matches(old, 2.0) is None
 
 
 def test_clause_metadata_without_a_verdict():
@@ -147,6 +167,7 @@ async def test_alert_shows_a_benchmark_once_per_change_for_every_watcher(tmp_pat
     svc = agent.add_service(conn, "Acme", "https://acme.test/terms")
     change = _change(svc, 1, "3. Arbitration", "Disputes go to binding arbitration.", "arbitration", 2.6)
     respx.post(EMBED).mock(return_value=httpx.Response(200, json={"data": [{"values": [0.1] * 1024}]}))
+    jev = respx.post(JEV).mock(side_effect=jev_with_clause_severity(2.0))
     query = respx.post(QUERY).mock(return_value=httpx.Response(200, json={
         "matches": [match(f"S{i}", i * 0.25) for i in range(12)]}))
     cl = agent.Clients()
@@ -155,7 +176,8 @@ async def test_alert_shows_a_benchmark_once_per_change_for_every_watcher(tmp_pat
     rb = await agent.report_for(conn, cl, change, svc, b, vectors, benches)
     await cl.aclose()
     assert "📊 More severe than" in ra.to_html() and ra.benchmark == rb.benchmark
-    assert query.call_count == 1  # benchmarked once, shared by both watchers
+    assert query.call_count == 1 and jev.call_count == 1  # benchmarked once, shared by both watchers
+    assert json.loads(query.calls.last.request.content)["filter"]["scale"] == "clause"
 
 
 @respx.mock

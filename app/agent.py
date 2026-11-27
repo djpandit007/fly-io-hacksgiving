@@ -20,6 +20,7 @@ import html
 import logging
 import re
 import sqlite3
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from urllib.parse import urlparse
 
@@ -36,6 +37,7 @@ from app import (
     memory,
     parse,
     playbooks,
+    quota,
     quotes,
     swarm,
     taps,
@@ -442,9 +444,11 @@ async def record_version(
         if cl.pinecone and change.after:
             heading = change.heading if doc.role == "terms" else f"{doc.label} · {change.heading}"
             try:
+                severity = await _clause_severity(cl, change.after)
                 await memory.remember(
                     cl.pinecone, f"chg-{change_id}", svc.name, heading, change.after,
-                    verdict.category if verdict else "other", **benchmark.clause_metadata(verdict),
+                    verdict.category if verdict else "other",
+                    **benchmark.clause_metadata(verdict, clause_severity=severity),
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning("pinecone remember failed: %s", exc)
@@ -452,6 +456,17 @@ async def record_version(
         assert stored
         material.append(stored)
     return material
+
+
+async def _clause_severity(cl: Clients, text: str) -> float | None:
+    """How much one clause matters on its own (Jev, 0-3), or None without Jev or on failure."""
+    if not cl.ai:
+        return None
+    try:
+        return (await judge.clause_severity(cl.ai, [text]))[0]
+    except Exception as exc:  # noqa: BLE001 — the clause is indexed without a benchmark severity
+        log.warning("clause severity failed: %s", type(exc).__name__)
+        return None
 
 
 async def report_for(
@@ -513,9 +528,12 @@ async def _change_benchmark(
                 vector = await memory.embed(cl.pinecone, change.after_text, "query")
                 if vectors is not None:
                     vectors[change.id] = vector
-            benchmarks[change.id] = await benchmark.benchmark_clause(
-                cl.pinecone, change.after_text, verdict.category, verdict.severity, exclude_service=svc.name, vector=vector,
-            )
+            # Compared on the clause's own severity, the scale the index holds (not the change's).
+            severity = await _clause_severity(cl, change.after_text)
+            if severity is not None:
+                benchmarks[change.id] = await benchmark.benchmark_clause(
+                    cl.pinecone, change.after_text, verdict.category, severity, exclude_service=svc.name, vector=vector,
+                )
         except Exception as exc:  # noqa: BLE001 — the alert goes out without a benchmark
             log.warning("benchmark failed for change %s: %s", change.id, type(exc).__name__)
     return benchmarks[change.id]
@@ -558,7 +576,9 @@ async def scout_text(cl: Clients, url: str, public: swarm.PublicPage | None = No
     return text
 
 
-async def page_text(cl: Clients, url: str, *, public: swarm.PublicPage | None = None) -> str:
+async def page_text(
+    cl: Clients, url: str, *, public: swarm.PublicPage | None = None, may_scout: Callable[[], bool] | None = None,
+) -> str:
     """A terms page as normalised text.
 
     1. Direct fetch (public addresses only). 2. The Scout Sprite when the fetch is refused, fails or
@@ -566,6 +586,8 @@ async def page_text(cl: Clients, url: str, *, public: swarm.PublicPage | None = 
     PDFs and as last resort. A URL that resolves to a non-public address is never fetched and never
     handed to a fallback. Pass `public` only for a watched service's own page: its Scout screenshot is
     kept as evidence under `<service_id>/<doc_role>/<sha>.png`; member checks keep nothing.
+    `may_scout`, when given, is asked just before a Scout crawl (a member's daily allowance); False
+    skips the Scout and goes on to the other fallbacks.
     """
     text, is_pdf, error = "", False, None
     try:
@@ -581,7 +603,7 @@ async def page_text(cl: Clients, url: str, *, public: swarm.PublicPage | None = 
         error = exc
         log.info("direct fetch of %s failed (%s); trying fallbacks", url, type(exc).__name__)
 
-    if not is_pdf:
+    if not is_pdf and (may_scout is None or may_scout()):
         candidate = await scout_text(cl, url, public)
         if len(candidate) >= MIN_HTML_CHARS:
             return candidate
@@ -1147,14 +1169,18 @@ async def _benchmarks(cl: Clients, passed: list[quotes.Quote]) -> str:
 
 async def verdict_card(
     cl: Clients, title: str, text: str, domain: str | None = None, on_stage: Stage = no_stage,
-    *, conn: sqlite3.Connection | None = None, user: User | None = None,
+    *, conn: sqlite3.Connection | None = None, user: User | None = None, owner: str | None = "",
 ) -> Outgoing:
     """A "before you agree" card: detected kind of document, verdict, the clauses behind found flags
     (verified against `text`), statutory notes for the member's jurisdiction, conflicts with their
     watched services, what was checked, the community grade, and a 💡 button per flag.
 
-    `domain` is the website's host (for ToS;DR); the legal domain is classified here. `conn` and
-    `user` identify the requesting member (jurisdiction, watchlist). Nothing of `text` is kept."""
+    `domain` is the website's host (for ToS;DR); the legal domain is classified here. `owner` is the
+    host whose own text this is, the only domain an opt-out notice may go to (defaults to `domain`;
+    None for pages users write). `conn` and `user` identify the requesting member (jurisdiction,
+    watchlist). Nothing of `text` is kept."""
+    if owner == "":
+        owner = domain
     flags: dict[str, float] = {}
     card = ""
     passed: list[quotes.Quote] = []
@@ -1214,7 +1240,7 @@ async def verdict_card(
         # Always say how to opt out (the verified quote and where to act); offer to send only an email or
         # form on the service's own verified domain, and only to a Telegram member.
         on_stage("Looking for an opt-out…")
-        site = discover.registrable_domain(domain) if domain else None
+        site = discover.registrable_domain(owner) if owner else None
         opt = await advocate.extract_opt_out(cl, title, text, about=advocate.opt_out_about(found))
         offer = advocate.offer_opt_out(user, title, site, opt) if opt and advocate.dispatchable(opt, site) else []
         actions += offer
@@ -1227,9 +1253,16 @@ async def check_url(
     *, conn: sqlite3.Connection | None = None, user: User | None = None,
 ) -> Outgoing:
     on_stage("Fetching the page…")
-    text = await page_text(cl, url)
+    may_scout = None
+    if conn is not None and user is not None:
+        # One member's links can't keep the one Scout busy for everyone else: a daily allowance of crawls.
+        def may_scout() -> bool:
+            return quota.take(conn, "scout", user.id, quota.SCOUT_CHECKS_PER_DAY)
+    text = await page_text(cl, url, may_scout=may_scout)
     host = (urlparse(url).hostname or url).removeprefix("www.")
-    return await verdict_card(cl, f"Terms at {host}", text, host, on_stage, conn=conn, user=user)
+    # A page users write (a repository, a hosted doc) is checked as usual, but never authorizes a notice.
+    owner = None if discover.is_user_content(url) else host
+    return await verdict_card(cl, f"Terms at {host}", text, host, on_stage, conn=conn, user=user, owner=owner)
 
 
 async def intake_file(

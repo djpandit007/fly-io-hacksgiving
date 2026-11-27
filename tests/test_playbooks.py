@@ -347,11 +347,11 @@ async def test_private_document_benchmark_queries_but_never_upserts():
     jev = Jev("freelance_or_saas", ("uncapped_indemnity",))
     routes = mock(jev, ("uncapped_indemnity",))
     matches = [{"id": f"chg-{i}", "score": 0.9 - i / 100,
-                "metadata": {"service": f"Svc{i}", "category": "liability", "severity": i / 6, "public": True,
+                "metadata": {"service": f"Svc{i}", "category": "liability", "severity": i / 6, "scale": "clause", "public": True,
                              "has_opt_out": i % 2 == 0}} for i in range(12)]
     routes["query"].mock(return_value=httpx.Response(200, json={"matches": matches}))
     card = await card_for("MSA", SOW)
     assert "📊 <b>uncapped indemnity</b>: More severe than" in card.text and "across 12 public services" in card.text
     assert routes["query"].called and not routes["upsert"].called
     body = json.loads(routes["query"].calls.last.request.content)
-    assert body["filter"] == {"public": True, "category": "liability"} and body["topK"] == 50
+    assert body["filter"] == {"public": True, "category": "liability", "scale": "clause"} and body["topK"] == 50

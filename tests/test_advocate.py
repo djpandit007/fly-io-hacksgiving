@@ -21,7 +21,7 @@ import respx
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from app import advocate, agent, bot, db, playbooks, quotes, taps, users
+from app import advocate, agent, bot, db, playbooks, quotes, swarm, taps, users
 from app.advocate import OptOut, OptOutExtract
 from app.telegram import Incoming
 from workers import advocate_runner as ar
@@ -121,6 +121,7 @@ def members(conn):
     a = users.join_member(conn, "join-code", chat_id=11, name="Ada Lovelace")
     b = users.join_member(conn, "join-code", chat_id=22, name="Bob")
     conn.execute("UPDATE users SET email = ? WHERE id = ?", ("ada@example.com", a.id))
+    conn.execute("UPDATE users SET email = ? WHERE id = ?", ("bob@example.com", b.id))
     return users.by_id(conn, a.id), users.by_id(conn, b.id)
 
 
@@ -353,8 +354,9 @@ async def test_a_typed_email_reaches_the_notice_and_the_name_is_asked_once(conn,
     change_id = watched_change(conn, a)
     with extraction(email_opt(required_fields=["Name", "Email"])):
         ask = await advocate.draft_change(conn, agent.Clients(), a, change_id)
-    assert ask.ask and ask.text.count("name: ") == 1 and "Full name: " in ask.text and "Email: " in ask.text
-    reply = advocate.answer_fields(conn, a, "Full name: Ada Lovelace\nEmail: ada.typed@example.com")
+    assert ask.ask and ask.text.count("name: ") == 1 and "Full name: " in ask.text
+    assert ask.text.count("mail") == 1 and "Email on your account: " in ask.text  # the email is asked once too
+    reply = advocate.answer_fields(conn, a, "Full name: Ada Lovelace\nEmail on your account: ada.typed@example.com")
     assert reply is not None and not reply.ask
     assert "Email: ada.typed@example.com" in reply.text and "Name: Ada Lovelace" in reply.text
 
@@ -439,6 +441,27 @@ async def test_concurrent_approvals_cannot_both_pass_the_limit(conn, members):
     cl, tg = SimpleNamespace(swarm=sw, ai=None), FakeTelegram()
     outcomes = await asyncio.gather(advocate.approve(conn, cl, tg, a, raw_a), advocate.approve(conn, cl, tg, b, raw_b))
     assert sorted(outcomes) == ["error", "ok"] and len(sw.jobs) == 1
+
+
+async def test_a_worker_failure_after_approval_blocks_a_duplicate_notice(conn, members):
+    a, _ = members
+
+    def cleanup_failed(job):
+        raise swarm.SwarmError("restore_failed")  # the email may have gone before clean-up failed
+
+    tg = FakeTelegram()
+    sw = FakeSwarm({"email": cleanup_failed})
+    change_id = watched_change(conn, a)
+    with extraction(email_opt()):
+        raw = secret_of(await advocate.draft_change(conn, agent.Clients(), a, change_id))
+    assert await advocate.approve(conn, SimpleNamespace(swarm=sw, ai=None), tg, a, raw) == "error"
+    assert "can't tell whether" in tg.texts(11)[-1]
+    row = conn.execute("SELECT target, proof_ref FROM action_receipts").fetchone()
+    assert (row["target"], row["proof_ref"]) == ("arbitration-optout@acme.com", "unconfirmed")
+    with extraction(email_opt()):
+        raw = secret_of(await advocate.draft_change(conn, agent.Clients(), a, change_id))
+    assert await advocate.approve(conn, SimpleNamespace(swarm=sw, ai=None), tg, a, raw) == "error"
+    assert len(sw.jobs) == 1 and "already sent an opt-out" in tg.texts(11)[-1]
 
 
 def test_sweep_drops_expired_tokens_and_cache_entries(conn, members):
@@ -792,6 +815,17 @@ async def test_bot_kit_taps(conn, members, monkeypatch):
     assert tg.texts(11)[-1] == advocate.CONTRACT_GONE
 
 
+async def test_redline_kits_are_capped_per_member_per_day(conn, members, monkeypatch):
+    a, _ = members
+    monkeypatch.setattr(advocate.quota, "REDLINE_KITS_PER_DAY", 0)
+    ref = held(a)
+    tg = FakeTelegram()
+    sw = kit_swarm(monkeypatch)
+    assert await advocate.redline_kit(conn, SimpleNamespace(swarm=sw, ai=None), tg, a, ref, "b") == "error"
+    assert "daily limit" in tg.texts(11)[-1] and not tg.documents
+    assert advocate.CONTRACTS.get(a.id, ref) is None  # cleared, not kept around
+
+
 def test_new_tap_data_fits_and_parses():
     raw = "A" * 22
     for data in (taps.build("oa", raw), taps.build("ox", raw), taps.build("od", raw), taps.build("rk", raw),
@@ -827,6 +861,25 @@ async def test_checked_ai_policy_with_an_opt_out_path_offers_a_draft(conn, membe
     reply = advocate.draft_offer(conn, a, data.split(":")[2])
     assert "privacy.acme.com" in reply.text and reply.buttons[0][0][0] == "✅ Approve & Send"
     assert advocate.draft_offer(conn, users.by_id(conn, members[1].id), data.split(":")[2]).buttons is None  # not B's
+
+
+@respx.mock
+async def test_a_user_written_page_explains_the_opt_out_but_never_offers_to_send(conn, members, monkeypatch):
+    a, _ = members
+    _ai_policy_mocks()
+    text = "To opt out of AI training, email optout@github.com with your username."
+
+    async def page(cl, url, **kw):
+        return text
+
+    monkeypatch.setattr(agent, "page_text", page)
+    cl = agent.Clients()
+    opt = OptOut(channel="email", target="optout@github.com", verbatim_instruction=text)
+    with extraction(opt):
+        card = await agent.check_url(cl, "https://github.com/someone/policy/blob/main/AI.md", conn=conn, user=a)
+    await cl.aclose()
+    assert "<b>How to opt out</b>" in card.text
+    assert all(label != "✉️ Review & Draft Opt-Out" for row in card.buttons for label, _ in row)
 
 
 def _ai_policy_mocks():

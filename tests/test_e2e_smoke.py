@@ -338,7 +338,8 @@ async def test_end_to_end_smoke(conn, pages, monkeypatch):
         await tap(A_CHAT, alert, tapped(alert, "v1:oc:"))
     prompt = tg.to(A_CHAT)[-1]
     assert prompt["markup"]["force_reply"] is True and prompt["text"].startswith(advocate.FIELDS_HEAD)
-    await say(A_CHAT, f"Account username: {NOTICE_MARK}", reply_to_text=prompt["text"])
+    assert "Email on your account: " in prompt["text"]  # no linked email: asked, so the company can match it
+    await say(A_CHAT, f"Account username: {NOTICE_MARK}\nEmail on your account: a@member.test", reply_to_text=prompt["text"])
     preview = tg.to(A_CHAT)[-1]
     assert "Email to <b>arbitration-optout@smokeco.test</b>" in preview["text"] and NOTICE_MARK in preview["text"]
     assert NOTICE_SENTENCE in preview["text"] and "Information, not legal advice." in preview["text"]

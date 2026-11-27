@@ -51,6 +51,9 @@ class ClauseMetadata(BaseModel):
     # Benchmarking (app/benchmark.py). Vectors stored before these existed read back with the defaults.
     domain: str = "consumer_tos"
     severity: float = 0.0
+    # What `severity` measures: "clause" is how much the clause itself matters (judge.clause_severity),
+    # the scale benchmarks compare on. Older vectors stored the change's severity and have no scale.
+    scale: str = ""
     favours: str = "neutral"
     has_opt_out: bool = False
     public: bool = True  # only public services' clauses are ever upserted; private uploads are query-only
@@ -90,13 +93,14 @@ async def embed(
 
 async def remember(
     gw: Gateway, clause_id: str, service: str, heading: str, text: str, category: str, *,
-    domain: str = "consumer_tos", severity: float = 0.0, favours: str = "neutral", has_opt_out: bool = False,
+    domain: str = "consumer_tos", severity: float = 0.0, scale: str = "", favours: str = "neutral",
+    has_opt_out: bool = False,
 ) -> None:
     """Index a public service's material clause. Never called for a member's private document."""
     values = await embed(gw, text, "passage")
     meta = ClauseMetadata(
         service=service, heading=heading, category=category, text=text[:METADATA_TEXT_CHARS],
-        domain=domain, severity=severity, favours=favours, has_opt_out=has_opt_out, public=True,
+        domain=domain, severity=severity, scale=scale, favours=favours, has_opt_out=has_opt_out, public=True,
     )
     await gw.post(
         _index_path("vectors/upsert"),
