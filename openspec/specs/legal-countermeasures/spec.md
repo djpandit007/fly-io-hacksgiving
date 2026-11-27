@@ -25,6 +25,14 @@ The system SHALL, when a material terms change or checked document includes an a
 - **WHEN** a checked privacy or AI policy has an AI-training or deletion red flag but states no way to opt out
 - **THEN** the card says no way to opt out could be found in the policy
 
+#### Scenario: Policy published on a page users write
+- **WHEN** the checked policy is on a shared host where users publish content (such as a GitHub repository or a hosted document)
+- **THEN** the card explains how to opt out but offers no dispatch, because the text is not the service's own
+
+#### Scenario: Member has no linked email
+- **WHEN** a member without a linked email drafts an opt-out notice
+- **THEN** the member is asked once for the email on their account with the service, and the notice includes it so the service can match it to the account
+
 ### Requirement: Cryptographically signed single-use human approval before dispatch
 The system SHALL NOT send any outbound opt-out email or submit any external web form without an explicit confirmation tap from the owning member carrying a short-lived, single-use, member-bound signed approval token.
 
@@ -46,6 +54,29 @@ The system SHALL record a minimal metadata receipt when an opt-out or rights not
 #### Scenario: Web-form opt-out executed via Playwright
 - **WHEN** an approved opt-out targets an allowlisted web opt-out portal
 - **THEN** the Advocate Sprite completes the form, captures a confirmation screenshot, returns the screenshot directly to the member in Telegram, and restores its clean state
+
+#### Scenario: Form still shown or rejected after submitting
+- **WHEN** the submitted form is still on the page or shows field errors afterwards
+- **THEN** the receipt is marked unconfirmed and the member is told it may have gone through and to check before sending it again
+
+#### Scenario: Worker fails after the approval is used
+- **WHEN** the Advocate worker fails after an approval token was consumed, so the notice may already have gone out
+- **THEN** an unconfirmed receipt is recorded, the member is told the outcome is unknown, and the same notice is not sent again from Fine Print for 24 hours
+
+### Requirement: Daily limits on counter-measures
+The system SHALL limit counter-measures per day: at most 5 opt-out notices per member, one per member to the same address or form host, 3 to the same address or form host from all members together, and 5 redline kits per member. The opt-out limits SHALL be checked and the receipt written under one lock, so concurrent approvals cannot all pass them.
+
+#### Scenario: Member over a daily opt-out limit
+- **WHEN** an approval would exceed one of the opt-out limits
+- **THEN** the draft is withdrawn, nothing is sent, and the member is told which limit applies
+
+#### Scenario: Two approvals at once
+- **WHEN** two approvals for the same target arrive together with one send left for that target today
+- **THEN** exactly one notice is sent
+
+#### Scenario: Member over the daily redline kit limit
+- **WHEN** a member who has had 5 redline kits today taps a tone
+- **THEN** no Advocate job runs, the held contract is cleared from memory, and the member is told to try tomorrow
 
 ### Requirement: Automated redlined contract and negotiation kit generation
 The system SHALL allow a member checking a personal contract (`residential_lease`, `employment_or_nda`, or `freelance_or_saas`) to request a negotiation kit (`Polite`, `Balanced`, or `Firm`) that produces a tracked-changes `.docx`, an annotated `.pdf`, and a ready-to-send counter-proposal email via the Advocate Sprite, without persisting the uploaded contract after delivery.

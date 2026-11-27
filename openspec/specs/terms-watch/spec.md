@@ -119,6 +119,28 @@ The system SHALL track a Policy Bundle per watched service supporting distinct d
 - **WHEN** discovery finds only a primary terms page for a service
 - **THEN** the service is watched with its `terms` document and operates without error
 
+### Requirement: Version history kept per document
+The system SHALL keep each document's version history separately, treating a stored version as a duplicate only when the same document had the same text at the same time, so that a document returning to earlier wording and two documents with identical text are both recorded.
+
+#### Scenario: A service walks back a change
+- **WHEN** a watched document changes a clause and a later check finds the earlier wording restored
+- **THEN** the restored wording is stored as a new version, judged against the changed wording, and alerted like any other material change
+
+#### Scenario: Two documents with identical text
+- **WHEN** two documents in a service's bundle serve the same text
+- **THEN** each document keeps its own baseline and history
+
+### Requirement: Companion documents looked for again periodically
+The system SHALL look for companion documents again for every watched service at most every 30 days, including services watched before Policy Bundles existed, and SHALL record a document found this way with a live baseline only: no history backfill and no alert about anything before it was found.
+
+#### Scenario: Service watched before Policy Bundles gains its AI Terms
+- **WHEN** the daily run checks a service that has only its terms document and has never had a companion check
+- **THEN** discovered companion documents are attached with a live baseline, no watcher is alerted about them, and later changes to them are alerted as usual
+
+#### Scenario: Companion check not yet due
+- **WHEN** a service's companions were looked for less than 30 days ago
+- **THEN** the daily run checks only the documents already in its bundle
+
 ### Requirement: Cross-document contradiction detection
 The system SHALL compare newly updated sections in a service's Policy Bundle against the other active documents in that same service's bundle and alert watchers when Jev detects a material contradiction between them.
 

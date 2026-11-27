@@ -50,6 +50,25 @@ The system SHALL maintain a clean base checkpoint on the Scout Sprite and SHALL 
 - **WHEN** the Scout finishes parsing a member-submitted PDF and returns structured text to the Gateway
 - **THEN** the Scout restores to its clean base checkpoint before accepting the next job and records the restore duration
 
+#### Scenario: Restore without a completion event
+- **WHEN** a restore request returns an empty, unreadable or unfinished progress stream
+- **THEN** the worker is treated as dirty, the job's result is discarded, and no further job runs on it until a restore reports completion
+
+#### Scenario: Gateway restarts with a dirty worker
+- **WHEN** the Gateway restarts after a failed clean-up, or in the middle of a job
+- **THEN** the worker's dirty state survives the restart and the worker is restored before its next job
+
+#### Scenario: Two jobs for the same worker
+- **WHEN** a second job for a worker arrives while one is running
+- **THEN** it waits until the first job's clean-up has finished
+
+### Requirement: Per-member daily limit on member-triggered Scout crawls
+The system SHALL limit how many Scout crawls each member's own link checks can start per day (10), so one member cannot keep the shared Scout busy; watched-service checks in the daily run are not limited.
+
+#### Scenario: Member over the daily Scout allowance
+- **WHEN** a member who has used today's Scout crawls sends a link whose page can't be read directly
+- **THEN** the check skips the Scout and tries the remaining fallbacks
+
 ### Requirement: Evidentiary page snapshots on the Scout Sprite
 The system SHALL capture a rendered visual screenshot and a cryptographic SHA-256 hash of the extracted text whenever the Scout crawls a JS-rendered or bot-walled legal page, returning metadata so material changes and opt-out actions carry timestamped proof.
 

@@ -13,6 +13,10 @@ The system SHALL index public material clauses and anonymised aggregate benchmar
 - **WHEN** a watched service's policy bundle records a material change
 - **THEN** the clause vector is upserted into Pinecone with its domain, category, severity, favours, and opt-out metadata
 
+#### Scenario: Severity measured on one scale
+- **WHEN** a clause is indexed or benchmarked
+- **THEN** its severity is the clause's own severity (how much the clause matters to the person agreeing), never the severity of the change that introduced it, and benchmarks compare only indexed clauses scored on that same scale
+
 #### Scenario: Personal contract checked
 - **WHEN** a member checks a private lease or employment offer
 - **THEN** its clauses are queried against Pinecone for benchmarking only and are never upserted into the index

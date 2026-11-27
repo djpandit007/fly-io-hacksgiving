@@ -49,3 +49,11 @@ The system SHALL, when resolving a service from a name, domain, or primary terms
 #### Scenario: Companion link points to an unsafe address
 - **WHEN** a discovered companion link resolves to a non-public address
 - **THEN** the link is skipped and never fetched
+
+#### Scenario: Terms page needs a browser
+- **WHEN** a service's terms page can be read only by the Scout, at first watch or at a periodic companion check
+- **THEN** the policy links the Scout saw on that page are considered as companions, ignoring the Scout's own labels and applying the same domain, user-content, path and public-address checks, and links on another site, on user-written pages, or not recognised as policies are dropped
+
+#### Scenario: Link to a page users write on a shared host
+- **WHEN** a link points to a shared host where users publish content (such as a GitHub repository or a hosted document), including through a trailing-dot host name, dot segments, backslashes or encoded separators in its path
+- **THEN** it is treated as user content and never attached as a companion document
