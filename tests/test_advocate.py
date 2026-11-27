@@ -413,7 +413,7 @@ async def test_web_form_opt_out_returns_the_screenshot_to_the_member_only(conn, 
     assert await advocate.approve(conn, SimpleNamespace(swarm=sw, ai=None), tg, a, raw) == "ok"
     kind, job, hosts, detail = sw.jobs[0]
     assert kind == "web_form" and job["url"] == FORM_URL and hosts == job["allow_hosts"]
-    assert hosts == ["privacy.acme.com", "acme.com", "*.acme.com"] and detail == "playwright_form"
+    assert hosts == ["privacy.acme.com", "acme.com"] and detail == "playwright_form"  # exact hosts only
     assert job["fields"] == {"Name": "Ada Lovelace", "Email": "ada@example.com"}
     assert tg.documents[0]["content"] == PNG and tg.documents[0]["mime"] == "image/png"
     receipt = conn.execute("SELECT * FROM action_receipts").fetchone()

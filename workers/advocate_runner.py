@@ -91,19 +91,12 @@ def digest(data: bytes) -> str:
 
 
 def host_allowed(host: str, allow: list[str]) -> bool:
-    """Exact or `*.`-wildcard match. A host with a leading or trailing dot (`acme.test.`) is refused
-    rather than normalised: Chromium would resolve it separately from the pinned `acme.test`."""
+    """Exact match only. A host with a leading or trailing dot (`acme.test.`) is refused rather than
+    normalised: Chromium would resolve it separately from the pinned `acme.test`."""
     host = host.lower()
     if not host or host.startswith(".") or host.endswith("."):
         return False
-    for rule in allow:
-        rule = rule.lower()
-        if rule.startswith("*."):
-            if host.endswith(rule[1:]):
-                return True
-        elif host == rule:
-            return True
-    return False
+    return host in {h.lower() for h in allow}
 
 
 def parse_job(raw: str | bytes) -> dict[str, Any]:
@@ -120,8 +113,8 @@ def parse_job(raw: str | bytes) -> dict[str, Any]:
             raise ValueError("bad address")
     elif kind == "web_form":
         allow = job.get("allow_hosts")
-        if not isinstance(allow, list) or not allow or "*" in allow or not all(isinstance(h, str) and h for h in allow):
-            raise ValueError("job needs explicit allow_hosts")
+        if not isinstance(allow, list) or not allow or not all(isinstance(h, str) and h and "*" not in h for h in allow):
+            raise ValueError("job needs explicit allow_hosts")  # exact hosts only, never wildcards
         url = job.get("url")
         if not isinstance(url, str) or urlparse(url).scheme != "https":
             raise ValueError("form url must be https")
@@ -239,43 +232,43 @@ async def public_addresses(host: str) -> list[str]:
 
 
 def resolver_rules(pins: dict[str, str]) -> str:
-    """Chromium --host-resolver-rules pinning each exact host to the address that was checked."""
+    """Chromium --host-resolver-rules pinning each allowed host to the address that was checked, and
+    making every other name unresolvable."""
     def addr(ip: str) -> str:
         return f"[{ip}]" if ":" in ip else ip
 
-    return ", ".join(f"MAP {host} {addr(ip)}" for host, ip in sorted(pins.items()))
+    return ", ".join([*(f"MAP {host} {addr(ip)}" for host, ip in sorted(pins.items())), "MAP * ~NOTFOUND"])
+
+
+async def pin_hosts(allow: list[str]) -> dict[str, str]:
+    """Each allowed host whose addresses are all public, pinned to its first address. Hosts that don't
+    resolve, or resolve to anything non-public, are left out and so can't be reached at all."""
+    pins: dict[str, str] = {}
+    for host in dict.fromkeys(h.lower() for h in allow):
+        if addresses := await public_addresses(host):
+            pins[host] = addresses[0]
+    return pins
 
 
 async def submit_form(job: dict[str, Any]) -> dict[str, Any]:
     from playwright.async_api import async_playwright  # only on the Advocate Sprite
 
-    allow: list[str] = job["allow_hosts"]
-    # DNS rebinding defence, as in the Scout: exact allowed hosts are resolved, checked and pinned
-    # before launch; wildcard sub-domains are checked on first use; the Sprite's network policy (DNS
-    # allowlist, private ranges blocked by the platform) stops a later answer that points inside.
-    checked: dict[str, bool] = {}
-    pins: dict[str, str] = {}
-    for host in (h.lower() for h in allow if not h.startswith("*.")):
-        addresses = await public_addresses(host)
-        checked[host] = bool(addresses)
-        if addresses:
-            pins[host] = addresses[0]
-    if not pins:
+    # DNS rebinding defence, as in the Scout: every allowed host (exact names only) is resolved and
+    # checked once, here, and Chromium is pinned to those addresses with every other name
+    # unresolvable. The Sprite's network policy (DNS allowlist; private ranges blocked by the
+    # platform) is the outer fence.
+    pins = await pin_hosts(job["allow_hosts"])
+    if (urlparse(job["url"]).hostname or "").lower() not in pins:
         return {"ok": False, "error": "no_public_address"}
+    allow = list(pins)
 
     async def guard(route, request) -> None:
         parts = urlparse(request.url)
         if parts.scheme in ("data", "blob"):
             await route.continue_()
             return
-        host = (parts.hostname or "").lower()
-        if parts.scheme not in ("http", "https") or not host_allowed(host, allow):
+        if parts.scheme not in ("http", "https") or not host_allowed(parts.hostname or "", allow):
             await route.abort("blockedbyclient")
-            return
-        if host not in checked:
-            checked[host] = bool(await public_addresses(host))
-        if not checked[host]:
-            await route.abort("addressunreachable")
             return
         await route.continue_()
 

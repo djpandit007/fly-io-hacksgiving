@@ -11,7 +11,7 @@ import pytest
 from app import swarm
 from workers import scout_runner as sr
 
-ALLOW = ["www.notion.so", "notion.so", "*.notion.so"]
+ALLOW = ["www.notion.so", "notion.so"]
 
 
 def test_runner_imports_without_playwright():
@@ -49,10 +49,13 @@ def test_policy_links_are_classified_and_kept_on_the_locked_site():
     ]
 
 
-def test_host_allowed_matches_exact_and_subdomain_rules():
-    assert sr.host_allowed("notion.so", ALLOW) and sr.host_allowed("cdn.notion.so", ALLOW)
+def test_host_allowed_is_exact_while_link_reporting_accepts_subdomains():
+    assert sr.host_allowed("notion.so", ALLOW) and not sr.host_allowed("cdn.notion.so", ALLOW)
     assert not sr.host_allowed("evilnotion.so", ALLOW) and not sr.host_allowed("notion.so.evil.com", ALLOW)
-    assert sr.host_allowed("x.notion.so", ALLOW) == swarm.host_allowed("x.notion.so", ALLOW)
+    for host in ("notion.so", "cdn.notion.so", "x.notion.so"):
+        assert sr.host_allowed(host, ALLOW) == swarm.host_allowed(host, ALLOW)
+    assert sr.on_site("help.notion.so", ALLOW) and not sr.on_site("evilnotion.so", ALLOW)
+    assert not sr.on_site("notion.so.evil.com", ALLOW) and not sr.on_site("help.notion.so.", ALLOW)
 
 
 def test_parse_job_requires_an_explicit_lock():
@@ -94,16 +97,23 @@ def test_main_turns_crawl_errors_into_labels(monkeypatch, capsys):
     assert "secret-path" not in base64.b64decode(out.split(swarm.RESULT_START)[1].split(swarm.RESULT_END)[0]).decode()
 
 
-def test_dotted_hosts_are_refused_not_normalised():
-    allow = ["notion.so", "*.notion.so"]
-    assert sr.host_allowed("notion.so", allow) and sr.host_allowed("www.notion.so", allow)
-    for host in ("notion.so.", "www.notion.so.", ".notion.so", ""):
+def test_only_exact_hosts_are_allowed_and_dotted_hosts_are_refused():
+    allow = ["notion.so", "www.notion.so"]
+    assert sr.host_allowed("notion.so", allow) and sr.host_allowed("WWW.notion.so", allow)
+    for host in ("cdn.notion.so", "notion.so.", "www.notion.so.", ".notion.so", ""):
         assert not sr.host_allowed(host, allow), host
 
 
-def test_resolver_rules_pin_each_host_to_its_checked_address():
+def test_wildcard_allow_hosts_are_rejected():
+    for allow in (["*.notion.so"], ["notion.so", "*.notion.so"], ["*"]):
+        with pytest.raises(ValueError):
+            sr.parse_job(json.dumps({"url": "https://notion.so/terms", "allow_hosts": allow}))
+
+
+def test_resolver_rules_pin_each_host_and_refuse_every_other_name():
     rules = sr.resolver_rules({"notion.so": "203.0.113.7", "www.notion.so": "2001:db8::1"})
-    assert rules == "MAP notion.so 203.0.113.7, MAP www.notion.so [2001:db8::1]"
+    assert rules == "MAP notion.so 203.0.113.7, MAP www.notion.so [2001:db8::1], MAP * ~NOTFOUND"
+    assert sr.resolver_rules({}) == "MAP * ~NOTFOUND"
 
 
 async def test_public_addresses_refuse_any_private_answer(monkeypatch):
@@ -125,4 +135,7 @@ async def test_public_addresses_refuse_any_private_answer(monkeypatch):
     assert await sr.public_addresses("mixed.test") == []
     assert await sr.public_addresses("docs.test") == []
     assert await sr.public_addresses("loop.test") == []
-    assert await sr.public_addresses("missing.test") == [] and not await sr.is_public("missing.test")
+    assert await sr.public_addresses("missing.test") == []
+    # Only hosts whose every address is public are pinned; the rest can't be reached at all.
+    allow = ["public.test", "mixed.test", "loop.test", "missing.test", "PUBLIC.test"]
+    assert await sr.pin_hosts(allow) == {"public.test": "1.1.1.1"}

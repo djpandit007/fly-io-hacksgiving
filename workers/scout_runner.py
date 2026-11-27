@@ -3,8 +3,7 @@
 
 Run by the Gateway through the Sprites exec API. Reads a JSON job on stdin::
 
-    {"url": "https://www.notion.so/terms", "allow_hosts": ["www.notion.so", "notion.so", "*.notion.so"],
-     "screenshot": true}
+    {"url": "https://www.notion.so/terms", "allow_hosts": ["www.notion.so", "notion.so"], "screenshot": true}
 
 and prints one result, base64-encoded JSON between ``<<FP-RESULT>>`` and ``<<FP-END>>``::
 
@@ -82,19 +81,21 @@ def digest(text: str) -> str:
 
 
 def host_allowed(host: str, allow: list[str]) -> bool:
-    """Exact or `*.`-wildcard match. A host with a leading or trailing dot (`notion.so.`) is refused
-    rather than normalised: Chromium would resolve it separately from the pinned `notion.so`."""
+    """Exact match only. A host with a leading or trailing dot (`notion.so.`) is refused rather than
+    normalised: Chromium would resolve it separately from the pinned `notion.so`."""
     host = host.lower()
     if not host or host.startswith(".") or host.endswith("."):
         return False
-    for rule in allow:
-        rule = rule.lower()
-        if rule.startswith("*."):
-            if host.endswith(rule[1:]):
-                return True
-        elif host == rule:
-            return True
-    return False
+    return host in {h.lower() for h in allow}
+
+
+def on_site(host: str, allow: list[str]) -> bool:
+    """For *reporting* links only (never for fetching): the host is an allowed host or a sub-domain of
+    one. The Gateway vets a reported link again, and any later fetch gets its own exact-host lock."""
+    host = host.lower()
+    if not host or host.startswith(".") or host.endswith("."):
+        return False
+    return any(host == h or host.endswith("." + h) for h in (a.lower() for a in allow))
 
 
 def classify_link(text: str, url: str) -> str | None:
@@ -117,7 +118,7 @@ def extract_policy_links(anchors: list[dict[str, str]], base_url: str, allow: li
             continue
         url = urldefrag(urljoin(base_url, href))[0]
         parts = urlparse(url)
-        if parts.scheme not in ("http", "https") or not host_allowed(parts.hostname or "", allow) or url in seen:
+        if parts.scheme not in ("http", "https") or not on_site(parts.hostname or "", allow) or url in seen:
             continue
         text = " ".join((a.get("text") or "").split())[:120]
         if role := classify_link(text, url):
@@ -133,8 +134,8 @@ def parse_job(raw: str | bytes) -> dict[str, Any]:
     if not isinstance(job, dict) or not isinstance(job.get("url"), str):
         raise TypeError("job needs a url")
     allow = job.get("allow_hosts")
-    if not isinstance(allow, list) or not allow or not all(isinstance(h, str) and h for h in allow) or "*" in allow:
-        raise ValueError("job needs explicit allow_hosts")
+    if not isinstance(allow, list) or not allow or not all(isinstance(h, str) and h and "*" not in h for h in allow):
+        raise ValueError("job needs explicit allow_hosts")  # exact hosts only, never wildcards
     if urlparse(job["url"]).scheme not in ("http", "https"):
         raise ValueError("scheme not allowed")
     if not host_allowed(urlparse(job["url"]).hostname or "", allow):
@@ -164,17 +165,24 @@ async def public_addresses(host: str) -> list[str]:
     return [str(ip) for ip in dict.fromkeys(ips)]
 
 
-async def is_public(host: str) -> bool:
-    return bool(await public_addresses(host))
-
-
 def resolver_rules(pins: dict[str, str]) -> str:
-    """Chromium --host-resolver-rules pinning each exact host to the address that was checked, so a
-    second DNS answer (rebinding) can't send the browser somewhere else."""
+    """Chromium --host-resolver-rules pinning each allowed host to the address that was checked, and
+    making every other name unresolvable, so a second DNS answer (rebinding) or an unlisted host can't
+    send the browser anywhere else."""
     def addr(ip: str) -> str:
         return f"[{ip}]" if ":" in ip else ip
 
-    return ", ".join(f"MAP {host} {addr(ip)}" for host, ip in sorted(pins.items()))
+    return ", ".join([*(f"MAP {host} {addr(ip)}" for host, ip in sorted(pins.items())), "MAP * ~NOTFOUND"])
+
+
+async def pin_hosts(allow: list[str]) -> dict[str, str]:
+    """Each allowed host whose addresses are all public, pinned to its first address. Hosts that don't
+    resolve, or resolve to anything non-public, are left out and so can't be reached at all."""
+    pins: dict[str, str] = {}
+    for host in dict.fromkeys(h.lower() for h in allow):
+        if addresses := await public_addresses(host):
+            pins[host] = addresses[0]
+    return pins
 
 
 # --- Browser ---------------------------------------------------------------------------------------
@@ -183,18 +191,12 @@ async def crawl(job: dict[str, Any]) -> dict[str, Any]:
     from playwright.async_api import async_playwright  # only on the Scout Sprite
 
     allow: list[str] = job["allow_hosts"]
-    checked: dict[str, bool] = {}
-    # DNS rebinding defence, in layers: exact allowed hosts are resolved and checked once here and
-    # Chromium is pinned to those addresses; wildcard sub-domains are checked on first use in `guard`,
-    # and the Sprite's network policy (DNS allowlist, private ranges always blocked by the platform)
-    # stops a later answer that points inside.
-    pins: dict[str, str] = {}
-    for host in (h.lower() for h in allow if not h.startswith("*.")):
-        addresses = await public_addresses(host)
-        checked[host] = bool(addresses)
-        if addresses:
-            pins[host] = addresses[0]
-    launch_args = [f"--host-resolver-rules={resolver_rules(pins)}"] if pins else []
+    # DNS rebinding defence: every allowed host (exact names only) is resolved and checked once, here,
+    # and Chromium is pinned to those addresses with every other name unresolvable. The Sprite's
+    # network policy (DNS allowlist; private ranges blocked by the platform) is the outer fence.
+    pins = await pin_hosts(allow)
+    if (urlparse(job["url"]).hostname or "").lower() not in pins:
+        return {"ok": False, "error": "no_public_address"}
 
     async def guard(route, request) -> None:
         parts = urlparse(request.url)
@@ -202,18 +204,13 @@ async def crawl(job: dict[str, Any]) -> dict[str, Any]:
             await route.continue_()
             return
         host = (parts.hostname or "").lower()
-        if parts.scheme not in ("http", "https") or not host_allowed(host, allow):
+        if parts.scheme not in ("http", "https") or not host_allowed(host, list(pins)):
             await route.abort("blockedbyclient")
-            return
-        if host not in checked:
-            checked[host] = await is_public(host)
-        if not checked[host]:
-            await route.abort("addressunreachable")
             return
         await route.continue_()
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True, args=launch_args)
+        browser = await pw.chromium.launch(headless=True, args=[f"--host-resolver-rules={resolver_rules(pins)}"])
         try:
             context = await browser.new_context(
                 user_agent=USER_AGENT, accept_downloads=False, java_script_enabled=True,

@@ -149,13 +149,14 @@ def registrable(host: str) -> str:
 
 
 def egress_hosts(url: str, extra: Sequence[str] = ()) -> list[str]:
-    """The DNS allowlist for one crawl: the target host, its registrable site and that site's
-    sub-domains, plus at most MAX_EXTRA_HOSTS explicit extra hosts (never wildcards)."""
+    """The DNS allowlist for one job: exactly the target host and its registrable site, plus at most
+    MAX_EXTRA_HOSTS explicit extra hosts. Never wildcards: every host must be one the worker can
+    resolve, check and pin before it starts."""
     host = (urlparse(url).hostname or "").lower().strip(".")
     if not _HOST.fullmatch(host):
         raise BlockedURL("target is not a domain name")
     site = registrable(host)
-    hosts = [host, site, f"*.{site}"]
+    hosts = [host, site]
     extras = [h.lower().strip(".") for h in extra]
     if len(extras) > MAX_EXTRA_HOSTS or not all(_HOST.fullmatch(h) for h in extras):
         raise ValueError("too many or invalid extra hosts")
@@ -163,11 +164,9 @@ def egress_hosts(url: str, extra: Sequence[str] = ()) -> list[str]:
 
 
 def lock_rules(hosts: Sequence[str]) -> NetworkPolicy:
-    """Allow exactly these hosts and refuse every other lookup."""
+    """Allow exactly these hosts (no wildcards) and refuse every other lookup."""
     for h in hosts:
-        if h in ("*", "") or (h.startswith("*") and not _HOST.fullmatch(h[2:])) or (
-            not h.startswith("*") and not _HOST.fullmatch(h)
-        ):
+        if not _HOST.fullmatch(h):
             raise ValueError("invalid egress host")
     return NetworkPolicy(
         rules=[NetworkRule(action="allow", domain=h) for h in hosts] + [NetworkRule(action="deny", domain="*")]
@@ -420,14 +419,11 @@ class Swarm:
 
 
 def host_allowed(host: str, allow: Sequence[str]) -> bool:
-    host = host.lower().strip(".")
-    for rule in allow:
-        if rule.startswith("*."):
-            if host.endswith(rule[1:]):
-                return True
-        elif host == rule:
-            return True
-    return False
+    """Exact match only; a dotted or empty host is refused rather than normalised."""
+    host = host.lower()
+    if not host or host.startswith(".") or host.endswith("."):
+        return False
+    return host in {h.lower() for h in allow}
 
 
 # --- Evidence -------------------------------------------------------------------------------------

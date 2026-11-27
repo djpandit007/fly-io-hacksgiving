@@ -15,7 +15,7 @@ from app import swarm
 from workers import advocate_runner as ar
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-ALLOW = ["optout.acme.test", "acme.test", "*.acme.test"]
+ALLOW = ["optout.acme.test", "acme.test"]
 LEASE = (
     "# Residential Lease\n\n"
     "1. Rent. Rent is due on the first day of each month.\n\n"
@@ -206,11 +206,15 @@ def test_model_replies_are_parsed_as_json(monkeypatch):
     assert out["ok"] and out["items"][0]["replacement"] == "r" and out["email"]["body"] == "b"
 
 
-def test_dotted_form_hosts_are_refused_not_normalised():
-    allow = ["acme.test", "*.acme.test"]
+def test_form_hosts_are_exact_and_dotted_hosts_are_refused():
+    allow = ["acme.test", "privacy.acme.test"]
     assert ar.host_allowed("acme.test", allow) and ar.host_allowed("privacy.acme.test", allow)
-    for host in ("acme.test.", "privacy.acme.test.", ".acme.test", ""):
+    for host in ("cdn.acme.test", "acme.test.", "privacy.acme.test.", ".acme.test", ""):
         assert not ar.host_allowed(host, allow), host
+    for bad in (["*.acme.test"], ["acme.test", "*.acme.test"], ["*"]):
+        job = {"kind": "web_form", "url": "https://acme.test/form", "allow_hosts": bad, "fields": {}}
+        with pytest.raises(ValueError):
+            ar.parse_job(json.dumps(job))
 
 
 async def test_form_hosts_must_resolve_only_to_public_addresses(monkeypatch):
@@ -225,4 +229,5 @@ async def test_form_hosts_must_resolve_only_to_public_addresses(monkeypatch):
     monkeypatch.setattr(ar.asyncio, "get_running_loop", lambda: Loop())
     assert await ar.public_addresses("public.test") == ["1.1.1.1"]
     assert await ar.public_addresses("mixed.test") == [] and await ar.public_addresses("nope.test") == []
-    assert ar.resolver_rules({"acme.test": "1.1.1.1"}) == "MAP acme.test 1.1.1.1"
+    assert ar.resolver_rules({"acme.test": "1.1.1.1"}) == "MAP acme.test 1.1.1.1, MAP * ~NOTFOUND"
+    assert await ar.pin_hosts(["public.test", "mixed.test", "nope.test"]) == {"public.test": "1.1.1.1"}

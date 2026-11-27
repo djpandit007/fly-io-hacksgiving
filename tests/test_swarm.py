@@ -68,22 +68,23 @@ def public_dns(monkeypatch):
 # --- Egress policy ---------------------------------------------------------------------------------
 
 def test_egress_hosts_are_the_target_site_plus_capped_extras():
-    assert swarm.egress_hosts("https://www.notion.so/terms") == ["www.notion.so", "notion.so", "*.notion.so"]
+    assert swarm.egress_hosts("https://www.notion.so/terms") == ["www.notion.so", "notion.so"]  # exact hosts only
     assert swarm.egress_hosts("https://a.b.bbc.co.uk/x", ["cdn.example.net"])[-1] == "cdn.example.net"
     with pytest.raises(ValueError):
         swarm.egress_hosts("https://notion.so/", ["a.com", "b.com", "c.com", "d.com"])
-    with pytest.raises(ValueError):
-        swarm.egress_hosts("https://notion.so/", ["*"])
+    for wildcard in ("*", "*.notion.so"):
+        with pytest.raises(ValueError):
+            swarm.egress_hosts("https://notion.so/", [wildcard])
     with pytest.raises(swarm.BlockedURL):
         swarm.egress_hosts("https://127.0.0.1/terms")
 
 
 def test_lock_rules_end_in_deny_all_and_refuse_wildcards():
-    rules = swarm.lock_rules(["notion.so", "*.notion.so"]).model_dump()["rules"]
+    rules = swarm.lock_rules(["notion.so", "www.notion.so"]).model_dump()["rules"]
     assert rules[-1] == {"action": "deny", "domain": "*"}
-    assert [r["domain"] for r in rules if r["action"] == "allow"] == ["notion.so", "*.notion.so"]
+    assert [r["domain"] for r in rules if r["action"] == "allow"] == ["notion.so", "www.notion.so"]
     assert swarm.lock_rules([]).model_dump()["rules"] == [{"action": "deny", "domain": "*"}]  # never empty
-    for bad in ("*", "*.com.", "evil host"):
+    for bad in ("*", "*.notion.so", "*.com.", "evil host"):
         with pytest.raises(ValueError):
             swarm.lock_rules([bad])
 
