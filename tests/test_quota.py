@@ -28,7 +28,7 @@ async def test_a_member_over_the_scout_allowance_gets_no_crawl(conn, monkeypatch
     async def fetch(url):
         return "text/html", "<p>bot wall</p>"  # too little text: the Scout would be next
 
-    async def scout(cl, url, public=None):
+    async def scout(cl, url, public=None, links=None):
         crawls.append(url)
         return ""
 

@@ -78,7 +78,7 @@ def now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Version 2: members, per-member watchlists and deadlines, email dedupe, replayable verdicts.
 V2_MIGRATION = """
@@ -274,7 +274,37 @@ CREATE TABLE swarm_events (
 CREATE INDEX swarm_events_at ON swarm_events(at)
 """
 
-MIGRATIONS = {2: V2_MIGRATION, 3: V3_MIGRATION, 4: V4_MIGRATION, 5: V5_MIGRATION, 6: V6_MIGRATION}
+# Version 7: snapshots are unique per document, not per service. The v1 UNIQUE (service_id, sha) dropped a
+# document's return to earlier wording (a walked-back clause was never stored or alerted, and the next
+# change was diffed against stale text) and the second of two documents with identical text. Rows from
+# before v6 (no document) are given their service's terms document, then the table is rebuilt (SQLite
+# can't drop a constraint); _migrate turns foreign keys off around a rebuild and checks them before commit.
+V7_MIGRATION = """
+UPDATE snapshots SET document_id = (
+    SELECT d.id FROM service_documents d WHERE d.service_id = snapshots.service_id AND d.role = 'terms'
+) WHERE document_id IS NULL;
+CREATE TABLE snapshots_v7 (
+    id            INTEGER PRIMARY KEY,
+    service_id    INTEGER NOT NULL REFERENCES services(id),
+    taken_at      TEXT NOT NULL,                  -- when the text was in force
+    origin        TEXT NOT NULL,                  -- live | ota | wayback
+    sha           TEXT NOT NULL,
+    text          TEXT NOT NULL,
+    document_id   INTEGER REFERENCES service_documents(id),
+    evidence_path TEXT,
+    UNIQUE (document_id, taken_at, sha)
+);
+INSERT INTO snapshots_v7 (id, service_id, taken_at, origin, sha, text, document_id, evidence_path)
+    SELECT id, service_id, taken_at, origin, sha, text, document_id, evidence_path FROM snapshots;
+DROP TABLE snapshots;
+ALTER TABLE snapshots_v7 RENAME TO snapshots;
+CREATE INDEX snapshots_document_taken ON snapshots(document_id, taken_at)
+"""
+
+MIGRATIONS = {
+    2: V2_MIGRATION, 3: V3_MIGRATION, 4: V4_MIGRATION, 5: V5_MIGRATION, 6: V6_MIGRATION, 7: V7_MIGRATION,
+}
+REBUILDS = frozenset({7})  # migrations that rebuild a table other tables reference
 
 DOC_ROLES = ("terms", "privacy", "ai_terms", "billing", "dpa")
 DocRole = Literal["terms", "privacy", "ai_terms", "billing", "dpa"]
@@ -303,10 +333,21 @@ def _migrate(conn: sqlite3.Connection, path: Path) -> None:
     for target in range(max(version, 1) + 1, SCHEMA_VERSION + 1):
         # executescript commits first, so run the statements one by one inside our own transaction.
         statements = [s.strip() for s in MIGRATIONS[target].split(";\n") if s.strip()]
-        with transaction(conn):
-            for stmt in statements:
-                conn.execute(stmt)
-            conn.execute(f"PRAGMA user_version = {target}")
+        rebuild = target in REBUILDS
+        if rebuild:
+            # SQLite's table-rebuild procedure: foreign keys off (it can't change inside a transaction),
+            # so dropping the old table neither fails nor cascades; every reference is checked before commit.
+            conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            with transaction(conn):
+                for stmt in statements:
+                    conn.execute(stmt)
+                if rebuild and conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                    raise sqlite3.IntegrityError(f"migration {target} left a broken reference")
+                conn.execute(f"PRAGMA user_version = {target}")
+        finally:
+            if rebuild:
+                conn.execute("PRAGMA foreign_keys = ON")
 
 
 def connect(path: Path) -> sqlite3.Connection:

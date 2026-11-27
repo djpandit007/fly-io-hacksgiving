@@ -55,9 +55,11 @@ from app.db import (
     ServiceDocument,
     Snapshot,
     User,
+    get_kv,
     now,
     one,
     rows,
+    set_kv,
 )
 from app.gateway import Gateway, Recorder
 from app.history import backfill
@@ -388,9 +390,10 @@ async def record_version(
     """Store a version of one document of a service's bundle (the terms by default); judge what
     changed once; return the material changes.
 
-    Each document is compared only with its own earlier versions. Snapshots keep the v1
-    UNIQUE (service_id, sha), so a version whose text is identical to any stored version of the same
-    service (another document's included) is not stored again and yields no changes.
+    Each document is compared only with its own latest version at `taken_at`. Since v7 snapshots are
+    unique per (document, time, text): a return to earlier wording is stored and diffed like any other
+    change, two documents may hold identical text, and only re-recording the same version at the same
+    time (a repeated backfill) is ignored.
     """
     doc = doc or documents_for(conn, svc)[0]
     scope, args = _doc_scope(doc)
@@ -551,10 +554,13 @@ def past_material_changes(conn: sqlite3.Connection, service_id: int, days: int =
     return [c for c in found if _is_material(c)]
 
 
-async def scout_text(cl: Clients, url: str, public: swarm.PublicPage | None = None) -> str:
+async def scout_text(
+    cl: Clients, url: str, public: swarm.PublicPage | None = None, links: list[tuple[str, str]] | None = None,
+) -> str:
     """The page rendered by the Scout Sprite (headless browser under a DNS lock), or "" when the
     Scout is not configured or fails. Only a public service page (`public`) keeps its evidentiary
-    screenshot; a private check asks for none and keeps nothing."""
+    screenshot; a private check asks for none and keeps nothing. When `links` is given, the policy
+    links the Scout saw are added to it as (url, text): untrusted, for `discover.companions_from_links`."""
     sw = getattr(cl, "swarm", None)
     if sw is None or not sw.available("scout"):
         return ""
@@ -573,11 +579,14 @@ async def scout_text(cl: Clients, url: str, public: swarm.PublicPage | None = No
             swarm.save_evidence(public, sha(text), result.screenshot_png_b64)
         except OSError as exc:
             log.warning("evidence not saved: %s", type(exc).__name__)
+    if links is not None:
+        links.extend((link.url, link.text) for link in result.links)
     return text
 
 
 async def page_text(
     cl: Clients, url: str, *, public: swarm.PublicPage | None = None, may_scout: Callable[[], bool] | None = None,
+    links: list[tuple[str, str]] | None = None,
 ) -> str:
     """A terms page as normalised text.
 
@@ -587,7 +596,8 @@ async def page_text(
     handed to a fallback. Pass `public` only for a watched service's own page: its Scout screenshot is
     kept as evidence under `<service_id>/<doc_role>/<sha>.png`; member checks keep nothing.
     `may_scout`, when given, is asked just before a Scout crawl (a member's daily allowance); False
-    skips the Scout and goes on to the other fallbacks.
+    skips the Scout and goes on to the other fallbacks. `links`, when given, collects the policy links a
+    Scout crawl saw (see `scout_text`).
     """
     text, is_pdf, error = "", False, None
     try:
@@ -604,7 +614,7 @@ async def page_text(
         log.info("direct fetch of %s failed (%s); trying fallbacks", url, type(exc).__name__)
 
     if not is_pdf and (may_scout is None or may_scout()):
-        candidate = await scout_text(cl, url, public)
+        candidate = await scout_text(cl, url, public, links)
         if len(candidate) >= MIN_HTML_CHARS:
             return candidate
         text = max(text, candidate, key=len)
@@ -640,16 +650,23 @@ async def check_bundle(conn: sqlite3.Connection, cl: Clients, svc: Service) -> B
     async with locks.hold(f"service:{svc.id}"):
         taken = datetime.now(UTC)
         changes: list[Change] = []
+        due = companions_due(conn, svc, taken)
+        links: list[tuple[str, str]] = []
         for doc in documents_for(conn, svc):
             url = svc.terms_url if doc.role == "terms" else doc.url
             try:
-                text = await page_text(cl, url, public=swarm.PublicPage(service_id=svc.id, doc_role=doc.role))
+                text = await page_text(
+                    cl, url, public=swarm.PublicPage(service_id=svc.id, doc_role=doc.role),
+                    links=links if due and doc.role == "terms" else None,
+                )
             except Exception as exc:
                 if doc.role == "terms":
                     raise
                 log.warning("check of %s's %s failed: %s", svc.name, doc.role, type(exc).__name__)
                 continue
             changes += await record_version(conn, cl, svc, text, taken, "live", doc)
+        if due:
+            await refresh_companions(conn, cl, svc, links, taken)
         found = await find_contradictions(conn, cl, svc, changes)
     return BundleCheck(changes=changes, contradictions=found)
 
@@ -827,7 +844,10 @@ async def _discover_companions(conn: sqlite3.Connection, svc: Service) -> None:
         log.warning("companion discovery failed for %s: %s", svc.name, type(exc).__name__)
 
 
-async def _onboard_document(conn: sqlite3.Connection, cl: Clients, svc: Service, doc: ServiceDocument) -> None:
+async def _onboard_document(
+    conn: sqlite3.Connection, cl: Clients, svc: Service, doc: ServiceDocument,
+    links: list[tuple[str, str]] | None = None,
+) -> None:
     """Backfill a year of one document's history, then take its live version."""
     if doc.role == "terms":
         url, versions = svc.terms_url, await backfill(svc.name, svc.terms_url)
@@ -836,19 +856,73 @@ async def _onboard_document(conn: sqlite3.Connection, cl: Clients, svc: Service,
     for version in versions:
         await record_version(conn, cl, svc, version.text, version.taken_at, version.origin, doc)
     try:
-        text = await page_text(cl, url, public=swarm.PublicPage(service_id=svc.id, doc_role=doc.role))
+        text = await page_text(cl, url, public=swarm.PublicPage(service_id=svc.id, doc_role=doc.role), links=links)
         await record_version(conn, cl, svc, text, datetime.now(UTC), "live", doc)
     except Exception as exc:  # noqa: BLE001
         log.warning("live fetch failed for %s (%s): %s", svc.name, doc.role, exc)
 
 
+async def _companions_from_scout(conn: sqlite3.Connection, svc: Service, links: list[tuple[str, str]]) -> None:
+    """Attach companion documents among the links the Scout saw on the terms page (pages that need a
+    browser), after the Gateway's own checks. Roles found by plain discovery are kept as they are."""
+    if not links:
+        return
+    try:
+        add_documents(conn, svc, await discover.companions_from_links(links, svc.terms_url))
+    except Exception as exc:  # noqa: BLE001 — the terms alone are still worth watching
+        log.warning("scout companion links failed for %s: %s", svc.name, type(exc).__name__)
+
+
+# Companion documents are looked for again on this cadence, so services watched before Policy Bundles
+# (and services that publish a new policy later) gain them. A late find is baselined live only: no
+# backfill and no alert for anything before it was found.
+REDISCOVER_EVERY = timedelta(days=30)
+
+
+def _companions_key(svc: Service) -> str:
+    return f"companions_checked:{svc.id}"
+
+
+def companions_due(conn: sqlite3.Connection, svc: Service, at: datetime | None = None) -> bool:
+    last = get_kv(conn, _companions_key(svc))
+    return last is None or (at or datetime.now(UTC)) - datetime.fromisoformat(last) >= REDISCOVER_EVERY
+
+
+def _companions_checked(conn: sqlite3.Connection, svc: Service, at: datetime | None = None) -> None:
+    set_kv(conn, _companions_key(svc), (at or datetime.now(UTC)).isoformat(timespec="seconds"))
+
+
+async def refresh_companions(
+    conn: sqlite3.Connection, cl: Clients, svc: Service, links: list[tuple[str, str]], taken: datetime,
+) -> None:
+    """The periodic companion check: plain discovery plus the Scout's links from this check's terms
+    crawl; each newly found document gets a live baseline only (no history, so no alerts)."""
+    _companions_checked(conn, svc, taken)  # once per period, even if this check fails
+    known = {d.id for d in documents_for(conn, svc)}
+    await _discover_companions(conn, svc)
+    await _companions_from_scout(conn, svc, links)
+    for doc in documents_for(conn, svc):
+        if doc.id in known:
+            continue
+        try:
+            text = await page_text(cl, doc.url, public=swarm.PublicPage(service_id=svc.id, doc_role=doc.role))
+            await record_version(conn, cl, svc, text, taken, "live", doc)  # the first version: a baseline
+        except Exception as exc:  # noqa: BLE001 — tried again on the next daily check
+            log.warning("baseline of %s's new %s failed: %s", svc.name, doc.role, type(exc).__name__)
+
+
 async def onboard_service(conn: sqlite3.Connection, cl: Clients, svc: Service) -> None:
     """Once per service: find its Policy Bundle, then for each document backfill a year of history and
-    take the live version; finally fetch the community grade."""
+    take the live version; finally fetch the community grade. The terms go first, so companion links
+    the Scout sees on a page that needs a browser join the bundle before it is onboarded."""
     await _discover_companions(conn, svc)
+    links: list[tuple[str, str]] = []
+    terms = documents_for(conn, svc)[0]
+    await _onboard_document(conn, cl, svc, terms, links)
+    await _companions_from_scout(conn, svc, links)
+    _companions_checked(conn, svc)
     for doc in documents_for(conn, svc):
         if doc.role == "terms":
-            await _onboard_document(conn, cl, svc, doc)
             continue
         try:  # a companion that can't be read (bad archive reply, judge error) never blocks the watch
             await _onboard_document(conn, cl, svc, doc)

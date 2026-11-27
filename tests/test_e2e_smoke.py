@@ -176,7 +176,7 @@ def pages(monkeypatch):
     """Live pages by URL (tests edit them between checks); no archive history; no community grade."""
     live = {TERMS_URL: TERMS, AI_URL: AI_OLD, OTHER_URL: OTHER_TERMS}
 
-    async def page_text(cl, url, public=None):
+    async def page_text(cl, url, public=None, **kw):
         return live[url]
 
     async def backfill(name, url, days=365, document="Terms of Service"):

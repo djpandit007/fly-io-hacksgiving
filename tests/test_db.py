@@ -133,7 +133,7 @@ def test_v5_database_gains_policy_bundles_and_keeps_its_data(tmp_path):
     path = tmp_path / "fineprint.db"
     make_v5(path)
     conn = db.connect(path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     assert db.backup_path(path, 5).exists()
     assert db.backup_path(path, 5).name == "fineprint.db.v5.bak"
     docs = db.rows(db.ServiceDocument, conn.execute("SELECT * FROM service_documents ORDER BY service_id"))
@@ -143,13 +143,33 @@ def test_v5_database_gains_policy_bundles_and_keeps_its_data(tmp_path):
     ]
     assert docs[0].label == "Terms"
     [snap] = db.rows(db.Snapshot, conn.execute("SELECT * FROM snapshots"))
-    assert snap.document_id is None and snap.evidence_path is None
+    assert snap.document_id == docs[0].id and snap.evidence_path is None  # v7: given its terms document
     assert "document_id" in {r["name"] for r in conn.execute("PRAGMA table_info(changes)")}
     [user] = db.rows(db.User, conn.execute("SELECT * FROM users"))
     assert user.jurisdiction is None and user.chat_id == 7
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {"document_contradictions", "approval_tokens", "action_receipts", "swarm_events"} <= tables
     assert "dashboard_sessions" not in tables
+    conn.close()
+
+
+def test_v7_snapshots_are_unique_per_document_and_keep_references(tmp_path):
+    path = tmp_path / "fineprint.db"
+    make_v5(path)
+    conn = db.connect(path)
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1  # back on after the rebuild
+    assert conn.execute("PRAGMA foreign_key_check").fetchone() is None
+    snap = conn.execute("SELECT * FROM snapshots").fetchone()
+    terms = snap["document_id"]
+    conn.execute("INSERT INTO service_documents (service_id, role, url, added_at) VALUES (?, 'privacy', 'https://acme.test/p', ?)",
+                 (snap["service_id"], db.now()))
+    privacy = conn.execute("SELECT id FROM service_documents WHERE role = 'privacy'").fetchone()[0]
+    insert = "INSERT OR IGNORE INTO snapshots (service_id, taken_at, origin, sha, text, document_id) VALUES (?, ?, 'live', ?, 't', ?)"
+    # The same text in another document, and the same document returning to it later, are both kept.
+    assert conn.execute(insert, (snap["service_id"], snap["taken_at"], snap["sha"], privacy)).rowcount == 1
+    assert conn.execute(insert, (snap["service_id"], "2099-01-01T00:00:00+00:00", snap["sha"], terms)).rowcount == 1
+    # Only the very same version at the same time is a duplicate.
+    assert conn.execute(insert, (snap["service_id"], snap["taken_at"], snap["sha"], terms)).rowcount == 0
     conn.close()
 
 

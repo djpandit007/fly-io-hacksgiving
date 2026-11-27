@@ -63,7 +63,7 @@ def history(monkeypatch):
         return [Version(taken_at=now - timedelta(days=200), text=text(OLD_HTML), origin="wayback"),
                 Version(taken_at=now - timedelta(days=1), text=text(NEW_HTML), origin="wayback")]
 
-    async def fake_page_text(cl, url, public=None):
+    async def fake_page_text(cl, url, public=None, **kw):
         return text(NEW_HTML)
 
     async def no_grade(q, client=None):
@@ -171,7 +171,7 @@ async def test_tick_fans_out_one_judgment_to_each_subscriber_only(conn, members,
 
     changed = text(NEW_HTML).replace("individual arbitration", "individual arbitration in Texas, with no right to appeal")
 
-    async def page(cl_, url, public=None):
+    async def page(cl_, url, public=None, **kw):
         return changed
 
     monkeypatch.setattr(agent, "page_text", page)
@@ -392,7 +392,7 @@ async def test_check_url_reports_its_stages(monkeypatch):
     respx.post(JEV).mock(return_value=httpx.Response(200, json=flags))
     respx.post(CHAT).mock(return_value=httpx.Response(200, json={"choices": [{"message": {"content": "SIGN"}}]}))
 
-    async def page(cl_, url, public=None, may_scout=None):
+    async def page(cl_, url, public=None, **kw):
         return "Terms text"
 
     async def no_grade(q, client=None):
@@ -545,7 +545,7 @@ async def test_tick_alert_is_not_rated_when_the_writer_fails(conn, members, hist
     m["chat"].mock(return_value=httpx.Response(200, json={"choices": [{"message": {"content": None}, "finish_reason": "length"}]}))
     changed = text(NEW_HTML).replace("individual arbitration", "individual arbitration in Texas, with no right to appeal")
 
-    async def page(cl_, url, public=None):
+    async def page(cl_, url, public=None, **kw):
         return changed
 
     monkeypatch.setattr(agent, "page_text", page)

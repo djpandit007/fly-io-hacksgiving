@@ -87,10 +87,19 @@ def _path_under(path: str, prefix: str) -> bool:
     return not prefix or path == prefix or path.startswith(prefix + "/")
 
 
+_SUSPECT_PATH = re.compile(r"(^|/)\.{1,2}(/|$)|\\|%2f|%5c|%2e", re.IGNORECASE)
+
+
 def is_user_content(url: str) -> bool:
+    """True for pages users write on a shared host. Fails closed: the host is compared without trailing
+    dots (as `registrable_domain` sees it), and a path the server might resolve differently from how it
+    reads here (dot segments, backslashes, encoded separators or dots) counts as user content."""
     u = urlparse(url)
-    host = (u.hostname or "").lower().removeprefix("www.")
+    host = (u.hostname or "").lower().rstrip(".").removeprefix("www.")
     path = u.path or "/"
+    shared = any(_host_is(host, h) for h, _ in USER_CONTENT) or host in USER_PATH_HOSTS
+    if shared and _SUSPECT_PATH.search(path):
+        return True
     if any(_host_is(host, h) and _path_under(path, prefix) for h, prefix in USER_CONTENT):
         return True
     for h, official in USER_PATH_HOSTS.items():
@@ -249,24 +258,61 @@ def companion_links(html: str, base_url: str, domain: str) -> dict[str, tuple[in
     soup = BeautifulSoup(html, "html.parser")
     found: dict[str, tuple[int, str]] = {}
     for a in soup.find_all("a", href=True):
-        href = urljoin(base_url, a["href"])
-        path = urlparse(href).path
-        if not _on_domain(href, domain) or is_user_content(href) or NOT_COMPANION.search(path):
-            continue
-        text = " ".join(a.get_text(" ", strip=True).split())
-        if "cookie" in text.lower():
-            continue
-        for role in COMPANION_ROLES:
-            if COMPANION_TEXT[role].search(text):
-                rank = 0
-            elif COMPANION_PATH[role].search(path):
-                rank = 1
-            else:
-                continue
-            if role not in found or rank < found[role][0]:
-                found[role] = (rank, _plain_url(href))
-            break  # one role per link: a "Data Processing Addendum" is not also the privacy policy
+        _keep_best(found, _classify(urljoin(base_url, a["href"]), a.get_text(" ", strip=True), domain))
     return found
+
+
+def _classify(href: str, text: str, domain: str) -> tuple[str, int, str] | None:
+    """(role, rank, plain URL) for one link that may be a companion document on `domain`, else None.
+    Rank 0: its text names the role; rank 1: only its path does."""
+    path = urlparse(href).path
+    if not _on_domain(href, domain) or is_user_content(href) or NOT_COMPANION.search(path):
+        return None
+    text = " ".join(text.split())
+    if "cookie" in text.lower():
+        return None
+    for role in COMPANION_ROLES:  # one role per link: a "Data Processing Addendum" is not also the privacy policy
+        if COMPANION_TEXT[role].search(text):
+            return role, 0, _plain_url(href)
+        if COMPANION_PATH[role].search(path):
+            return role, 1, _plain_url(href)
+    return None
+
+
+def _keep_best(found: dict[str, tuple[int, str]], item: tuple[str, int, str] | None) -> None:
+    if item is not None:
+        role, rank, url = item
+        if role not in found or rank < found[role][0]:
+            found[role] = (rank, url)
+
+
+async def _bundle(best: dict[str, tuple[int, str]], terms_url: str) -> dict[str, str]:
+    """The best link per role, skipping the terms page itself, duplicates, and non-public addresses."""
+    bundle: dict[str, str] = {}
+    for role in DOC_ROLES:
+        if role not in best:
+            continue
+        url = best[role][1]
+        if _same_page(url, terms_url) or any(_same_page(url, kept) for kept in bundle.values()):
+            continue
+        if await _is_public(url):
+            bundle[role] = url
+    return bundle
+
+
+async def companions_from_links(links: list[tuple[str, str]], terms_url: str) -> dict[str, str]:
+    """Companion documents among (url, link text) pairs the Scout found on the rendered terms page.
+
+    The Scout crawled a page the Gateway doesn't trust, so its own labels are ignored: every link goes
+    through the same domain, user-content, path and public-address checks as `discover_companions`."""
+    host = urlparse(terms_url).hostname or ""
+    if not host:
+        return {}
+    domain = registrable_domain(host)
+    best: dict[str, tuple[int, str]] = {}
+    for url, text in links:
+        _keep_best(best, _classify(url, text, domain))
+    return await _bundle(best, terms_url)
 
 
 def legal_hub(html: str, base_url: str, domain: str) -> str | None:
@@ -328,17 +374,7 @@ async def discover_companions(terms_url: str, client: httpx.AsyncClient | None =
     finally:
         if own:
             await client.aclose()
-
-    bundle: dict[str, str] = {}
-    for role in DOC_ROLES:
-        if role not in best:
-            continue
-        url = best[role][1]
-        if _same_page(url, terms_url) or any(_same_page(url, kept) for kept in bundle.values()):
-            continue
-        if await _is_public(url):
-            bundle[role] = url
-    return bundle
+    return await _bundle(best, terms_url)
 
 
 async def discover_bundle(

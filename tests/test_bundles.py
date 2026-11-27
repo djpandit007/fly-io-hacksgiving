@@ -45,7 +45,7 @@ def pages(monkeypatch):
     live = {TERMS_URL: TERMS, AI_URL: AI_OLD}
     backfills: list[tuple[str, str | None]] = []
 
-    async def fake_page_text(cl, url, public=None):
+    async def fake_page_text(cl, url, public=None, **kw):
         if isinstance(live[url], Exception):
             raise live[url]
         return live[url]
@@ -163,7 +163,7 @@ async def test_service_with_only_terms_and_pre_bundle_snapshots_keeps_working(co
     conn.execute("INSERT INTO snapshots (service_id, taken_at, origin, sha, text) VALUES (?, ?, 'live', 'old', ?)",
                  (svc.id, (datetime.now(UTC) - timedelta(days=3)).isoformat(), old))
 
-    async def page(cl_, url, public=None):
+    async def page(cl_, url, public=None, **kw):
         assert url == TERMS_URL
         return new
 
@@ -325,3 +325,91 @@ def test_change_clause_takes_its_document_from_the_database(conn, notion):
     [kept] = ask_tools.verified(notion, [claimed])
     assert (kept.document, kept.heading) == ("ai_terms", "Data Usage")
     assert ask_tools.recent_changes(notion, "Notion")[0].document == "ai_terms"
+
+
+async def test_a_walked_back_clause_is_a_change_and_documents_may_share_text(conn):
+    """v7: snapshots are unique per document, so a return to earlier wording is diffed, not dropped."""
+    svc = agent.add_service(conn, "Acme", TERMS_URL)
+    agent.add_documents(conn, svc, {"ai_terms": AI_URL})
+    terms, ai = agent.documents_for(conn, svc)
+    cl = agent.Clients()
+    day = datetime(2026, 1, 1, tzinfo=UTC)
+    assert await agent.record_version(conn, cl, svc, AI_OLD, day, "live", ai) == []  # baseline
+    assert await agent.record_version(conn, cl, svc, AI_OLD, day, "live", terms) == []  # same text, other doc
+    assert len(await agent.record_version(conn, cl, svc, AI_NEW, day + timedelta(days=1), "live", ai)) == 1
+    walked_back = await agent.record_version(conn, cl, svc, AI_OLD, day + timedelta(days=2), "live", ai)
+    await cl.aclose()
+    assert len(walked_back) == 1 and "perpetual" in walked_back[0].before_text
+    assert agent.latest_text(conn, svc, ai) == AI_OLD and agent.latest_text(conn, svc, terms) == AI_OLD
+
+
+
+# --- Companions found later: the monthly check and the Scout's links -------------------------------
+
+@pytest.fixture
+def public_dns(monkeypatch):
+    async def public(host):
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(agent.discover, "resolve_public", public)
+
+
+@respx.mock
+async def test_the_monthly_check_baselines_a_late_companion_without_alerts(conn, members, pages, monkeypatch):
+    calls = providers()
+    found: dict[str, str] = {}
+
+    async def companions(terms_url, client=None):
+        return dict(found)
+
+    monkeypatch.setattr(agent.discover, "discover_companions", companions)
+    cl = clients()
+    svc = await watch_acme(conn, cl, members[0])  # a service watched before its AI Terms were found
+    assert [d.role for d in agent.documents_for(conn, svc)] == ["terms"]
+    assert not agent.companions_due(conn, svc)  # checked when first watched
+
+    found["ai_terms"] = AI_URL
+    result = await agent.tick(conn, cl)  # not due yet: nothing new
+    assert [d.role for d in agent.documents_for(conn, svc)] == ["terms"]
+
+    agent.set_kv(conn, agent._companions_key(svc), (datetime.now(UTC) - timedelta(days=31)).isoformat())
+    judged = calls["judge"]
+    result = await agent.tick(conn, cl)
+    ai = agent.documents_for(conn, svc)[1]
+    assert ai.role == "ai_terms" and agent.latest_text(conn, svc, ai) == AI_OLD  # a live baseline
+    assert result.changes == 0 and result.deliveries == {} and calls["judge"] == judged  # nothing to alert
+    assert (AI_URL, None) not in pages["backfills"]  # no history for a late find
+    assert not agent.companions_due(conn, svc)
+
+    pages[AI_URL] = AI_NEW  # from now on the AI Terms are watched like any other document
+    result = await agent.tick(conn, cl)
+    await cl.aclose()
+    assert result.changes == 1 and members[0].id in result.deliveries
+
+
+@respx.mock
+async def test_links_the_scout_saw_join_the_bundle_after_the_gateways_own_checks(
+    conn, members, pages, monkeypatch, public_dns,
+):
+    providers()
+
+    async def nothing(terms_url, client=None):
+        return {}  # plain discovery can't read a page that needs a browser
+
+    async def page(cl, url, public=None, links=None, **kw):
+        if links is not None:
+            links += [
+                ("https://evil.test/ai-terms", "AI Terms"),             # another site
+                ("https://github.com/acme/ai-terms", "AI Terms"),       # user content
+                ("https://acme.test/blog/launch", "Read more"),         # not a policy by the Gateway's rules
+                (AI_URL, "AI Terms"),
+            ]
+        return pages[url]
+
+    monkeypatch.setattr(agent.discover, "discover_companions", nothing)
+    monkeypatch.setattr(agent, "page_text", page)
+    cl = clients()
+    svc = await watch_acme(conn, cl, members[0])
+    await cl.aclose()
+    assert [(d.role, d.url) for d in agent.documents_for(conn, svc)] == [("terms", TERMS_URL), ("ai_terms", AI_URL)]
+    assert (AI_URL, None) in pages["backfills"]  # found at first watch: onboarded in full
