@@ -69,6 +69,10 @@ def history(monkeypatch):
     async def no_grade(q, client=None):
         return None
 
+    async def no_companions(terms_url, client=None):
+        return {}
+
+    monkeypatch.setattr(agent.discover, "discover_companions", no_companions)
     monkeypatch.setattr(agent, "backfill", fake_backfill)
     monkeypatch.setattr(agent, "page_text", fake_page_text)
     monkeypatch.setattr(agent.tosdr, "lookup", no_grade)
