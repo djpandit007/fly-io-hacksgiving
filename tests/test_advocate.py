@@ -760,6 +760,19 @@ async def test_ai_policy_without_an_opt_out_path_says_so(conn, members):
     assert advocate.NO_OPT_OUT_PATH in card.text
 
 
+def test_form_urls_that_parsers_could_read_differently_are_rejected():
+    for url in ("https://acme.com\\@evil.example/form", "https://user@evil.example/form",
+                'https://acme.com/form"onclick="x', "https://acme.com/<b>", "https://acme.com/a b"):
+        text = f"To opt out, use the form at {url} within 30 days."
+        opt = OptOut(channel="web_form", target=url, verbatim_instruction=text)
+        assert advocate.verify_opt_out(opt, text) is None, url
+    good = "https://privacy.acme.com/opt-out"
+    opt = OptOut(channel="web_form", target=good, verbatim_instruction=f"Use the form at {good} to opt out.")
+    assert advocate.verify_opt_out(opt, opt.verbatim_instruction) is not None
+    section = advocate.how_to_opt_out(opt, "acme.com")
+    assert f"🌐 Form: {good}" in section and "<a " not in section  # the full URL as text, never a hidden label
+
+
 def test_settings_path_not_in_the_text_is_not_shown():
     opt = OptOut(channel="account_setting", target="Settings > Secret menu", verbatim_instruction=SETTING_TEXT)
     verified = advocate.verify_opt_out(opt, SETTING_TEXT)

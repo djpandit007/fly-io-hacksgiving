@@ -67,6 +67,15 @@ UNAVAILABLE = (
 OPT_OUT_THRESHOLD = 0.7
 # Checked policies whose found flags make an opt-out worth offering (when the text gives a path).
 OPT_OUT_FLAGS = frozenset({"ai_model_training", "no_deletion_right"})
+# What a policy card asks the extractor to find the opt-out for, per flag that triggered it.
+OPT_OUT_ABOUT = {
+    "ai_model_training": "using the person's data or content to train or improve AI models",
+    "no_deletion_right": "deleting the person's account or personal data",
+}
+
+
+def opt_out_about(found: list[str]) -> str:
+    return "; or ".join(OPT_OUT_ABOUT[f] for f in found if f in OPT_OUT_ABOUT)
 APPROVAL_TTL = timedelta(minutes=15)
 CONTRACT_TTL = 600.0               # seconds a contract waits in RAM for its redline kit
 CONTRACT_CACHE_BYTES = 20 * 1024 * 1024
@@ -79,6 +88,7 @@ MAX_KIT_BYTES = 15 * 1024 * 1024
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 _EMAIL = re.compile(r"[a-z0-9._%+-]{1,64}@([a-z0-9-]{1,63}\.)+[a-z]{2,63}")
+_UNSAFE_URL = re.compile(r"[\\@\"'<>`\s\x00-\x1f\x7f]")
 FIELDS_HEAD = "To finish your opt-out notice"
 
 
@@ -198,6 +208,8 @@ EXTRACT_INSTRUCTIONS = (
     "- required_fields: what the notice must include besides the person's name and email (for example "
     "'account username' or 'postal address'), only if the text says.\n"
     "- verbatim_instruction: the sentence or two that say how to opt out, copied word for word.\n"
+    "If an <about> tag names a practice, report only the way to opt out of or object to that practice, "
+    "not other preferences (marketing emails, cookies) the policy mentions.\n"
     "If the text gives no way to opt out, set found to false. Never invent an address, URL or deadline."
 )
 
@@ -232,6 +244,10 @@ def verify_opt_out(opt: OptOut, text: str) -> OptOut | None:
     if opt.channel == "email" and not _EMAIL.fullmatch(target):
         return None
     if opt.channel == "web_form":
+        # No characters that parsers read differently or that could break out of markup: backslashes,
+        # userinfo ("@"), quotes, angle brackets, whitespace or control characters.
+        if _UNSAFE_URL.search(target):
+            return None
         parts = urlparse(target)
         if parts.scheme != "https" or not parts.hostname:
             return None
@@ -242,11 +258,13 @@ def verify_opt_out(opt: OptOut, text: str) -> OptOut | None:
     return opt.model_copy(update={"target": target, "required_fields": clean_fields(opt.required_fields)})
 
 
-async def extract_opt_out(cl: Any, service: str, text: str) -> OptOut | None:
-    """How to opt out of the term in `text`, verified against it; None when there is no clear path."""
+async def extract_opt_out(cl: Any, service: str, text: str, about: str = "") -> OptOut | None:
+    """How to opt out of the term in `text` (or, when `about` names one, of that practice in a whole
+    policy), verified against it; None when there is no clear path."""
     if getattr(cl, "ai", None) is None or not text.strip():
         return None
-    prompt = f"<service>{_tag(service)}</service>\n<terms>{_tag(text[:MAX_EXTRACT_CHARS])}</terms>"
+    focus = f"<about>{_tag(about)}</about>\n" if about else ""
+    prompt = f"<service>{_tag(service)}</service>\n{focus}<terms>{_tag(text[:MAX_EXTRACT_CHARS])}</terms>"
     try:
         result = await extractor.run(prompt, model=model_for(cl.ai, settings.agent_model))
     except Exception as exc:  # noqa: BLE001 — never echo the exception: it could carry the text
@@ -453,9 +471,8 @@ def dispatchable(opt: OptOut, domain: str | None) -> bool:
 def _where(opt: OptOut) -> str:
     if opt.channel == "email":
         return f"📧 Email: <b>{esc(opt.target)}</b>"
-    if opt.channel == "web_form":
-        host = urlparse(opt.target).hostname or opt.target
-        return f'🌐 Form: <a href="{esc(opt.target)}">{esc(host)}</a>'
+    if opt.channel == "web_form":  # the full URL as text, never a label that could hide the real address
+        return f"🌐 Form: {esc(opt.target)}"
     if opt.channel == "postal":
         return f"📮 By post to: <b>{esc(opt.target)}</b>"
     return f"⚙️ In your account: <b>{esc(opt.target)}</b>"

@@ -1209,7 +1209,7 @@ async def verdict_card(
         # form on the service's own verified domain, and only to a Telegram member.
         on_stage("Looking for an opt-out…")
         site = discover.registrable_domain(domain) if domain else None
-        opt = await advocate.extract_opt_out(cl, title, text)
+        opt = await advocate.extract_opt_out(cl, title, text, about=advocate.opt_out_about(found))
         parts.insert(len(parts) - 1, advocate.how_to_opt_out(opt, site) if opt else advocate.NO_OPT_OUT_PATH)
         if opt and advocate.dispatchable(opt, site):
             actions += advocate.offer_opt_out(user, title, site, opt)
