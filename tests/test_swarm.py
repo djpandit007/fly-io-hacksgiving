@@ -149,10 +149,12 @@ async def test_failed_lock_never_runs_the_job_but_restores(conn):
     routes = mock_api(httpx.Response(200, content=framed({"ok": True})))
     routes["policy"].mock(return_value=httpx.Response(400, json={"error": "bad"}))
     sw = make(conn)
-    with pytest.raises(httpx.HTTPStatusError):
+    # Closing egress fails too (same broken policy endpoint), so the worker is quarantined: fail closed.
+    with pytest.raises(swarm.SwarmError, match="egress_close_failed"):
         await sw.run_job("scout", {"url": URL}, allow_hosts=["acme.test"])
     await sw.aclose()
     assert not routes["exec"].called and routes["restore"].call_count == 1
+    assert sw.quarantined == {"scout"}
     assert conn.execute("SELECT n FROM metric_counts WHERE name = 'scout_egress_lock' AND outcome = 'error'").fetchone()
 
 
@@ -174,14 +176,28 @@ async def test_timeout_is_reported_and_restores(conn, monkeypatch):
 
 
 @respx.mock
-async def test_restore_stream_error_is_counted_not_raised(conn):
+async def test_failed_restore_fails_closed_until_a_restore_succeeds(conn):
     routes = mock_api(httpx.Response(200, content=framed({"ok": True})))
-    routes["restore"].mock(return_value=httpx.Response(200, text='{"type":"error","error":"disk full","time":"t"}\n'))
+    broken = httpx.Response(200, text='{"type":"error","error":"disk full","time":"t"}\n')
+    routes["restore"].mock(return_value=broken)
     sw = make(conn)
-    assert await sw.run_job("scout", {}, allow_hosts=["acme.test"]) == {"ok": True}
-    await sw.aclose()
+    # The job ran, but its worker could not be cleaned: the result is discarded and the worker quarantined.
+    with pytest.raises(swarm.SwarmError, match="restore_failed"):
+        await sw.run_job("scout", {}, allow_hosts=["acme.test"])
+    assert sw.quarantined == {"scout"} and routes["exec"].call_count == 1
     row = conn.execute("SELECT outcome FROM metric_counts WHERE name = 'scout_restore'").fetchone()
     assert row["outcome"] == "error"
+
+    # While restores keep failing, no further job runs on the dirty worker.
+    with pytest.raises(swarm.SwarmError, match="restore_failed"):
+        await sw.run_job("scout", {}, allow_hosts=["acme.test"])
+    assert routes["exec"].call_count == 1
+
+    # Once a restore succeeds the quarantine lifts and jobs run again.
+    routes["restore"].mock(return_value=httpx.Response(200, text='{"type":"complete"}\n'))
+    assert await sw.run_job("scout", {}, allow_hosts=["acme.test"]) == {"ok": True}
+    assert sw.quarantined == set() and routes["exec"].call_count == 2
+    await sw.aclose()
 
 
 @respx.mock

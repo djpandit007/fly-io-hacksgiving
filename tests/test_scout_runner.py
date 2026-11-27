@@ -92,3 +92,30 @@ def test_main_turns_crawl_errors_into_labels(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert swarm.extract_result(out) == {"ok": False, "error": "timeout_error"}
     assert "secret-path" not in base64.b64decode(out.split(swarm.RESULT_START)[1].split(swarm.RESULT_END)[0]).decode()
+
+
+def test_resolver_rules_pin_each_host_to_its_checked_address():
+    rules = sr.resolver_rules({"notion.so": "203.0.113.7", "www.notion.so": "2001:db8::1"})
+    assert rules == "MAP notion.so 203.0.113.7, MAP www.notion.so [2001:db8::1]"
+
+
+async def test_public_addresses_refuse_any_private_answer(monkeypatch):
+    answers = {
+        "public.test": ["1.1.1.1", "8.8.8.8"],
+        "mixed.test": ["1.1.1.1", "10.0.0.5"],  # one inside address is enough to refuse
+        "docs.test": ["203.0.113.7"],  # reserved documentation range: not global
+        "loop.test": ["127.0.0.1"],
+    }
+
+    class Loop:
+        async def getaddrinfo(self, host, port, type=0):
+            if host not in answers:
+                raise OSError("nxdomain")
+            return [(0, 0, 0, "", (ip, 0)) for ip in answers[host]]
+
+    monkeypatch.setattr(sr.asyncio, "get_running_loop", lambda: Loop())
+    assert await sr.public_addresses("public.test") == ["1.1.1.1", "8.8.8.8"]
+    assert await sr.public_addresses("mixed.test") == []
+    assert await sr.public_addresses("docs.test") == []
+    assert await sr.public_addresses("loop.test") == []
+    assert await sr.public_addresses("missing.test") == [] and not await sr.is_public("missing.test")

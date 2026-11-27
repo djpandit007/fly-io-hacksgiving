@@ -39,7 +39,7 @@ from fastapi.responses import (
 )
 from fastapi.templating import Jinja2Templates
 
-from app import agent, ledger, sessions
+from app import agent, benchmark, ledger, sessions
 from app.config import settings
 from app.db import (
     DOC_ROLE_LABELS,
@@ -64,11 +64,25 @@ RECENT_CHANGES = 20
 CONTRADICTIONS = 10
 SWARM_BACKLOG = 15
 
-# The benchmark lane provides this: given the request (for app.state clients) and a change, return an
-# object with `percentile` (0-100) and `cohort_size`, optionally `opt_out_share` (0-1), or None.
+# Given the request (for app.state clients) and a change, return an object with `percentile` (0-100) and
+# `cohort_size`, optionally `opt_out_share` (0-1), or None. Tests swap it out.
 BenchmarkHook = Callable[[Request, Change], Awaitable[Any]]
-benchmark_hook: BenchmarkHook | None = None
 BENCHMARK_TIMEOUT = 5.0
+
+
+async def change_benchmark(request: Request, change: Change) -> Any:
+    """The change's new clause against comparable public clauses (read-only Pinecone query)."""
+    clients = getattr(request.app.state, "clients", None)
+    gw = getattr(clients, "pinecone", None)
+    if gw is None or not change.category or change.severity is None or not change.after_text:
+        return None
+    row = _conn(request).execute("SELECT name FROM services WHERE id = ?", (change.service_id,)).fetchone()
+    return await benchmark.benchmark_clause(
+        gw, change.after_text, change.category, change.severity, exclude_service=row["name"] if row else None,
+    )
+
+
+benchmark_hook: BenchmarkHook | None = change_benchmark
 
 # SSE pacing; tests make these small.
 SSE_POLL_SECONDS = 1.0

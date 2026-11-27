@@ -228,6 +228,9 @@ class Swarm:
         self.checkpoints = checkpoints if checkpoints is not None else {
             "scout": settings.scout_base_checkpoint, "advocate": settings.advocate_base_checkpoint,
         }
+        # Workers whose last clean-up (egress close or checkpoint restore) failed. Fail closed: no job
+        # runs on a quarantined worker until a fresh restore succeeds.
+        self.quarantined: set[str] = set()
 
     @classmethod
     def from_settings(cls, recorder: Recorder | None = None) -> Swarm | None:
@@ -290,10 +293,14 @@ class Swarm:
     async def job(self, role: str, allow_hosts: Sequence[str] | None) -> AsyncIterator[None]:
         """Lock egress (when hosts are given), run the body, then always close egress and restore.
 
-        A failed lock aborts the job before anything runs: a worker never crawls unlocked.
+        A failed lock aborts the job before anything runs: a worker never crawls unlocked. A failed
+        clean-up fails closed: the job's result is discarded (SwarmError replaces it) and the worker is
+        quarantined until a later restore succeeds, so no job runs on a dirty worker.
         """
         if not self.available(role):
             raise SwarmUnavailable("worker_unconfigured")
+        if role in self.quarantined:
+            await self._reset(role, close_egress=True)  # raises while the worker stays dirty
         try:
             if allow_hosts is not None:
                 rules = lock_rules(allow_hosts)
@@ -312,23 +319,33 @@ class Swarm:
             await self._reset(role, close_egress=allow_hosts is not None)
 
     async def _reset(self, role: str, close_egress: bool) -> None:
+        """Close egress and restore the base checkpoint. On any failure the worker is quarantined and
+        SwarmError is raised (fail closed); on success any quarantine is lifted."""
+        egress_closed = True
         if close_egress:
             try:
                 await self.set_network_policy(role, lock_rules(IDLE_HOSTS.get(role, ())))
             except Exception as exc:  # noqa: BLE001 — the restore below must still run
+                egress_closed = False
                 log.warning("swarm %s: closing egress failed: %s", role, type(exc).__name__)
+                self._event(role, "error", "egress_close_failed")
         started = time.monotonic()
         try:
             await self.restore_checkpoint(role)
-        except Exception as exc:  # noqa: BLE001 — a failed restore is logged and counted, not raised
+        except Exception as exc:  # recorded, then re-raised as SwarmError below
             ms = metrics.elapsed_ms(started)
             log.error("swarm %s: base checkpoint restore failed: %s", role, type(exc).__name__)
             self._count(role, "restore", "error", ms)
             self._event(role, "error", "checkpoint_restore_failed", ms)
-            return
+            self.quarantined.add(role)
+            raise SwarmError("restore_failed") from exc
         ms = metrics.elapsed_ms(started)
         self._count(role, "restore", "ok", ms)
         self._event(role, "checkpoint_restore", "base_checkpoint", ms)
+        if not egress_closed:
+            self.quarantined.add(role)
+            raise SwarmError("egress_close_failed")
+        self.quarantined.discard(role)
 
     async def run_job(
         self,

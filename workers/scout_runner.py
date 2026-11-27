@@ -148,13 +148,29 @@ def error_label(exc: BaseException) -> str:
     return name if re.fullmatch(r"[a-z][a-z0-9_]{0,39}", name) else "error"
 
 
-async def is_public(host: str) -> bool:
+async def public_addresses(host: str) -> list[str]:
+    """The host's addresses if every one is public, else [] (unresolvable or any non-public address)."""
     try:
         infos = await asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM)
     except OSError:
-        return False
+        return []
     ips = [ipaddress.ip_address(str(i[4][0]).split("%")[0]) for i in infos]
-    return bool(ips) and all(ip.is_global and not ip.is_multicast for ip in ips)
+    if not ips or not all(ip.is_global and not ip.is_multicast for ip in ips):
+        return []
+    return [str(ip) for ip in dict.fromkeys(ips)]
+
+
+async def is_public(host: str) -> bool:
+    return bool(await public_addresses(host))
+
+
+def resolver_rules(pins: dict[str, str]) -> str:
+    """Chromium --host-resolver-rules pinning each exact host to the address that was checked, so a
+    second DNS answer (rebinding) can't send the browser somewhere else."""
+    def addr(ip: str) -> str:
+        return f"[{ip}]" if ":" in ip else ip
+
+    return ", ".join(f"MAP {host} {addr(ip)}" for host, ip in sorted(pins.items()))
 
 
 # --- Browser ---------------------------------------------------------------------------------------
@@ -164,6 +180,17 @@ async def crawl(job: dict[str, Any]) -> dict[str, Any]:
 
     allow: list[str] = job["allow_hosts"]
     checked: dict[str, bool] = {}
+    # DNS rebinding defence, in layers: exact allowed hosts are resolved and checked once here and
+    # Chromium is pinned to those addresses; wildcard sub-domains are checked on first use in `guard`,
+    # and the Sprite's network policy (DNS allowlist, private ranges always blocked by the platform)
+    # stops a later answer that points inside.
+    pins: dict[str, str] = {}
+    for host in (h.lower() for h in allow if not h.startswith("*.")):
+        addresses = await public_addresses(host)
+        checked[host] = bool(addresses)
+        if addresses:
+            pins[host] = addresses[0]
+    launch_args = [f"--host-resolver-rules={resolver_rules(pins)}"] if pins else []
 
     async def guard(route, request) -> None:
         parts = urlparse(request.url)
@@ -182,13 +209,18 @@ async def crawl(job: dict[str, Any]) -> dict[str, Any]:
         await route.continue_()
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
+        browser = await pw.chromium.launch(headless=True, args=launch_args)
         try:
             context = await browser.new_context(
                 user_agent=USER_AGENT, accept_downloads=False, java_script_enabled=True,
                 viewport={"width": 1280, "height": 1600}, service_workers="block",
             )
             await context.route("**/*", guard)
+
+            async def no_websockets(ws) -> None:  # `route` does not see WebSockets: refuse them all
+                await ws.close()
+
+            await context.route_web_socket("**/*", no_websockets)
             page = await context.new_page()
             await page.goto(job["url"], wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
             with contextlib.suppress(Exception):  # busy pages never go idle; render what is there
