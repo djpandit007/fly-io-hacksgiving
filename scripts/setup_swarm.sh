@@ -128,6 +128,15 @@ setup_advocate() {
   else
     echo "(workers/advocate_runner.py not present yet; skipping its smoke test)"
   fi
+  # The runner's connector gateway URLs (the Advocate's own send-scoped AgentMail and OpenCode
+  # connectors; the gateway attaches credentials, so no keys). Baked into the base checkpoint.
+  if [[ -n "${ADVOCATE_AGENTMAIL_BASE:-}" || -n "${ADVOCATE_OPENCODE_BASE:-}" ]]; then
+    printf 'FP_AGENTMAIL_BASE=%s\nFP_AGENTMAIL_INBOX_ID=%s\nFP_OPENCODE_BASE=%s\n' \
+      "${ADVOCATE_AGENTMAIL_BASE:-}" "${ADVOCATE_AGENTMAIL_INBOX_ID:-}" "${ADVOCATE_OPENCODE_BASE:-}" \
+      | sprite exec -s "$ADVOCATE" --stdin -- bash -lc "cat > $WORKER_DIR/advocate.env"
+  else
+    echo "(set ADVOCATE_AGENTMAIL_BASE, ADVOCATE_AGENTMAIL_INBOX_ID and ADVOCATE_OPENCODE_BASE to configure the runner)"
+  fi
   # Between jobs the Advocate reaches only the connector gateway (its send-scoped connectors).
   set_policy "$ADVOCATE" '[{"action": "allow", "domain": "api.sprites.dev"}, {"action": "deny", "domain": "*"}]'
   local id

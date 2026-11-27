@@ -339,6 +339,28 @@ async def clause_severity(gw: Gateway, clauses: list[str]) -> list[float | None]
             for n in range(1, len(clauses) + 1)]
 
 
+class RedlineDelta(BaseModel):
+    """How much one clause matters before and after a proposed rewrite (0-3; None: Jev did not score)."""
+
+    original: float | None
+    proposed: float | None
+
+    @property
+    def reduction(self) -> float | None:
+        if self.original is None or self.proposed is None:
+            return None
+        return self.original - self.proposed
+
+
+async def redline_delta(gw: Gateway, pairs: list[tuple[str, str]]) -> list[RedlineDelta]:
+    """Jev's severity for each (original, proposed) clause pair, scored in one batch on one scale."""
+    if not pairs:
+        return []
+    scores = await clause_severity(gw, [o for o, _ in pairs] + [p for _, p in pairs])
+    n = len(pairs)
+    return [RedlineDelta(original=scores[i], proposed=scores[n + i]) for i in range(n)]
+
+
 # --- Policy Bundles: does a changed section contradict another document of the same service -----
 
 CONTRADICTION_SECTION_CHARS = 6_000

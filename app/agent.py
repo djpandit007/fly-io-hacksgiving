@@ -27,6 +27,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from app import (
+    advocate,
     benchmark,
     discover,
     exa,
@@ -905,7 +906,10 @@ def rated(kind: AnswerKind, **meta) -> Answer:
 def alert(report: ChangeReport, svc: Service) -> Outgoing:
     """A material change as delivered to one watcher: the report, an unwatch button, and 👍/👎 when the
     writer wrote its summary (a raw redline isn't the writer's answer to rate)."""
-    return Outgoing(text=report.to_html(), buttons=[[unwatch_button(svc)]],
+    buttons: Buttons = [[unwatch_button(svc)]]
+    if report.verdict and advocate.wants_change_button(report.verdict.opt_out):
+        buttons.append([advocate.change_button(report.change_id)])
+    return Outgoing(text=report.to_html(), buttons=buttons,
                     rate=rated("alert", change_id=report.change_id) if report.written else None)
 
 
@@ -972,6 +976,11 @@ async def watch_messages(cl: Clients, svc: Service, reports: list[ChangeReport])
 # --- Before you agree ----------------------------------------------------------------------------
 
 DISCLAIMER = "<i>Information, not legal advice.</i>"
+
+
+def _offers_opt_out(found: list[str]) -> bool:
+    """A checked policy whose found flags (AI training, no deletion right) make an opt-out worth looking for."""
+    return bool(advocate.OPT_OUT_FLAGS.intersection(found))
 
 
 def _explain_buttons(flags: dict[str, float]) -> Buttons:
@@ -1184,8 +1193,15 @@ async def verdict_card(
     parts.append(DISCLAIMER)
     asked = bool(found)
     rate = rated("verdict", quotes_ok=(bool(offered) and len(passed) == len(offered)) if asked else None) if card else None
-    return Outgoing(text="\n\n".join(parts), buttons=_explain_buttons(flags), rate=rate,
-                    check=playbooks.ContractCheck(domain=legal_domain, found=found))
+    check = playbooks.ContractCheck(domain=legal_domain, found=found)
+    # Counter-measures (Telegram members only): a redline kit for a personal contract with found flags
+    # (the text waits in RAM only), or an opt-out for a policy with a verified opt-out path.
+    actions = advocate.offer_redline(user, title, text, check, passed)
+    if user is not None and user.chat_id and legal_domain == "privacy_and_ai" and _offers_opt_out(found):
+        on_stage("Looking for an opt-out…")
+        if opt := await advocate.extract_opt_out(cl, title, text):
+            actions += advocate.offer_opt_out(user, title, discover.registrable_domain(domain) if domain else None, opt)
+    return Outgoing(text="\n\n".join(parts), buttons=_explain_buttons(flags) + actions, rate=rate, check=check)
 
 
 async def check_url(
