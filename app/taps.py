@@ -8,6 +8,12 @@ bot still checks at tap time that whatever a tap acts on belongs to the member w
     v1:n                       no thanks                v1:fx:<flag key>    explain a red flag
     v1:fb:<token>:<u|d>        rate an answer           v1:fr:<token>:<w|c|n>  reason for a 👎
     v1:k                       an answer already rated (inert)
+    v1:oc:<change id>          draft an opt-out from a change alert
+    v1:od:<ref>                draft an opt-out offered on a verdict card (RAM-only offer)
+    v1:oa:<secret>             approve & send a drafted opt-out (single-use approval token)
+    v1:ox:<secret>             cancel a drafted opt-out
+    v1:rk:<ref>                redline kit: pick a tone (RAM-only contract)
+    v1:rt:<ref>:<p|b|f>        redline kit: generate at that tone
 """
 
 from __future__ import annotations
@@ -26,12 +32,17 @@ HELP_TOPICS = frozenset({"list", "dl", "watch", "how", "room"})
 _LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
 SERVICE_NAME = re.compile(rf"(?=.{{2,58}}$){_LABEL}(?:\.{_LABEL})*")
 TOKEN = re.compile(r"[A-Za-z0-9_-]{12}")
+# Approval secrets and RAM cache references: 128 random bits, URL-safe base64 (22 characters).
+SECRET = re.compile(r"[A-Za-z0-9_-]{22}")
+TONES = {"p": "polite", "b": "balanced", "f": "firm"}
 VOTES = {"u": "up", "d": "down"}
 REASONS = {"w": "wrong", "c": "unclear", "n": "not_useful"}
 # Taps that start provider work; everything else is a quick lookup or a single write.
-SLOW = frozenset({"w"})
+SLOW = frozenset({"w", "oc", "oa", "rt"})
 # Metric names per action (votes and reasons are recorded by answer feedback instead).
-METRIC = {"h": "help", "w": "watch", "n": "no", "u": "unwatch", "r": "undo", "fx": "explain"}
+METRIC = {"h": "help", "w": "watch", "n": "no", "u": "unwatch", "r": "undo", "fx": "explain",
+          "oc": "opt_out_draft", "od": "opt_out_draft", "oa": "opt_out_send", "ox": "opt_out_cancel",
+          "rk": "redline", "rt": "redline_kit"}
 
 
 class Tap(NamedTuple):
@@ -56,6 +67,12 @@ def _valid(tap: Tap) -> bool:
             return bool(TOKEN.fullmatch(tap.arg)) and tap.extra in VOTES
         case "fr":
             return bool(TOKEN.fullmatch(tap.arg)) and tap.extra in REASONS
+        case "oc":
+            return tap.arg.isascii() and tap.arg.isdigit() and len(tap.arg) <= 12 and not tap.extra
+        case "od" | "oa" | "ox" | "rk":
+            return bool(SECRET.fullmatch(tap.arg)) and not tap.extra
+        case "rt":
+            return bool(SECRET.fullmatch(tap.arg)) and tap.extra in TONES
     return False
 
 

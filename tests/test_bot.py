@@ -374,7 +374,7 @@ async def test_menus_match_the_counted_commands():
     menu = {f"/{c}" for c, _ in bot.MEMBER_MENU + bot.EMAIL_MENU + bot.OWNER_MENU}
     assert bot.COMMANDS == menu | {"/start"}
     assert bot.COMMANDS == {"/start", "/help", "/watch", "/list", "/deadlines", "/email", "/verify", "/wrapped",
-                            "/members", "/remove", "/stats", "/ask", "/jurisdiction", "/dashboard"}
+                            "/members", "/remove", "/stats", "/ask", "/jurisdiction", "/dashboard", "/redline"}
 
 
 async def test_setup_failure_does_not_raise(conn):

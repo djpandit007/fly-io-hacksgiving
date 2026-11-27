@@ -13,6 +13,7 @@ from collections.abc import Callable
 from urllib.parse import urlparse
 
 from app import (
+    advocate,
     agent,
     ask,
     feedback,
@@ -46,6 +47,7 @@ MEMBER_MENU = [
     ("deadlines", "Your opt-out windows, renewals and calendar link"),
     ("wrapped", "Your year in accepted terms"),
     ("jurisdiction", "Where you live, for local consumer-law notes"),
+    ("redline", "Redline kit for the next contract you send"),
     ("dashboard", "A private link to your web Control Room"),
     ("help", "What I can do"),
 ]
@@ -93,6 +95,7 @@ HELP = """<b>Fine Print</b> watches the fine print you've agreed to.
 /wrapped — your year in accepted terms
 /jurisdiction <i>region</i> — where you live (US-CA, US-NY, US-OTHER, EU, UK), for local consumer-law notes
 /dashboard — a private sign-in link to your web Control Room
+/redline — then send a lease, job offer or client contract for a tracked-changes redline kit
 {email}
 Send a link or a file (PDF, screenshot, photo) to check it <b>before you agree</b>.
 <i>Information, not legal advice.</i>"""
@@ -557,8 +560,44 @@ async def _dispatch(conn: sqlite3.Connection, cl: Clients, tg: Telegram, t: _Tap
                 return
             await t.answer(f"Watching {svc.name} again")
             await t.swap(agent.unwatch_button(svc))
+        case taps.Tap("oc", change_id):
+            await t.answer("On it…")
+            await _send_reply(tg, user.chat_id, await advocate.draft_change(conn, cl, user, int(change_id)))
+        case taps.Tap("od", ref):
+            await t.answer()
+            await _send_reply(tg, user.chat_id, advocate.draft_offer(conn, user, ref))
+        case taps.Tap("oa", secret):
+            await t.answer("Sending…")
+            await t.drop_buttons()  # one approval, one dispatch (the token is single-use anyway)
+            await advocate.approve(conn, cl, tg, user, secret)
+        case taps.Tap("ox", secret):
+            await t.drop_buttons()
+            await t.answer("Cancelled. Nothing was sent." if advocate.cancel(conn, user, secret) else "Nothing to cancel.")
+        case taps.Tap("rk", ref):
+            await t.answer()
+            if advocate.CONTRACTS.get(user.id, ref) is None:
+                await tg.send(user.chat_id, advocate.CONTRACT_GONE)
+                return
+            await t.swap(None)
+            await tg.send(user.chat_id, "Which tone should the redline and the negotiation email take?",
+                          buttons=advocate.tone_buttons(ref))
+        case taps.Tap("rt", ref, tone):
+            await t.answer("On it…")
+            await t.drop_buttons()
+            if advocate.CONTRACTS.get(user.id, ref) is not None and advocate.advocate_ready(cl):
+                await tg.send(user.chat_id, f"Building your {advocate.TONE_LABELS[tone]} redline kit on the Advocate. "
+                                            "This can take a minute or two.")
+            await advocate.redline_kit(conn, cl, tg, user, ref, tone)
         case _:
             await t.answer(STALE_TAP)
+
+
+async def _send_reply(tg: Telegram, chat: int, reply: advocate.Reply) -> None:
+    """A counter-measure reply: text with its buttons, or a force-reply prompt for missing details."""
+    if reply.ask:
+        await tg.send(chat, esc(reply.text), markup={"force_reply": True, "input_field_placeholder": "Field: value"})
+    else:
+        await tg.send(chat, reply.text, buttons=reply.buttons)
 
 
 async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incoming) -> None:
@@ -585,6 +624,12 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
     chat = msg.chat_id
     if msg.reply_to_text == WATCH_PROMPT and msg.text.strip() and not msg.text.startswith("/") and not msg.file_id:
         cmd, arg = "/watch", msg.text.strip()
+    if (msg.reply_to_text or "").startswith(advocate.FIELDS_HEAD) and msg.text.strip() and not msg.file_id:
+        # Details for a drafted opt-out notice: held in RAM with the draft, never logged or counted by value.
+        reply = advocate.answer_fields(conn, user, msg.text)
+        metrics.count(conn, "command", "opt_out_fields", "ok" if reply else "error")
+        await _send_reply(tg, chat, reply or advocate.Reply("That opt-out draft has expired. Tap Review & Draft Opt-Out again."))
+        return
     question = ""
     if msg.file_id:
         used = "check:file"
@@ -626,6 +671,9 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
             await _dashboard(conn, tg, user)
         elif cmd == "/jurisdiction":
             await _jurisdiction(conn, tg, user, arg)
+        elif cmd == "/redline":
+            advocate.arm_redline(user)
+            await tg.send(chat, advocate.REDLINE_ARMED)
         elif cmd == "/wrapped":
             async with progress.working(tg, chat, msg.message_id) as w:
                 w.stage("Looking back over your year…")
