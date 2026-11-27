@@ -496,7 +496,7 @@ def how_to_opt_out(opt: OptOut, domain: str | None) -> str:
     return "\n".join(lines)
 
 
-NO_OPT_OUT_PATH = "<b>How to opt out</b>\nThe policy doesn't say how to opt out of this."
+NO_OPT_OUT_PATH = "<b>How to opt out</b>\nI couldn't find a way to opt out of this in the policy. Check its privacy settings or help pages."
 
 
 def _printable(offer: Offer, body: str, why: str) -> Reply:

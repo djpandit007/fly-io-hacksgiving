@@ -23,7 +23,7 @@ The system SHALL, when a material terms change or checked document includes an a
 
 #### Scenario: Policy gives no way to opt out
 - **WHEN** a checked privacy or AI policy has an AI-training or deletion red flag but states no way to opt out
-- **THEN** the card says the policy doesn't say how to opt out
+- **THEN** the card says no way to opt out could be found in the policy
 
 ### Requirement: Cryptographically signed single-use human approval before dispatch
 The system SHALL NOT send any outbound opt-out email or submit any external web form without an explicit confirmation tap from the owning member carrying a short-lived, single-use, member-bound signed approval token.
