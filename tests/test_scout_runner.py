@@ -122,6 +122,7 @@ async def test_public_addresses_refuse_any_private_answer(monkeypatch):
         "mixed.test": ["1.1.1.1", "10.0.0.5"],  # one inside address is enough to refuse
         "docs.test": ["203.0.113.7"],  # reserved documentation range: not global
         "loop.test": ["127.0.0.1"],
+        "dual.test": ["2606:4700::1111", "1.1.1.1"],  # IPv6 answered first
     }
 
     class Loop:
@@ -139,3 +140,6 @@ async def test_public_addresses_refuse_any_private_answer(monkeypatch):
     # Only hosts whose every address is public are pinned; the rest can't be reached at all.
     allow = ["public.test", "mixed.test", "loop.test", "missing.test", "PUBLIC.test"]
     assert await sr.pin_hosts(allow) == {"public.test": "1.1.1.1"}
+    # IPv4 is preferred for the pin (worker Sprites may have no IPv6 route); IPv6-only hosts keep IPv6.
+    answers["v6only.test"] = ["2606:4700::1111"]
+    assert await sr.pin_hosts(["dual.test", "v6only.test"]) == {"dual.test": "1.1.1.1", "v6only.test": "2606:4700::1111"}

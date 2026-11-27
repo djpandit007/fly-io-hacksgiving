@@ -241,12 +241,12 @@ def resolver_rules(pins: dict[str, str]) -> str:
 
 
 async def pin_hosts(allow: list[str]) -> dict[str, str]:
-    """Each allowed host whose addresses are all public, pinned to its first address. Hosts that don't
+    """Each allowed host whose addresses are all public, pinned to its first IPv4 address (else its first address). Hosts that don't
     resolve, or resolve to anything non-public, are left out and so can't be reached at all."""
     pins: dict[str, str] = {}
     for host in dict.fromkeys(h.lower() for h in allow):
         if addresses := await public_addresses(host):
-            pins[host] = addresses[0]
+            pins[host] = next((a for a in addresses if ":" not in a), addresses[0])  # IPv4 first: workers may lack IPv6
     return pins
 
 

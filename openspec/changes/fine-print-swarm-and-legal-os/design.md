@@ -24,7 +24,7 @@ See `proposal.md` for motivation and capability scope. This design explains how 
 
 ### D1. 3-Role Multi-Sprite Swarm Topology & Least-Privilege Connector Matrix
 
-We introduce `app/swarm.py` to manage programmatic calls to the Sprites API (`https://api.sprites.dev/v1/sprites/...`) via a dedicated Sprites API Custom Connector (or `FP_SPRITES_TOKEN` in local dev) scoped to the `fly-io-hacksgiving-*` prefix.
+We introduce `app/swarm.py` to manage programmatic calls to the Sprites API (`https://api.sprites.dev/v1/sprites/...`) with a Sprites API token in the Gateway's environment (`FP_SPRITES_TOKEN`). A Custom API connector was the plan, but the connector gateway refuses connectors whose base is the Sprites API itself; the token appears to be org-wide, so Fine Print's Sprites should live in an org of their own scoped to the `fly-io-hacksgiving-*` prefix.
 
 ```
 +---------------------------------------------------------------------------------+
@@ -34,7 +34,7 @@ We introduce `app/swarm.py` to manage programmatic calls to the Sprites API (`ht
 +----------------------+-------------------------------+--------------------------+
 | 1. Gateway / Commons | OpenCode, Pinecone, Exa,      | Public HTTPS (:8080)     |
 | fly-io-hacksgiving   | LlamaCloud, AgentMail (read), | Persistent SQLite disk   |
-|                      | Sprites API (prefix-scoped)   | Sleeps when idle         |
+|                      | + Sprites API token (env)     | Sleeps when idle         |
 +----------------------+-------------------------------+--------------------------+
 | 2. Quarantine Scout  | NONE (zero connectors,        | Private only             |
 | fly-io-hacksgiving-  | zero credentials on box)      | Per-job DNS egress lock  |
@@ -194,7 +194,7 @@ A magic-link web Control Room (member Terms Radar, change inspector, live SSE sw
 2. **Swarm Provisioning (`scripts/setup_swarm.sh`):**
    - Creates/updates `fly-io-hacksgiving-scout` (installs Python 3.12 + Playwright + Chromium, zero Connectors) and creates its clean `base` checkpoint, saving the checkpoint ID into `.env.sprite` (`FP_SCOUT_BASE_CHECKPOINT`).
    - Creates/updates `fly-io-hacksgiving-advocate` (installs Python 3.12 + `python-docx` + LibreOffice headless + Playwright, attaches send-scoped AgentMail + OpenCode Connectors) and creates its `base` checkpoint (`FP_ADVOCATE_BASE_CHECKPOINT`).
-   - Updates `fly-io-hacksgiving` (Gateway) with the prefix-scoped Sprites API connector/token and redeploys.
+   - Updates `fly-io-hacksgiving` (Gateway) with `FP_SPRITES_API_BASE` + `FP_SPRITES_TOKEN` and redeploys.
 3. **Rollback:** Because `V6_MIGRATION` only adds tables and nullable columns (never dropping `services.terms_url` or existing columns), reverting the Gateway image + restoring `fineprint.db.v5.bak` cleanly restores single-Sprite v5 operation.
 4. **Phased Delivery Order for Implementing Agents:**
    - **Phase 1:** DB `v6` migration + Policy Bundles (`service_documents`, discovery, shared watching, contradiction detection, `/ask` bundle support).

@@ -49,7 +49,8 @@ Role = Literal["scout", "advocate"]
 SCOUT_TIMEOUT = 45.0
 ADVOCATE_TIMEOUT = 120.0
 TIMEOUTS: dict[str, float] = {"scout": SCOUT_TIMEOUT, "advocate": ADVOCATE_TIMEOUT}
-RESTORE_TIMEOUT = 30.0
+RESTORE_TIMEOUT = 90.0   # measured on live Sprites: ~15 s warm, ~48 s when the worker was asleep
+POLICY_TIMEOUT = 60.0    # the first call to a sleeping worker waits for it to wake
 # Hosts beyond the target's own site a job may reach (asset CDNs). Kept tiny on purpose.
 MAX_EXTRA_HOSTS = 3
 # Where scripts/setup_swarm.sh puts the runners and their virtualenv on each worker Sprite.
@@ -260,7 +261,7 @@ class Swarm:
 
     async def set_network_policy(self, role: str, policy: NetworkPolicy) -> None:
         await self.gw.request(
-            "POST", self._path(role, "policy/network"), json=policy.model_dump(), log_body=False, timeout=15
+            "POST", self._path(role, "policy/network"), json=policy.model_dump(), log_body=False, timeout=POLICY_TIMEOUT
         )
 
     async def restore_checkpoint(self, role: str) -> None:

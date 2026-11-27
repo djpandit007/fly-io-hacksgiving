@@ -6,15 +6,14 @@
 #   fly-io-hacksgiving-advocate  send-scoped AgentMail + OpenCode connectors;
 #                                Python 3.12 + python-docx + LibreOffice + Playwright -> FP_ADVOCATE_BASE_CHECKPOINT
 #
-# With SPRITES_API_TOKEN set, it also creates the Gateway's prefix-scoped Sprites API connector (a Custom
-# API connector that may only exec, set network policy and restore checkpoints on these two workers).
-#
-#   ./scripts/setup_swarm.sh             # both workers (and the connector if SPRITES_API_TOKEN is set)
+#   ./scripts/setup_swarm.sh             # both workers
 #   ./scripts/setup_swarm.sh scout       # one worker
 #   ./scripts/setup_swarm.sh advocate
 #
-# Then copy the connector's gateway base into .env.sprite as FP_SPRITES_API_BASE (./scripts/connectors.sh
-# lists it) and redeploy the Gateway (./scripts/setup_sprite.sh).
+# Set ADVOCATE_AGENTMAIL_BASE, ADVOCATE_AGENTMAIL_INBOX_ID and ADVOCATE_OPENCODE_BASE (the Advocate's own
+# connectors) to write its runner config. Then set FP_SPRITES_API_BASE=https://api.sprites.dev and
+# FP_SPRITES_TOKEN in .env.sprite and redeploy the Gateway (./scripts/setup_sprite.sh). The Gateway needs
+# the token itself: the connector gateway refuses Custom API connectors that target the Sprites API.
 #
 # Requires: the `sprite` CLI, logged in, python3 locally, and a filled-in .env.sprite.
 set -euo pipefail
@@ -146,45 +145,8 @@ setup_advocate() {
   echo "Advocate base checkpoint: $id"
 }
 
-# The Gateway's Sprites API connector: only the Gateway (label fineprint) may use it, and only for the
-# three calls app/swarm.py makes, on the two workers.
-create_sprites_connector() {
-  local body
-  body="$(umask 077; mktemp)"
-  SCOUT="$SCOUT" ADVOCATE="$ADVOCATE" PREFIX="$PREFIX" python3 -I -c '
-import json, os
-s, a, p = os.environ["SCOUT"], os.environ["ADVOCATE"], os.environ["PREFIX"]
-endpoints = [f"/v1/sprites/{n}/{tail}" for n in (s, a) for tail in ("exec", "policy/network", "checkpoints/*")]
-print(json.dumps({
-    "name": "sprites-swarm",
-    "description": "Fine Print Gateway -> worker Sprites (exec, network policy, checkpoint restore)",
-    "base_api_url": "https://api.sprites.dev",
-    "auth_method": "header",
-    "auth_header_prefix": "Bearer",
-    "access_token": os.environ["SPRITES_API_TOKEN"],
-    "access_policy": {"name_prefix": p, "sprite_labels": ["fineprint"], "allowed_endpoints": endpoints},
-}))' > "$body"
-  # Outside any directory with a .sprite file: with a sprite selected, `sprite api` would prefix the
-  # path with /v1/sprites/<that sprite>/. Without one, paths are relative to /v1/.
-  (cd "$(mktemp -d)" && sprite api /oauth/connections/custom_api -- -sS --fail-with-body -X POST \
-    -H 'Content-Type: application/json' -d "@$body" >/dev/null)
-  rm -f "$body"
-  echo "Created the sprites-swarm connector. Run ./scripts/connectors.sh and set FP_SPRITES_API_BASE."
-}
-
 [[ "$ONLY" == all || "$ONLY" == scout ]] && setup_scout
 [[ "$ONLY" == all || "$ONLY" == advocate ]] && setup_advocate
-
-if [[ "$ONLY" == all ]]; then
-  if [[ -n "${SPRITES_API_TOKEN:-}" ]]; then
-    create_sprites_connector
-  else
-    echo
-    echo "Gateway connector: set SPRITES_API_TOKEN and re-run, or add a Custom API connector by hand"
-    echo "(base https://api.sprites.dev, bearer token, sprite label fineprint, endpoints"
-    echo " /v1/sprites/$SCOUT/{exec,policy/network,checkpoints/*} and the same for $ADVOCATE)."
-  fi
-fi
 
 echo
 echo "Next:"
@@ -192,4 +154,5 @@ echo "  1. Make sure no connector reaches the Scout: every existing connector sh
 echo "     'fineprint' (the Scout only has 'fineprint-scout'), not just the name prefix $PREFIX."
 echo "  2. Give the Advocate its own AgentMail connector (send endpoint only) and OpenCode connector,"
 echo "     each requiring sprite label 'fineprint-advocate'."
-echo "  3. Set FP_SPRITES_API_BASE in .env.sprite and redeploy the Gateway: ./scripts/setup_sprite.sh"
+echo "  3. Set FP_SPRITES_API_BASE=https://api.sprites.dev and FP_SPRITES_TOKEN in .env.sprite, then"
+echo "     redeploy the Gateway: ./scripts/setup_sprite.sh"

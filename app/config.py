@@ -84,8 +84,8 @@ class Settings(BaseSettings):
     exa_key: SecretStr = SecretStr("")
 
     # Multi-Sprite swarm (Scout + Advocate workers). All optional: when unset, Fine Print runs as a
-    # single Sprite and Scout/Advocate actions degrade gracefully. On the Gateway Sprite the API base
-    # is a prefix-scoped Sprites API connector, so no token is needed there.
+    # single Sprite and Scout/Advocate actions degrade gracefully. The Gateway calls the Sprites API
+    # directly with a token: the connector gateway refuses connectors that target the Sprites API.
     sprites_api_base: str = ""
     sprites_token: SecretStr = SecretStr("")
     scout_sprite: str = "fly-io-hacksgiving-scout"

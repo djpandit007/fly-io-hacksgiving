@@ -138,18 +138,26 @@ With them, the Gateway hands untrusted work to two private workers through the S
 Every job locks the worker's DNS to the target's own site (everything else is refused), runs the runner
 script, then closes egress and restores the worker's clean base checkpoint, even when the job fails.
 
-1. `SPRITES_API_TOKEN=<token> ./scripts/setup_swarm.sh` creates both workers (Python 3.12, Playwright +
-   Chromium; the Advocate also gets `python-docx` and LibreOffice), takes each one's base checkpoint and
-   saves `FP_SCOUT_BASE_CHECKPOINT` / `FP_ADVOCATE_BASE_CHECKPOINT` into `.env.sprite`. With the token it
-   also adds the Gateway's Sprites API connector, which only Sprites labelled `fineprint` may use and only
-   for exec, network policy and checkpoint restore on the two workers. Without it, add that Custom API
-   connector by hand (base `https://api.sprites.dev`).
-2. Keep the Scout connector-free: make every other connector require the sprite label `fineprint` (the
-   Gateway's), not only the name prefix, since `fly-io-hacksgiving-scout` matches the prefix too. Give
-   the Advocate its own AgentMail connector limited to the send endpoint and an OpenCode connector, both
-   requiring the label `fineprint-advocate`.
-3. `./scripts/connectors.sh`, copy the Sprites connector's gateway base into `.env.sprite` as
-   `FP_SPRITES_API_BASE`, and redeploy the Gateway (`./scripts/setup_sprite.sh`).
+1. Label the Gateway (`sprite config update -s fly-io-hacksgiving --label fineprint`) and make every
+   existing connector require the sprite label `fineprint`, not only the name prefix, since
+   `fly-io-hacksgiving-scout` matches the prefix too. Check the label is on the Gateway *before*
+   requiring it, or the bot loses its connectors.
+2. Give the Advocate its own AgentMail and OpenCode connectors, both with name prefix
+   `fly-io-hacksgiving-advocate` and required label `fineprint-advocate`. The dashboard has no field for
+   allowed endpoints; set them through the API (`PATCH /v1/oauth/connections/<id>` with the full
+   `access_policy`): AgentMail to `/v0/inboxes/<inbox>/messages/send` only, OpenCode to
+   `/openai/v1/chat/completions` only.
+3. `ADVOCATE_AGENTMAIL_BASE=… ADVOCATE_AGENTMAIL_INBOX_ID=… ADVOCATE_OPENCODE_BASE=…
+   ./scripts/setup_swarm.sh` creates both workers (Python 3.12, Playwright + Chromium; the Advocate also
+   gets `python-docx` and LibreOffice), writes the Advocate's connector URLs, takes each one's base
+   checkpoint and saves `FP_SCOUT_BASE_CHECKPOINT` / `FP_ADVOCATE_BASE_CHECKPOINT` into `.env.sprite`.
+4. Add `FP_SPRITES_API_BASE=https://api.sprites.dev` and `FP_SPRITES_TOKEN=<Sprites API token>` to
+   `.env.sprite` and redeploy the Gateway (`./scripts/setup_sprite.sh`). A connector can't do this: the
+   connector gateway refuses Custom API connectors whose base is the Sprites API itself. The token
+   appears to be org-wide, so keep Fine Print's Sprites in an org of their own.
+
+Workers sleep when idle. The first job after a quiet spell waits for the worker to wake (a restore took
+~48 s cold, ~15 s warm), so a Scout crawl can add a minute to a check before it falls back.
 
 Re-run `./scripts/setup_swarm.sh scout` (or `advocate`) after changing `workers/`: it takes a new base
 checkpoint. Evidentiary screenshots are kept under `$FP_DATA_DIR/evidence/<service>/<document>/<sha>.png`;
