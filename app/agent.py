@@ -22,7 +22,20 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import BaseModel, Field
 
-from app import exa, judge, ledger, memory, parse, quotes, taps, tosdr, writer
+from app import (
+    benchmark,
+    exa,
+    judge,
+    ledger,
+    memory,
+    parse,
+    playbooks,
+    quotes,
+    taps,
+    tosdr,
+    writer,
+)
+from app.benchmark import Benchmark
 from app.config import settings
 from app.db import Change, Service, Snapshot, User, now, one, rows
 from app.gateway import Gateway, Recorder
@@ -35,6 +48,7 @@ from app.outgoing import Answer, AnswerKind, Outgoing
 from app.progress import Stage, no_stage
 from app.telegram import MAX_LEN, Buttons, esc, rich
 from app.watch import (
+    Section,
     SectionChange,
     diff,
     fetch,
@@ -43,6 +57,7 @@ from app.watch import (
     normalise,
     opt_out_days,
     redline,
+    sections,
     sha,
 )
 
@@ -111,6 +126,7 @@ class ChangeReport(BaseModel):
     precedents: list[Precedent] = Field(default_factory=list)
     deadline: date | None = None
     written: bool = True  # False when the summary is the raw redline (no writer, or the writer failed)
+    benchmark: Benchmark | None = None  # how the clause compares with public peers, when the cohort is big enough
 
     def to_html(self) -> str:
         v = self.verdict
@@ -130,6 +146,8 @@ class ChangeReport(BaseModel):
         if self.precedents:
             others = ", ".join(sorted({p.service for p in self.precedents}))
             lines.append(f"📚 You already accepted similar wording from: {esc(others)}")
+        if self.benchmark and v:
+            lines.append(f"📊 {esc(self.benchmark.line(v.category))}")
         return "\n".join(lines)
 
 
@@ -313,7 +331,7 @@ async def record_version(
             try:
                 await memory.remember(
                     cl.pinecone, f"chg-{change_id}", svc.name, change.heading, change.after,
-                    verdict.category if verdict else "other",
+                    verdict.category if verdict else "other", **benchmark.clause_metadata(verdict),
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning("pinecone remember failed: %s", exc)
@@ -325,10 +343,14 @@ async def record_version(
 
 async def report_for(
     conn: sqlite3.Connection, cl: Clients, change: Change, svc: Service, user: User,
-    vectors: dict[int, list[float]] | None = None,
+    vectors: dict[int, list[float]] | None = None, benchmarks: dict[int, Benchmark | None] | None = None,
 ) -> ChangeReport:
-    """Render one stored change for one member: their precedents, their opt-out deadline."""
+    """Render one stored change for one member: their precedents, their opt-out deadline.
+
+    Pass `benchmarks` (shared across members, like `vectors`) to add a public peer comparison; each
+    change is benchmarked once however many members it goes to."""
     verdict = verdict_of(change)
+    bench = await _change_benchmark(cl, change, svc, verdict, vectors, benchmarks)
     precedents: list[Precedent] = []
     if cl.pinecone and change.after_text:
         try:
@@ -359,7 +381,30 @@ async def report_for(
         effective_at=change.effective_at, verdict=verdict,
         summary=change.summary or fallback, written=bool(change.summary) and change.summary != fallback,
         redline=redline(change.before_text, change.after_text)[:1500], precedents=precedents, deadline=deadline,
+        benchmark=bench,
     )
+
+
+async def _change_benchmark(
+    cl: Clients, change: Change, svc: Service, verdict: Verdict | None,
+    vectors: dict[int, list[float]] | None, benchmarks: dict[int, Benchmark | None] | None,
+) -> Benchmark | None:
+    if benchmarks is None or not cl.pinecone or not verdict or verdict.category == "other" or not change.after_text:
+        return None
+    if change.id not in benchmarks:
+        benchmarks[change.id] = None
+        try:
+            vector = vectors.get(change.id) if vectors is not None else None
+            if vector is None:
+                vector = await memory.embed(cl.pinecone, change.after_text, "query")
+                if vectors is not None:
+                    vectors[change.id] = vector
+            benchmarks[change.id] = await benchmark.benchmark_clause(
+                cl.pinecone, change.after_text, verdict.category, verdict.severity, exclude_service=svc.name, vector=vector,
+            )
+        except Exception as exc:  # noqa: BLE001 — the alert goes out without a benchmark
+            log.warning("benchmark failed for change %s: %s", change.id, type(exc).__name__)
+    return benchmarks[change.id]
 
 
 def past_material_changes(conn: sqlite3.Connection, service_id: int, days: int = 365) -> list[Change]:
@@ -586,18 +631,175 @@ def _explain_buttons(flags: dict[str, float]) -> Buttons:
     return [shown[i : i + 2] for i in range(0, len(shown), 2)]
 
 
+STATUTE_CONFIRM = 0.7      # how sure Jev must be that a quoted clause triggers a statutory rule
+STATUTE_CONTEXT_CHARS = 12_000
+MAX_BENCHMARKS = 2         # found clauses benchmarked per verdict card
+JURISDICTION_HINT = "<i>Tip: set /jurisdiction to see where clauses like these may be restricted by law.</i>"
+
+
+async def _classify(cl: Clients, title: str, text: str) -> playbooks.Domain:
+    """The document's legal domain; consumer terms when Jev is unavailable, unsure or fails."""
+    if not cl.ai:
+        return playbooks.DEFAULT_DOMAIN
+    try:
+        found, _confidence = await judge.classify_domain(cl.ai, title, text)
+        return found
+    except Exception as exc:  # noqa: BLE001 — the consumer battery still gives a useful verdict
+        log.warning("classifying %s failed: %s", title, type(exc).__name__)
+        return playbooks.DEFAULT_DOMAIN
+
+
+async def _statutory(
+    cl: Clients, user: User | None, legal_domain: str, found: list[str], passed: list[quotes.Quote], text: str
+) -> str:
+    """Statutory notes for the member's jurisdiction, each confirmed by Jev against the quoted clause.
+
+    No member: nothing. A member with no jurisdiction: a one-line pointer to /jurisdiction."""
+    if user is None:
+        return ""
+    if not user.jurisdiction:
+        return JURISDICTION_HINT
+    rules = playbooks.statutes_for(user.jurisdiction, legal_domain, found)
+    if not rules or not cl.ai:
+        return ""
+    quoted = {q.flag: q.text for q in passed}
+    state: dict[str, str] = {"jurisdiction": playbooks.JURISDICTIONS[user.jurisdiction]}
+    asks: dict[str, str] = {}
+    for n, (flag, rule) in enumerate(rules.items(), start=1):
+        # The verified clause when there is one; otherwise the document's opening, where Jev looks itself.
+        state[f"clause_{n}"] = quoted.get(flag) or text[:STATUTE_CONTEXT_CHARS]
+        asks[flag] = rule.question.replace("`clause`", f"`clause_{n}`")
+    try:
+        sure = await judge.nouls(cl.ai, state, asks)
+    except Exception as exc:  # noqa: BLE001 — omit notes rather than show unconfirmed ones
+        log.warning("statutory check failed: %s", type(exc).__name__)
+        return ""
+    lines = [
+        f"⚖️ <b>{esc(flag.replace('_', ' '))}</b> {esc(rule.note)} ({esc(rule.law)})."
+        for flag, rule in rules.items() if sure.get(flag, 0.0) >= STATUTE_CONFIRM
+    ]
+    if not lines:
+        return ""
+    where = esc(playbooks.JURISDICTIONS[user.jurisdiction])
+    return f"<b>Where you live ({where})</b>\n" + "\n".join(lines)
+
+
+def _bundle_texts(conn: sqlite3.Connection, service_id: int) -> list[tuple[str, str]]:
+    """(document role, latest stored text) for each document of a service; role "terms" when unknown."""
+    out: list[tuple[str, str]] = []
+    doc_ids = [r[0] for r in conn.execute("SELECT DISTINCT document_id FROM snapshots WHERE service_id = ?", (service_id,))]
+    for doc_id in doc_ids:
+        row = conn.execute(
+            """SELECT s.text, d.role FROM snapshots s LEFT JOIN service_documents d ON d.id = s.document_id
+               WHERE s.service_id = ? AND s.document_id IS ? ORDER BY s.taken_at DESC, s.id DESC LIMIT 1""",
+            (service_id, doc_id),
+        ).fetchone()
+        if row:
+            out.append((row["role"] or "terms", row["text"]))
+    return out
+
+
+async def _conflicts(
+    conn: sqlite3.Connection | None, cl: Clients, user: User | None, legal_domain: str, text: str
+) -> str:
+    """Clauses in the member's watched services that the uploaded contract may forbid, checked in RAM.
+
+    The contract text stays in this function's locals and the Jev request (never logged); nothing is
+    written to SQLite or Pinecone, and the result goes only on this member's own card.
+    """
+    if conn is None or user is None or cl.ai is None or legal_domain not in playbooks.CONFLICT_DOMAINS:
+        return ""
+    contract = [
+        (p, t) for p in playbooks.parts(text) if (t := playbooks.topics(p.heading + "\n" + p.body, playbooks.CONTRACT_TOPICS))
+    ]
+    if not contract:
+        return ""
+    candidates: list[tuple[tuple[int, int], Service, str, Section, dict[str, int]]] = []
+    for svc in services_for(conn, user.id):
+        for role, stored in _bundle_texts(conn, svc.id):
+            for sec in sections(stored):
+                hits = playbooks.topics(sec.heading + "\n" + sec.body, playbooks.SERVICE_TOPICS)
+                if hits and ("ai" in hits or "licence" in hits):
+                    candidates.append(((len(hits), sum(hits.values())), svc, role, sec, hits))
+    candidates.sort(key=lambda c: c[0], reverse=True)
+    picked = candidates[: playbooks.MAX_CONFLICT_CANDIDATES]
+    if not picked:
+        return ""
+
+    def partner(hits: dict[str, int]) -> playbooks.Part:
+        # The contract part most about what this service clause touches: AI with AI, else secrecy and IP.
+        return max(contract, key=lambda pt: sum(pt[1].values()) + (5 if "ai" in hits and "ai" in pt[1] else 0))[0]
+
+    state: dict[str, str] = {}
+    asks: dict[str, str] = {}
+    pairs: list[tuple[Service, str, Section, playbooks.Part]] = []
+    for n, (_rank, svc, role, sec, hits) in enumerate(picked, start=1):
+        part = partner(hits)
+        state[f"contract_clause_{n}"] = part.body[: playbooks.CONTRACT_PART_CHARS]
+        state[f"service_clause_{n}"] = f"{svc.name} ({role}) · {sec.heading}: {sec.body[: playbooks.SERVICE_CLAUSE_CHARS]}"
+        asks[f"k{n}"] = (
+            f"`contract_clause_{n}` is from the member's own employment, NDA or client contract; `service_clause_{n}` "
+            "is from the terms of an online service the member uses. If the member put work covered by the contract "
+            f"into that service, would the service's terms let it use, train AI on, licence or disclose that work "
+            f"in a way `contract_clause_{n}` forbids?"
+        )
+        pairs.append((svc, role, sec, part))
+    try:
+        sure = await judge.nouls(cl.ai, state, asks)
+    except Exception as exc:  # noqa: BLE001 — never mention the exception text: it could echo the contract
+        log.warning("conflict check failed: %s", type(exc).__name__)
+        return ""
+    lines = []
+    for n, (svc, role, sec, part) in enumerate(pairs, start=1):
+        if sure.get(f"k{n}", 0.0) >= playbooks.CONFLICT_THRESHOLD:
+            doc = "" if role == "terms" else f" ({role.replace('_', ' ')})"
+            lines.append(
+                f"⚠️ <b>{esc(svc.name)}</b>{esc(doc)} · <i>{esc(sec.heading or 'terms')}</i> may conflict with your "
+                f"contract's <i>{esc(playbooks.part_label(part))}</i>: the service may use or licence work you put into it."
+            )
+    if not lines:
+        return ""
+    return "<b>Conflicts with services you use</b>\n" + "\n".join(lines)
+
+
+async def _benchmarks(cl: Clients, passed: list[quotes.Quote]) -> str:
+    """Peer comparisons for found clauses, from public clauses only; query-only, never an upsert."""
+    picked = [q for q in passed if q.flag in playbooks.FLAG_CATEGORY][:MAX_BENCHMARKS]
+    if not picked or not cl.ai or not cl.pinecone:
+        return ""
+    lines = []
+    try:
+        severities = await judge.clause_severity(cl.ai, [q.text for q in picked])
+        for q, severity in zip(picked, severities, strict=True):
+            if severity is None:
+                continue
+            category = playbooks.FLAG_CATEGORY[q.flag]
+            if b := await benchmark.benchmark_clause(cl.pinecone, q.text, category, severity):
+                lines.append(f"📊 <b>{esc(q.flag.replace('_', ' '))}</b>: {esc(b.line(category))}")
+    except Exception as exc:  # noqa: BLE001 — a benchmark is a nice-to-have
+        log.warning("benchmark failed: %s", type(exc).__name__)
+    return "\n".join(lines)
+
+
 async def verdict_card(
-    cl: Clients, title: str, text: str, domain: str | None = None, on_stage: Stage = no_stage
+    cl: Clients, title: str, text: str, domain: str | None = None, on_stage: Stage = no_stage,
+    *, conn: sqlite3.Connection | None = None, user: User | None = None,
 ) -> Outgoing:
-    """A "before you agree" card: verdict, the clauses behind found flags (verified against `text`),
-    what was checked, the community grade, and a 💡 button per flag. Nothing of `text` is kept."""
+    """A "before you agree" card: detected kind of document, verdict, the clauses behind found flags
+    (verified against `text`), statutory notes for the member's jurisdiction, conflicts with their
+    watched services, what was checked, the community grade, and a 💡 button per flag.
+
+    `domain` is the website's host (for ToS;DR); the legal domain is classified here. `conn` and
+    `user` identify the requesting member (jurisdiction, watchlist). Nothing of `text` is kept."""
     flags: dict[str, float] = {}
     card = ""
     passed: list[quotes.Quote] = []
     offered: list[quotes.Quote] = []
+    legal_domain: playbooks.Domain = playbooks.DEFAULT_DOMAIN
     if cl.ai:
         on_stage("Checking for red flags…")
-        flags = await judge.red_flags(cl.ai, title, text[: judge.MAX_DOCUMENT_CHARS])
+        legal_domain = await _classify(cl, title, text)
+        flags = await judge.red_flags(cl.ai, title, text[: judge.MAX_DOCUMENT_CHARS], playbooks.battery(legal_domain))
         on_stage("Writing it up…")
         try:
             raw = await writer.verdict_card(cl.ai, title, flags, text)
@@ -607,12 +809,23 @@ async def verdict_card(
                 log.info("dropped %d unverified clause quote(s) for %s", len(offered) - len(passed), title)
         except Exception as exc:  # noqa: BLE001 — the flags and grade are still worth sending
             log.warning("verdict card failed for %s: %s", title, exc)
-    parts = [f"<b>{esc(title)}</b>"]
+    found = [k for k, p in flags.items() if p >= FOUND]
+    head = f"<b>{esc(title)}</b>"
+    if cl.ai:
+        head += f"\n📂 <i>{esc(playbooks.label(legal_domain))}</i>"
+    parts = [head]
     if card:
         parts.append(rich(card))
     if passed:
         lines = "\n".join(f"<b>{esc(q.flag.replace('_', ' '))}</b>: “{esc(quotes.shown(q.text))}”" for q in passed)
         parts.append(f"<blockquote expandable><b>What the document says</b>\n{lines}</blockquote>")
+    for extra in (
+        await _statutory(cl, user, legal_domain, found, passed, text),
+        await _conflicts(conn, cl, user, legal_domain, text),
+        await _benchmarks(cl, passed),
+    ):
+        if extra:
+            parts.append(extra)
     if flags:
         checked = "\n".join(flag_line(k, p) for k, p in flags.items())
         parts.append(f"<blockquote expandable><b>What I checked for</b>\n{checked}</blockquote>")
@@ -620,16 +833,20 @@ async def verdict_card(
         grade = rating.grade or "unrated"
         parts.append(f"ToS;DR community grade: <b>{grade}</b> — <a href=\"{rating.url}\">details</a>")
     parts.append(DISCLAIMER)
-    asked = any(p >= FOUND for p in flags.values())
+    asked = bool(found)
     rate = rated("verdict", quotes_ok=(bool(offered) and len(passed) == len(offered)) if asked else None) if card else None
-    return Outgoing(text="\n\n".join(parts), buttons=_explain_buttons(flags), rate=rate)
+    return Outgoing(text="\n\n".join(parts), buttons=_explain_buttons(flags), rate=rate,
+                    check=playbooks.ContractCheck(domain=legal_domain, found=found))
 
 
-async def check_url(cl: Clients, url: str, on_stage: Stage = no_stage) -> Outgoing:
+async def check_url(
+    cl: Clients, url: str, on_stage: Stage = no_stage,
+    *, conn: sqlite3.Connection | None = None, user: User | None = None,
+) -> Outgoing:
     on_stage("Fetching the page…")
     text = await page_text(cl, url)
     host = (urlparse(url).hostname or url).removeprefix("www.")
-    return await verdict_card(cl, f"Terms at {host}", text, host, on_stage)
+    return await verdict_card(cl, f"Terms at {host}", text, host, on_stage, conn=conn, user=user)
 
 
 async def intake_file(
@@ -655,7 +872,7 @@ async def intake_file(
     except Exception as exc:  # noqa: BLE001
         log.warning("extract failed for %s: %s", filename, exc)
         title = filename
-    card = await verdict_card(cl, title, parsed.markdown, on_stage=on_stage)
+    card = await verdict_card(cl, title, parsed.markdown, on_stage=on_stage, conn=conn, user=user)
     if added:
         deadlines = "\n\n<b>Deadlines</b>\n" + "\n".join(added)
         card = card.model_copy(update={"text": card.text.replace(DISCLAIMER, deadlines.lstrip() + "\n\n" + DISCLAIMER)})
@@ -692,9 +909,10 @@ async def tick(conn: sqlite3.Connection, cl: Clients) -> TickResult:
             continue
         result.changes += len(changes)
         vectors: dict[int, list[float]] = {}
+        benchmarks: dict[int, Benchmark | None] = {}
         for change in changes:
             for user in subscribers(conn, svc.id):
-                report = await report_for(conn, cl, change, svc, user, vectors)
+                report = await report_for(conn, cl, change, svc, user, vectors, benchmarks)
                 result.deliveries.setdefault(user.id, []).append(alert(report, svc))
 
     due = ledger.due_for_nudge(conn)

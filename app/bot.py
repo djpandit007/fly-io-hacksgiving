@@ -20,6 +20,7 @@ from app import (
     ledger,
     mail,
     metrics,
+    playbooks,
     progress,
     taps,
     users,
@@ -43,6 +44,7 @@ MEMBER_MENU = [
     ("ask", "Ask about your terms"),
     ("deadlines", "Your opt-out windows, renewals and calendar link"),
     ("wrapped", "Your year in accepted terms"),
+    ("jurisdiction", "Where you live, for statutory notes"),
     ("help", "What I can do"),
 ]
 EMAIL_MENU = [("email", "Link your email"), ("verify", "Confirm your email code")]
@@ -354,6 +356,35 @@ async def _verify(conn: sqlite3.Connection, tg: Telegram, user: User, arg: str) 
     await tg.send(user.chat_id, text)
 
 
+def _jurisdiction_codes() -> str:
+    return "\n".join(f"<code>{code}</code> — {esc(where)}" for code, where in playbooks.JURISDICTIONS.items())
+
+
+async def _jurisdiction(conn: sqlite3.Connection, tg: Telegram, user: User, arg: str) -> None:
+    """`/jurisdiction [code|clear]`: where the member lives, for statutory notes on their checks."""
+    usage = f"Send /jurisdiction <i>code</i>, or /jurisdiction clear. Supported codes:\n{_jurisdiction_codes()}"
+    if not arg:
+        now_set = (
+            f"Your jurisdiction is <b>{esc(user.jurisdiction)}</b> ({esc(playbooks.JURISDICTIONS[user.jurisdiction])})."
+            if user.jurisdiction in playbooks.JURISDICTIONS else "You haven't set a jurisdiction."
+        )
+        await tg.send(user.chat_id, f"{now_set}\n\n{usage}")
+        return
+    try:
+        code = users.set_jurisdiction(conn, user, arg)
+    except ValueError:
+        await tg.send(user.chat_id, f"I don't know the jurisdiction {esc(arg[:40])}. {usage}")
+        return
+    if code is None:
+        await tg.send(user.chat_id, "Cleared your jurisdiction. Checks will skip statutory notes.")
+        return
+    await tg.send(
+        user.chat_id,
+        f"Saved <b>{esc(code)}</b>. Future checks will include statutory notes for "
+        f"{esc(playbooks.JURISDICTIONS[code])} where a known rule applies.\n<i>Information, not legal advice.</i>",
+    )
+
+
 # --- Button taps ---------------------------------------------------------------------------------
 
 PRIVATE_TAP = "This is a private Fine Print bot. Ask the operator for a join link."
@@ -566,6 +597,8 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
             await _email(conn, cl, tg, user, arg)
         elif cmd == "/verify":
             await _verify(conn, tg, user, arg)
+        elif cmd == "/jurisdiction":
+            await _jurisdiction(conn, tg, user, arg)
         elif cmd == "/wrapped":
             async with progress.working(tg, chat, msg.message_id) as w:
                 w.stage("Looking back over your year…")
@@ -582,7 +615,7 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
                 await _remove(conn, tg, user, arg)
         elif m := URL.search(msg.text):
             async with progress.working(tg, chat, msg.message_id) as w:
-                card = await agent.check_url(cl, m.group(0), on_stage=w.stage)
+                card = await agent.check_url(cl, m.group(0), on_stage=w.stage, conn=conn, user=user)
             await _reply(conn, tg, chat, [card], msg.message_id)
         else:
             await _suggest_or_point(tg, chat, msg.text)

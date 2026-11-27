@@ -15,6 +15,7 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
+from app import playbooks
 from app.config import settings
 from app.db import User, get_kv, now, one, rows, transaction
 
@@ -148,6 +149,22 @@ def remove(conn: sqlite3.Connection, user_id: int) -> bool:
 def set_name(conn: sqlite3.Connection, user: User, name: str) -> None:
     if name and name != user.name:
         conn.execute("UPDATE users SET name = ? WHERE id = ?", (name[:64], user.id))
+
+
+def set_jurisdiction(conn: sqlite3.Connection, user: User, code: str) -> str | None:
+    """Set (or, with "clear", clear) this member's jurisdiction; returns the stored code or None.
+
+    Only the code is stored. Raises ValueError for anything not in playbooks.JURISDICTIONS.
+    """
+    wanted = code.strip().upper().replace("_", "-")
+    if wanted.lower() in playbooks.CLEAR_WORDS:
+        stored = None
+    elif wanted in playbooks.JURISDICTIONS:
+        stored = wanted
+    else:
+        raise ValueError(f"unsupported jurisdiction {code!r}")
+    conn.execute("UPDATE users SET jurisdiction = ? WHERE id = ?", (stored, user.id))
+    return stored
 
 
 # --- Linking an email address ----------------------------------------------------------------------

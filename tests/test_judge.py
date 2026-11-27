@@ -156,7 +156,68 @@ async def test_relevance_error_body_is_not_logged(caplog):
 
 
 def test_every_red_flag_has_a_short_explanation():
+    from app import playbooks
     from app.judge import FLAG_EXPLANATIONS, RED_FLAGS
 
-    assert FLAG_EXPLANATIONS.keys() == RED_FLAGS.keys()
+    every = [key for pb in playbooks.PLAYBOOKS.values() for key in pb.flags]
+    assert len(every) == len(set(every))  # a key belongs to exactly one domain (💡 data carries only the key)
+    assert set(FLAG_EXPLANATIONS) == set(every)
     assert all(0 < len(text) <= 200 for text in FLAG_EXPLANATIONS.values())
+    assert len(set(FLAG_EXPLANATIONS.values())) == len(FLAG_EXPLANATIONS)  # each explanation is unique
+    assert set(RED_FLAGS) <= set(FLAG_EXPLANATIONS)
+
+
+def test_all_five_domains_have_batteries_and_consumer_flags_are_unchanged():
+    from app import playbooks
+    from app.judge import RED_FLAGS
+
+    assert set(playbooks.PLAYBOOKS) == {
+        "consumer_tos", "privacy_and_ai", "residential_lease", "employment_or_nda", "freelance_or_saas"}
+    assert list(RED_FLAGS) == ["auto_renews", "arbitration", "data_sharing", "unilateral_changes",
+                               "content_licence", "hard_to_cancel"]
+    assert RED_FLAGS["arbitration"] == "Does the document require disputes to go to binding arbitration or waive class actions?"
+    lease = playbooks.battery("residential_lease")
+    assert {"auto_lease_renewal", "repair_cost_shifting", "early_termination_penalty", "non_refundable_fees",
+            "security_deposit_trap", "landlord_unannounced_entry", "habitability_waiver"} == set(lease)
+    assert playbooks.battery("nonsense") == RED_FLAGS
+
+
+def test_every_flag_fits_an_explain_button():
+    from app import playbooks, taps
+
+    for key in playbooks.ALL_FLAGS:
+        assert taps.parse(taps.build("fx", key)) == taps.Tap("fx", key)
+
+
+def test_statutory_rules_name_known_flags_and_jurisdictions():
+    from app import playbooks
+
+    for (where, domain, flag), rule in playbooks.STATUTES.items():
+        assert where in playbooks.JURISDICTIONS and flag in playbooks.battery(domain)
+        assert rule.note.startswith("may be ") and "`clause`" in rule.question
+
+
+def _choice(choice, confidence):
+    return {"model": "jev-1.14.0", "answers": {"domain": {
+        "type": "choice", "choice": choice, "confidence": confidence, "probabilities": {choice: confidence}}}}
+
+
+@respx.mock
+@pytest.mark.parametrize("choice,confidence,expected", [
+    ("residential_lease", 0.9, "residential_lease"),
+    ("employment_or_nda", 0.8, "employment_or_nda"),
+    ("freelance_or_saas", 0.4, "consumer_tos"),   # unsure: the consumer battery runs
+    ("weather_report", 0.99, "consumer_tos"),     # not a domain we know
+])
+async def test_classify_domain_routes_or_falls_back(choice, confidence, expected):
+    import json
+
+    from app.judge import classify_domain
+
+    route = respx.post(RELEVANCE_URL).mock(return_value=httpx.Response(200, json=_choice(choice, confidence)))
+    domain, _ = await classify_domain(_relevance_gateway(), "Lease", "x" * 50_000)
+    assert domain == expected
+    body = json.loads(route.calls.last.request.content)
+    assert len(body["state"]["document"]) == 12_000  # header/sample only
+    q = body["questions"]["domain"]
+    assert q["type"] == "choice" and set(q["criteria"]) >= {"residential_lease", "consumer_tos"}
