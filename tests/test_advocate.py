@@ -310,6 +310,17 @@ async def test_postal_only_gives_a_printable_notice_and_no_dispatch(conn, member
     assert reply.buttons is None and conn.execute("SELECT COUNT(*) FROM approval_tokens").fetchone()[0] == 0
 
 
+async def test_email_from_an_unverified_document_is_never_offered_for_dispatch(conn, members):
+    """An uploaded file has no verified service domain, so an address in it is untrusted text: the
+    member gets a printable notice to check themselves, no Approve button and no approval token."""
+    a, _ = members
+    opt = OptOut(channel="email", target="optout@attacker.example", verbatim_instruction=CLAUSE)
+    ref = advocate.OFFERS.put(a.id, advocate.Offer(service="Upload", domain=None, opt=opt), 2048)
+    reply = advocate.draft_offer(conn, a, ref)
+    assert "Print this notice" in reply.text and "won't send it for you" in reply.text
+    assert reply.buttons is None and conn.execute("SELECT COUNT(*) FROM approval_tokens").fetchone()[0] == 0
+
+
 async def test_missing_fields_are_asked_for_then_drafted(conn, members):
     a, _ = members
     change_id = watched_change(conn, a)

@@ -428,9 +428,11 @@ def _deadline(offer: Offer) -> str:
 
 
 def _domain_ok(offer: Offer) -> bool:
-    """An email or form target must be on the service's own verified domain, when it has one."""
+    """An email or form target must be on the service's own verified domain. Without one (an uploaded
+    file or forwarded text), the target came from untrusted text, so nothing is dispatched: the member
+    gets a printable notice to check and send themselves."""
     if offer.domain is None:
-        return offer.opt.channel != "web_form"  # a form is only ever submitted on a verified domain
+        return False
     host = offer.opt.target.rsplit("@", 1)[-1] if offer.opt.channel == "email" else urlparse(offer.opt.target).hostname or ""
     return registrable_domain(host) == offer.domain
 
