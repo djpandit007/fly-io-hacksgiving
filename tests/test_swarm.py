@@ -16,11 +16,59 @@ SCOUT = f"{API}/v1/sprites/fp-scout"
 LONG_HTML = "<html><body><main><h2>Terms of Service</h2>" + "<p>You agree to these terms. </p>" * 40 + "</main></body></html>"
 PNG = swarm.PNG_MAGIC + b"fake-png-bytes"
 URL = "https://acme.test/terms"
+REAL_LANDING_URL = swarm.landing_url
 
 
 @pytest.fixture
 def conn(tmp_path):
     return db.connect(tmp_path / "swarm.db")
+
+
+def redirecting_client(hops: dict[str, str]) -> httpx.AsyncClient:
+    """A client whose transport answers each URL in `hops` with a 302 to its value, else 200."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        target = hops.get(str(request.url))
+        return httpx.Response(302, headers={"Location": target}) if target else httpx.Response(403, text="bot wall")
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True, max_redirects=5)
+
+
+async def test_landing_url_follows_redirects_and_keeps_the_url_on_failure():
+    hops = {"https://www.notion.so/terms": "https://www.notion.com/terms",
+            "https://www.notion.com/terms": "https://app.notion.com/p/terms"}
+    async with redirecting_client(hops) as client:
+        assert await REAL_LANDING_URL("https://www.notion.so/terms", client) == "https://app.notion.com/p/terms"
+        assert await REAL_LANDING_URL("https://plain.test/tos", client) == "https://plain.test/tos"  # 403 is fine
+
+    def boom(request):
+        raise httpx.ConnectTimeout("slow")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(boom)) as client:
+        assert await REAL_LANDING_URL(URL, client) == URL
+
+
+async def test_landing_url_lets_a_redirect_to_a_private_address_raise():
+    def handler(request):
+        raise swarm.BlockedURL("redirect to a private address", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(swarm.BlockedURL):
+            await REAL_LANDING_URL(URL, client)
+
+
+@respx.mock
+async def test_scout_crawls_where_the_url_lands_with_that_sites_exact_hosts(conn, monkeypatch, public_dns):
+    async def landed(url, client=None):
+        return "https://app.acme.com/p/terms"
+
+    monkeypatch.setattr(swarm, "landing_url", landed)
+    routes = mock_api(httpx.Response(200, content=framed(
+        {"ok": True, "final_url": "https://app.acme.com/p/terms", "html": LONG_HTML, "text": "t", "sha256": "0" * 64})))
+    sw = make(conn)
+    await sw.scout(URL)
+    await sw.aclose()
+    job = json.loads(routes["exec"].calls[0].request.content)
+    assert job["url"] == "https://app.acme.com/p/terms" and job["allow_hosts"] == ["app.acme.com", "acme.com"]
 
 
 def make(conn=None, checkpoints=None) -> swarm.Swarm:

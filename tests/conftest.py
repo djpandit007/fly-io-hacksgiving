@@ -38,3 +38,14 @@ def _fresh_overview_cache():
     agent.OVERVIEW_CACHE.clear()
     yield
     agent.OVERVIEW_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
+def _scout_crawls_the_url_as_given(monkeypatch):
+    """No test follows real redirects before a Scout crawl; tests/test_swarm.py tests landing_url itself."""
+    from app import swarm
+
+    async def same(url, client=None):
+        return url
+
+    monkeypatch.setattr(swarm, "landing_url", same)

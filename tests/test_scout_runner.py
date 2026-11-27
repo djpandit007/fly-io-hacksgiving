@@ -108,38 +108,3 @@ def test_wildcard_allow_hosts_are_rejected():
     for allow in (["*.notion.so"], ["notion.so", "*.notion.so"], ["*"]):
         with pytest.raises(ValueError):
             sr.parse_job(json.dumps({"url": "https://notion.so/terms", "allow_hosts": allow}))
-
-
-def test_resolver_rules_pin_each_host_and_refuse_every_other_name():
-    rules = sr.resolver_rules({"notion.so": "203.0.113.7", "www.notion.so": "2001:db8::1"})
-    assert rules == "MAP notion.so 203.0.113.7, MAP www.notion.so [2001:db8::1], MAP * ~NOTFOUND"
-    assert sr.resolver_rules({}) == "MAP * ~NOTFOUND"
-
-
-async def test_public_addresses_refuse_any_private_answer(monkeypatch):
-    answers = {
-        "public.test": ["1.1.1.1", "8.8.8.8"],
-        "mixed.test": ["1.1.1.1", "10.0.0.5"],  # one inside address is enough to refuse
-        "docs.test": ["203.0.113.7"],  # reserved documentation range: not global
-        "loop.test": ["127.0.0.1"],
-        "dual.test": ["2606:4700::1111", "1.1.1.1"],  # IPv6 answered first
-    }
-
-    class Loop:
-        async def getaddrinfo(self, host, port, type=0):
-            if host not in answers:
-                raise OSError("nxdomain")
-            return [(0, 0, 0, "", (ip, 0)) for ip in answers[host]]
-
-    monkeypatch.setattr(sr.asyncio, "get_running_loop", lambda: Loop())
-    assert await sr.public_addresses("public.test") == ["1.1.1.1", "8.8.8.8"]
-    assert await sr.public_addresses("mixed.test") == []
-    assert await sr.public_addresses("docs.test") == []
-    assert await sr.public_addresses("loop.test") == []
-    assert await sr.public_addresses("missing.test") == []
-    # Only hosts whose every address is public are pinned; the rest can't be reached at all.
-    allow = ["public.test", "mixed.test", "loop.test", "missing.test", "PUBLIC.test"]
-    assert await sr.pin_hosts(allow) == {"public.test": "1.1.1.1"}
-    # IPv4 is preferred for the pin (worker Sprites may have no IPv6 route); IPv6-only hosts keep IPv6.
-    answers["v6only.test"] = ["2606:4700::1111"]
-    assert await sr.pin_hosts(["dual.test", "v6only.test"]) == {"dual.test": "1.1.1.1", "v6only.test": "2606:4700::1111"}

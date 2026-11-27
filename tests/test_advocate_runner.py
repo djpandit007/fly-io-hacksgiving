@@ -215,19 +215,3 @@ def test_form_hosts_are_exact_and_dotted_hosts_are_refused():
         job = {"kind": "web_form", "url": "https://acme.test/form", "allow_hosts": bad, "fields": {}}
         with pytest.raises(ValueError):
             ar.parse_job(json.dumps(job))
-
-
-async def test_form_hosts_must_resolve_only_to_public_addresses(monkeypatch):
-    answers = {"public.test": ["1.1.1.1"], "mixed.test": ["1.1.1.1", "192.168.1.4"]}
-
-    class Loop:
-        async def getaddrinfo(self, host, port, type=0):
-            if host not in answers:
-                raise OSError("nxdomain")
-            return [(0, 0, 0, "", (ip, 0)) for ip in answers[host]]
-
-    monkeypatch.setattr(ar.asyncio, "get_running_loop", lambda: Loop())
-    assert await ar.public_addresses("public.test") == ["1.1.1.1"]
-    assert await ar.public_addresses("mixed.test") == [] and await ar.public_addresses("nope.test") == []
-    assert ar.resolver_rules({"acme.test": "1.1.1.1"}) == "MAP acme.test 1.1.1.1, MAP * ~NOTFOUND"
-    assert await ar.pin_hosts(["public.test", "mixed.test", "nope.test"]) == {"public.test": "1.1.1.1"}

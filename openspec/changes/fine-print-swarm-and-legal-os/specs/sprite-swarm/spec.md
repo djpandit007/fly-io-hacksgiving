@@ -18,19 +18,30 @@ The system SHALL separate responsibilities across three Sprite roles: the Gatewa
 - **THEN** no send Connector is reachable during analysis and no email is sent
 
 ### Requirement: Per-job DNS egress locking on the Scout Sprite
-The system SHALL apply a per-job DNS network policy on the Scout Sprite before fetching an external URL so that only exact host names resolve: the target host, its registrable domain, and at most a few explicit extra hosts, never wildcard sub-domains. Every allowed host SHALL be resolved and checked once before the job, and the browser SHALL be pinned to those checked addresses. All other names SHALL fail closed at DNS resolution.
+The system SHALL apply a per-job DNS network policy on the Scout Sprite before fetching an external URL so that only exact host names resolve: the page's host (where the URL lands after its HTTP redirects), its registrable domain, and at most a few explicit extra hosts, never wildcard sub-domains. All other names SHALL fail closed.
 
 #### Scenario: Scout fetches a service's legal portal
-- **WHEN** the Scout is assigned to crawl `https://www.notion.so/terms`
-- **THEN** its DNS policy permits only `www.notion.so` and `notion.so`, and refuses requests to any other host, including other sub-domains such as `cdn.notion.so`
+- **WHEN** the Scout is assigned to crawl `https://www.example.com/terms`, which does not redirect
+- **THEN** its DNS policy permits only `www.example.com` and `example.com`, and refuses requests to any other host, including other sub-domains such as `cdn.example.com`
 
-#### Scenario: Allowed host answers differently later
-- **WHEN** an allowed host's DNS answer changes to a private address after the job starts
-- **THEN** the browser keeps using the address checked before the job and never connects to the new one
+#### Scenario: Terms URL redirects to another host
+- **WHEN** a terms URL answers with HTTP redirects ending on another host
+- **THEN** the Gateway follows them (each hop checked for a public address) and the Scout crawls the landing page under a lock for that page's exact hosts
 
 #### Scenario: Scout attempts to reach a non-public address
 - **WHEN** a target URL redirects to a private, link-local, or loopback address
 - **THEN** the fetch is refused and aborted without returning content
+
+### Requirement: Worker browsers reach the network only through a checking proxy
+The system SHALL send every connection a worker's headless browser makes through a local egress proxy that accepts only HTTPS tunnels to the job's exact allowed hosts, resolves each host, refuses it unless every address is public, and connects to that same checked address.
+
+#### Scenario: Page requests a host outside the job
+- **WHEN** a page loads a script or redirects to a host that is not on the job's allowlist
+- **THEN** the proxy refuses the tunnel and the browser cannot reach that host
+
+#### Scenario: Allowed host answers with a private address
+- **WHEN** an allowed host's DNS answer includes a private, loopback or link-local address
+- **THEN** the proxy refuses the tunnel and the browser never connects to that address
 
 ### Requirement: Base-checkpoint restore after every Scout job
 The system SHALL maintain a clean base checkpoint on the Scout Sprite and SHALL restore the Scout Sprite to that base checkpoint after every crawl or untrusted document parse so no files, browser state, or residual artifacts survive between jobs.

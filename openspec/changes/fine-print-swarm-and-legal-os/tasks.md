@@ -33,7 +33,7 @@
 
 - [x] 5.4 Update `app/bot.py` (`MEMBER_MENU`, `HELP`) to publish `/jurisdiction` and `/redline`, updating README command docs and verifying bot-guidance tests pass.
 - [x] 5.5 Remove the web Control Room built during implementation (`app/web.py`, `app/sessions.py`, templates, `/dashboard`, `dashboard_sessions`, `jinja2`), keeping receipts in Telegram and swarm telemetry in `/stats`; verify the full suite passes without it.
-- [x] 5.6 Restrict worker egress to exact host names (no wildcard sub-domains) in `app/swarm.py`, `workers/scout_runner.py` and `workers/advocate_runner.py`, pinning every allowed host's checked address in Chromium and making all other names unresolvable; verify unit tests reject wildcard allowlists and cover the pinning rules.
+- [x] 5.6 Restrict worker egress to exact host names (no wildcard sub-domains) in `app/swarm.py`, `workers/scout_runner.py` and `workers/advocate_runner.py`, sending all Chromium traffic through a local egress proxy (`workers/egress_proxy.py`) that tunnels only to exact allowed hosts at their checked public addresses, and crawling a URL's HTTP landing page (`swarm.landing_url`); verify unit tests reject wildcard allowlists and cover the proxy's refusals.
 
 ## 6. Cross-Cutting Integration Verification
 

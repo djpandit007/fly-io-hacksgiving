@@ -24,14 +24,17 @@ import asyncio
 import base64
 import contextlib
 import hashlib
-import ipaddress
 import json
 import re
-import socket
 import sys
 import unicodedata
 from typing import Any
 from urllib.parse import urldefrag, urljoin, urlparse
+
+try:  # run as a script on the worker (workers/ on sys.path) or imported as a package in tests
+    from egress_proxy import EgressProxy, chromium_args, host_allowed
+except ImportError:  # pragma: no cover - exercised by the test suite's package import
+    from workers.egress_proxy import EgressProxy, chromium_args, host_allowed
 
 RESULT_START, RESULT_END = "<<FP-RESULT>>", "<<FP-END>>"
 NAV_TIMEOUT_MS = 25_000
@@ -78,15 +81,6 @@ def normalise_text(text: str) -> str:
 
 def digest(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
-
-
-def host_allowed(host: str, allow: list[str]) -> bool:
-    """Exact match only. A host with a leading or trailing dot (`notion.so.`) is refused rather than
-    normalised: Chromium would resolve it separately from the pinned `notion.so`."""
-    host = host.lower()
-    if not host or host.startswith(".") or host.endswith("."):
-        return False
-    return host in {h.lower() for h in allow}
 
 
 def on_site(host: str, allow: list[str]) -> bool:
@@ -153,64 +147,38 @@ def error_label(exc: BaseException) -> str:
     return name if re.fullmatch(r"[a-z][a-z0-9_]{0,39}", name) else "error"
 
 
-async def public_addresses(host: str) -> list[str]:
-    """The host's addresses if every one is public, else [] (unresolvable or any non-public address)."""
-    try:
-        infos = await asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except OSError:
-        return []
-    ips = [ipaddress.ip_address(str(i[4][0]).split("%")[0]) for i in infos]
-    if not ips or not all(ip.is_global and not ip.is_multicast for ip in ips):
-        return []
-    return [str(ip) for ip in dict.fromkeys(ips)]
-
-
-def resolver_rules(pins: dict[str, str]) -> str:
-    """Chromium --host-resolver-rules pinning each allowed host to the address that was checked, and
-    making every other name unresolvable, so a second DNS answer (rebinding) or an unlisted host can't
-    send the browser anywhere else."""
-    def addr(ip: str) -> str:
-        return f"[{ip}]" if ":" in ip else ip
-
-    return ", ".join([*(f"MAP {host} {addr(ip)}" for host, ip in sorted(pins.items())), "MAP * ~NOTFOUND"])
-
-
-async def pin_hosts(allow: list[str]) -> dict[str, str]:
-    """Each allowed host whose addresses are all public, pinned to its first IPv4 address (else its first address). Hosts that don't
-    resolve, or resolve to anything non-public, are left out and so can't be reached at all."""
-    pins: dict[str, str] = {}
-    for host in dict.fromkeys(h.lower() for h in allow):
-        if addresses := await public_addresses(host):
-            pins[host] = next((a for a in addresses if ":" not in a), addresses[0])  # IPv4 first: workers may lack IPv6
-    return pins
-
-
 # --- Browser ---------------------------------------------------------------------------------------
 
 async def crawl(job: dict[str, Any]) -> dict[str, Any]:
+    """Render the page with every Chromium connection going through the egress proxy (egress_proxy.py):
+    exact allowed hosts only, each resolved and checked by the proxy, which connects to that checked
+    address. The Sprite's network policy (DNS allowlist; private ranges blocked) is the outer fence."""
+    async with EgressProxy(job["allow_hosts"]) as proxy:
+        try:
+            return await _render(job, proxy)
+        except Exception:
+            if proxy.refused:  # a clearer label than Chromium's tunnel error
+                return {"ok": False, "error": f"egress_{proxy.refused[0]}"}
+            raise
+
+
+async def _render(job: dict[str, Any], proxy: EgressProxy) -> dict[str, Any]:
     from playwright.async_api import async_playwright  # only on the Scout Sprite
 
     allow: list[str] = job["allow_hosts"]
-    # DNS rebinding defence: every allowed host (exact names only) is resolved and checked once, here,
-    # and Chromium is pinned to those addresses with every other name unresolvable. The Sprite's
-    # network policy (DNS allowlist; private ranges blocked by the platform) is the outer fence.
-    pins = await pin_hosts(allow)
-    if (urlparse(job["url"]).hostname or "").lower() not in pins:
-        return {"ok": False, "error": "no_public_address"}
 
-    async def guard(route, request) -> None:
+    async def guard(route, request) -> None:  # second fence, before a request reaches the proxy
         parts = urlparse(request.url)
         if parts.scheme in ("data", "blob"):
             await route.continue_()
             return
-        host = (parts.hostname or "").lower()
-        if parts.scheme not in ("http", "https") or not host_allowed(host, list(pins)):
+        if parts.scheme != "https" or not host_allowed(parts.hostname or "", allow):
             await route.abort("blockedbyclient")
             return
         await route.continue_()
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True, args=[f"--host-resolver-rules={resolver_rules(pins)}"])
+        browser = await pw.chromium.launch(headless=True, args=chromium_args(proxy.url))
         try:
             context = await browser.new_context(
                 user_agent=USER_AGENT, accept_downloads=False, java_script_enabled=True,

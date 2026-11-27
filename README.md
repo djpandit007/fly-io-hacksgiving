@@ -135,7 +135,9 @@ With them, the Gateway hands untrusted work to two private workers through the S
 | `fly-io-hacksgiving-scout` | none | Renders bot-walled or JavaScript-only legal pages in headless Chromium, expands accordions, finds companion policy links, returns normalised text, a SHA-256 digest and (for public service pages only) a PNG evidentiary screenshot |
 | `fly-io-hacksgiving-advocate` | AgentMail (send only), OpenCode | Member-approved counter-measures: opt-out notices and redline kits |
 
-Every job locks the worker's DNS to the target's own site (everything else is refused), runs the runner
+Every job locks the worker's DNS to the exact hosts of the page (where its URL lands after HTTP redirects)
+and sends Chromium through a local egress proxy that only tunnels to those hosts at checked public addresses;
+it runs the runner
 script, then closes egress and restores the worker's clean base checkpoint, even when the job fails.
 
 1. Label the Gateway (`sprite config update -s fly-io-hacksgiving --label fineprint`) and make every

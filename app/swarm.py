@@ -41,7 +41,7 @@ from app import metrics
 from app.config import Provider, settings
 from app.db import DOC_ROLES, SwarmEvent, rows
 from app.gateway import Gateway, Recorder
-from app.netguard import BlockedURL, resolve_public
+from app.netguard import BlockedURL, resolve_public, safe_client
 
 log = logging.getLogger(__name__)
 
@@ -402,6 +402,9 @@ class Swarm:
         if parts.scheme not in ("http", "https"):
             raise BlockedURL("scheme not allowed")
         await resolve_public(parts.hostname or "")
+        # Worker egress allows exact host names only, so crawl where the URL lands after its HTTP
+        # redirects (each hop vetted here), not where it starts: www.notion.so/terms -> app.notion.com/...
+        url = await landing_url(url)
         hosts = egress_hosts(url, extra_hosts)
         job = ScoutJob(url=url, allow_hosts=hosts, screenshot=screenshot)
         data = await self.run_job("scout", job, allow_hosts=hosts, detail="playwright_crawl")
@@ -417,6 +420,28 @@ class Swarm:
         if not screenshot:
             result = result.model_copy(update={"screenshot_png_b64": ""})
         return result
+
+
+LANDING_TIMEOUT = 15.0
+
+
+async def landing_url(url: str, client: httpx.AsyncClient | None = None) -> str:
+    """Where `url` ends up after its HTTP redirects, followed by netguard's client (every hop must be
+    public, at most 5 hops). A redirect to a non-public address raises BlockedURL; any other failure
+    (bot wall, timeout) leaves the URL as it was. Only the response headers are read."""
+    own = client is None
+    client = client or safe_client(timeout=LANDING_TIMEOUT)
+    try:
+        async with client.stream("GET", url) as resp:
+            landed = str(resp.url)
+        return landed if urlparse(landed).scheme in ("http", "https") else url
+    except BlockedURL:
+        raise
+    except httpx.HTTPError:
+        return url
+    finally:
+        if own:
+            await client.aclose()
 
 
 def host_allowed(host: str, allow: Sequence[str]) -> bool:
