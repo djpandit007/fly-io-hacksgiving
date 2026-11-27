@@ -35,10 +35,12 @@ import base64
 import contextlib
 import hashlib
 import io
+import ipaddress
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -89,7 +91,11 @@ def digest(data: bytes) -> str:
 
 
 def host_allowed(host: str, allow: list[str]) -> bool:
-    host = host.lower().strip(".")
+    """Exact or `*.`-wildcard match. A host with a leading or trailing dot (`acme.test.`) is refused
+    rather than normalised: Chromium would resolve it separately from the pinned `acme.test`."""
+    host = host.lower()
+    if not host or host.startswith(".") or host.endswith("."):
+        return False
     for rule in allow:
         rule = rule.lower()
         if rule.startswith("*."):
@@ -220,24 +226,68 @@ CONTROLS_JS = """() => Array.from(document.querySelectorAll('form input, form te
 FORM_ACTIONS_JS = """() => Array.from(document.querySelectorAll('form')).map(f => f.action || location.href)"""
 
 
+async def public_addresses(host: str) -> list[str]:
+    """The host's addresses if every one is public, else [] (unresolvable or any non-public address)."""
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError:
+        return []
+    ips = [ipaddress.ip_address(str(i[4][0]).split("%")[0]) for i in infos]
+    if not ips or not all(ip.is_global and not ip.is_multicast for ip in ips):
+        return []
+    return [str(ip) for ip in dict.fromkeys(ips)]
+
+
+def resolver_rules(pins: dict[str, str]) -> str:
+    """Chromium --host-resolver-rules pinning each exact host to the address that was checked."""
+    def addr(ip: str) -> str:
+        return f"[{ip}]" if ":" in ip else ip
+
+    return ", ".join(f"MAP {host} {addr(ip)}" for host, ip in sorted(pins.items()))
+
+
 async def submit_form(job: dict[str, Any]) -> dict[str, Any]:
     from playwright.async_api import async_playwright  # only on the Advocate Sprite
 
     allow: list[str] = job["allow_hosts"]
+    # DNS rebinding defence, as in the Scout: exact allowed hosts are resolved, checked and pinned
+    # before launch; wildcard sub-domains are checked on first use; the Sprite's network policy (DNS
+    # allowlist, private ranges blocked by the platform) stops a later answer that points inside.
+    checked: dict[str, bool] = {}
+    pins: dict[str, str] = {}
+    for host in (h.lower() for h in allow if not h.startswith("*.")):
+        addresses = await public_addresses(host)
+        checked[host] = bool(addresses)
+        if addresses:
+            pins[host] = addresses[0]
+    if not pins:
+        return {"ok": False, "error": "no_public_address"}
 
     async def guard(route, request) -> None:
         parts = urlparse(request.url)
-        local = parts.scheme in ("data", "blob")
-        if local or (parts.scheme in ("http", "https") and host_allowed(parts.hostname or "", allow)):
+        if parts.scheme in ("data", "blob"):
             await route.continue_()
-        else:
+            return
+        host = (parts.hostname or "").lower()
+        if parts.scheme not in ("http", "https") or not host_allowed(host, allow):
             await route.abort("blockedbyclient")
+            return
+        if host not in checked:
+            checked[host] = bool(await public_addresses(host))
+        if not checked[host]:
+            await route.abort("addressunreachable")
+            return
+        await route.continue_()
+
+    async def no_websockets(ws) -> None:  # `route` does not see WebSockets: refuse them all
+        await ws.close()
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
+        browser = await pw.chromium.launch(headless=True, args=[f"--host-resolver-rules={resolver_rules(pins)}"])
         try:
             context = await browser.new_context(user_agent=USER_AGENT, accept_downloads=False, service_workers="block")
             await context.route("**/*", guard)
+            await context.route_web_socket("**/*", no_websockets)
             page = await context.new_page()
             await page.goto(job["url"], wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
             if not host_allowed(urlparse(page.url).hostname or "", allow):

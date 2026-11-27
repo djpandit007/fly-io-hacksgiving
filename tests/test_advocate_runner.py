@@ -204,3 +204,25 @@ def test_model_replies_are_parsed_as_json(monkeypatch):
     job = {"kind": "consumer", "model": "m", "tone": "firm", "clauses": [{"flag": "x", "quote": "q", "exploit": "e"}]}
     out = ar.consumer(job, {"FP_OPENCODE_BASE": "https://gw/opencode"})
     assert out["ok"] and out["items"][0]["replacement"] == "r" and out["email"]["body"] == "b"
+
+
+def test_dotted_form_hosts_are_refused_not_normalised():
+    allow = ["acme.test", "*.acme.test"]
+    assert ar.host_allowed("acme.test", allow) and ar.host_allowed("privacy.acme.test", allow)
+    for host in ("acme.test.", "privacy.acme.test.", ".acme.test", ""):
+        assert not ar.host_allowed(host, allow), host
+
+
+async def test_form_hosts_must_resolve_only_to_public_addresses(monkeypatch):
+    answers = {"public.test": ["1.1.1.1"], "mixed.test": ["1.1.1.1", "192.168.1.4"]}
+
+    class Loop:
+        async def getaddrinfo(self, host, port, type=0):
+            if host not in answers:
+                raise OSError("nxdomain")
+            return [(0, 0, 0, "", (ip, 0)) for ip in answers[host]]
+
+    monkeypatch.setattr(ar.asyncio, "get_running_loop", lambda: Loop())
+    assert await ar.public_addresses("public.test") == ["1.1.1.1"]
+    assert await ar.public_addresses("mixed.test") == [] and await ar.public_addresses("nope.test") == []
+    assert ar.resolver_rules({"acme.test": "1.1.1.1"}) == "MAP acme.test 1.1.1.1"
