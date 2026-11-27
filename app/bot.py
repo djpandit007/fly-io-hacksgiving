@@ -20,6 +20,7 @@ from app import (
     ledger,
     mail,
     metrics,
+    playbooks,
     progress,
     sessions,
     taps,
@@ -316,13 +317,6 @@ async def _dashboard(conn: sqlite3.Connection, tg: Telegram, user: User) -> None
     )
 
 
-async def _jurisdiction(conn: sqlite3.Connection, tg: Telegram, user: User, arg: str) -> None:
-    """Placeholder until the playbooks change lands: shows the current setting only."""
-    current = users.by_id(conn, user.id)
-    region = current.jurisdiction if current and current.jurisdiction else "not set"
-    await tg.send(user.chat_id, f"Your jurisdiction: <b>{esc(region)}</b>. Setting it here is coming soon.")
-
-
 async def _members(conn: sqlite3.Connection, tg: Telegram, user: User) -> None:
     lines = [
         f"{'👑' if m.is_owner else '•'} <code>{m.id}</code> {esc(m.label)}"
@@ -382,6 +376,35 @@ async def _verify(conn: sqlite3.Connection, tg: Telegram, user: User, arg: str) 
         email=esc(pending.email_pending or "") if pending else "", inbox=esc(settings.agentmail_address)
     )
     await tg.send(user.chat_id, text)
+
+
+def _jurisdiction_codes() -> str:
+    return "\n".join(f"<code>{code}</code> — {esc(where)}" for code, where in playbooks.JURISDICTIONS.items())
+
+
+async def _jurisdiction(conn: sqlite3.Connection, tg: Telegram, user: User, arg: str) -> None:
+    """`/jurisdiction [code|clear]`: where the member lives, for statutory notes on their checks."""
+    usage = f"Send /jurisdiction <i>code</i>, or /jurisdiction clear. Supported codes:\n{_jurisdiction_codes()}"
+    if not arg:
+        now_set = (
+            f"Your jurisdiction is <b>{esc(user.jurisdiction)}</b> ({esc(playbooks.JURISDICTIONS[user.jurisdiction])})."
+            if user.jurisdiction in playbooks.JURISDICTIONS else "You haven't set a jurisdiction."
+        )
+        await tg.send(user.chat_id, f"{now_set}\n\n{usage}")
+        return
+    try:
+        code = users.set_jurisdiction(conn, user, arg)
+    except ValueError:
+        await tg.send(user.chat_id, f"I don't know the jurisdiction {esc(arg[:40])}. {usage}")
+        return
+    if code is None:
+        await tg.send(user.chat_id, "Cleared your jurisdiction. Checks will skip statutory notes.")
+        return
+    await tg.send(
+        user.chat_id,
+        f"Saved <b>{esc(code)}</b>. Future checks will include statutory notes for "
+        f"{esc(playbooks.JURISDICTIONS[code])} where a known rule applies.\n<i>Information, not legal advice.</i>",
+    )
 
 
 # --- Button taps ---------------------------------------------------------------------------------
@@ -619,7 +642,7 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
                 await _remove(conn, tg, user, arg)
         elif m := URL.search(msg.text):
             async with progress.working(tg, chat, msg.message_id) as w:
-                card = await agent.check_url(cl, m.group(0), on_stage=w.stage)
+                card = await agent.check_url(cl, m.group(0), on_stage=w.stage, conn=conn, user=user)
             await _reply(conn, tg, chat, [card], msg.message_id)
         else:
             await _suggest_or_point(tg, chat, msg.text)

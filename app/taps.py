@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from typing import NamedTuple
 
-from app.judge import RED_FLAGS
+from app.judge import FLAG_EXPLANATIONS
 from app.telegram import CALLBACK_DATA_MAX
 
 VERSION = "v1"
@@ -51,7 +51,7 @@ def _valid(tap: Tap) -> bool:
         case "u" | "r":
             return tap.arg.isascii() and tap.arg.isdigit() and len(tap.arg) <= 12 and not tap.extra
         case "fx":
-            return tap.arg in RED_FLAGS and not tap.extra
+            return tap.arg in FLAG_EXPLANATIONS and not tap.extra
         case "fb":
             return bool(TOKEN.fullmatch(tap.arg)) and tap.extra in VOTES
         case "fr":

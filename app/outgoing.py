@@ -9,6 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.playbooks import ContractCheck
 from app.telegram import Buttons
 
 AnswerKind = Literal["verdict", "alert", "overview", "wrapped", "ask"]
@@ -28,6 +29,9 @@ class Outgoing(BaseModel):
     text: str
     buttons: Buttons = Field(default_factory=list)
     rate: Answer | None = None
+    # Verdict cards: the detected legal domain and the flags found (no document text), so a later
+    # step can decide what to offer, e.g. a redline kit for a personal contract (`check.offers_redline`).
+    check: ContractCheck | None = None
 
 
 def as_outgoing(message: str | Outgoing) -> Outgoing:

@@ -196,7 +196,7 @@ async def test_join_code_email_needs_a_reply_proving_the_mailbox(conn, tg, monke
                             "text": "Terms text. " * 60})
     checked = []
 
-    async def fake_card(cl, title, text, domain=None):
+    async def fake_card(cl, title, text, domain=None, **kw):
         checked.append(title)
         return "<b>Card</b>"
 
@@ -337,11 +337,11 @@ async def test_terms_update_subscribes_checks_and_fans_out(conn, tg, member, mon
 async def test_terms_link_and_long_body_and_short_body(conn, tg, member, monkeypatch):
     calls = []
 
-    async def fake_url(cl, url):
+    async def fake_url(cl, url, **kw):
         calls.append(("url", url))
         return "<b>URL card</b>"
 
-    async def fake_card(cl, title, text, domain=None):
+    async def fake_card(cl, title, text, domain=None, **kw):
         calls.append(("text", title))
         return "<b>Text card</b>"
 
@@ -366,7 +366,7 @@ async def test_email_contents_are_not_stored(conn, tg, member, monkeypatch):
     marker = "UNIQUE-BODY-MARKER-12345"
     mock_message(subject="Fwd: contract", text=(marker + " ") * 50)
 
-    async def fake_card(cl, title, text, domain=None):
+    async def fake_card(cl, title, text, domain=None, **kw):
         return "<b>ok</b>"
 
     monkeypatch.setattr(agent, "verdict_card", fake_card)

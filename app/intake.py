@@ -199,9 +199,10 @@ async def process(
         elif UPDATE_SUBJECT.search(subject) and (domain := original_sender_domain(msg, text)):
             cards = await _terms_update(conn, cl, tg, user, domain)
         elif (link := next((u for u in URL.findall(text) if TERMS_LINK.search(urlparse(u).path)), None)):
-            cards = [await agent.check_url(cl, link)]
+            cards = [await agent.check_url(cl, link, conn=conn, user=user)]
         elif len(text) >= MIN_BODY_CHARS:
-            cards = [await agent.verdict_card(cl, subject.removeprefix("Fwd: ").removeprefix("Fw: ") or "Forwarded email", text)]
+            title = subject.removeprefix("Fwd: ").removeprefix("Fw: ") or "Forwarded email"
+            cards = [await agent.verdict_card(cl, title, text, conn=conn, user=user)]
         else:
             cards = []
     except Exception as exc:  # noqa: BLE001

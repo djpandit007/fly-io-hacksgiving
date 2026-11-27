@@ -260,7 +260,7 @@ async def test_watch_with_no_changes_makes_no_overview_call(conn, tg, monkeypatc
 # --- Progress while working --------------------------------------------------------------------------
 
 async def test_link_check_shows_progress_and_replies_to_the_link(conn, tg, monkeypatch):
-    async def fake_check(cl, url, on_stage=None):
+    async def fake_check(cl, url, on_stage=None, **kw):
         on_stage("Fetching the page…")
         return "<b>Card</b>"
 
@@ -275,7 +275,7 @@ async def test_link_check_shows_progress_and_replies_to_the_link(conn, tg, monke
 
 
 async def test_failed_check_reacts_sad_and_still_explains(conn, tg, monkeypatch):
-    async def broken(cl, url, on_stage=None):
+    async def broken(cl, url, on_stage=None, **kw):
         raise RuntimeError("page gone")
 
     monkeypatch.setattr(agent, "check_url", broken)
@@ -640,7 +640,7 @@ async def test_explain_tap_shows_the_explanation_as_a_popup_only(conn, tg):
 async def test_link_check_card_keeps_its_explain_buttons(conn, tg, monkeypatch):
     from app.outgoing import Outgoing
 
-    async def fake_check(cl, url, on_stage=None):
+    async def fake_check(cl, url, on_stage=None, **kw):
         return Outgoing(text="<b>Card</b>", buttons=[[("💡 arbitration", "v1:fx:arbitration")]])
 
     monkeypatch.setattr(agent, "check_url", fake_check)
@@ -659,7 +659,7 @@ def _verdict(**kw):
 
 
 async def _rated_check(conn, tg, monkeypatch):
-    async def fake_check(cl, url, on_stage=None):
+    async def fake_check(cl, url, on_stage=None, **kw):
         return _verdict()
 
     monkeypatch.setattr(agent, "check_url", fake_check)
@@ -1007,3 +1007,40 @@ async def test_unchanged_buttons_are_not_edited(conn, tg, monkeypatch):
     edits = len(tg.called("edit"))
     await tap(conn, tg, 2, f"v1:fb:{token}:u", buttons=thanked)  # an old 👍 data with no rating row left
     assert len(tg.called("edit")) == edits  # Telegram would refuse a no-op edit
+
+
+# --- Jurisdiction ---------------------------------------------------------------------------------
+
+async def test_jurisdiction_is_set_per_member_and_cleared(conn, tg):
+    await say(conn, tg, 2, "/start join-code")
+    await say(conn, tg, 3, "/start join-code")
+    await say(conn, tg, 2, "/jurisdiction us-ca")
+    assert users.by_chat(conn, 2).jurisdiction == "US-CA" and users.by_chat(conn, 3).jurisdiction is None
+    assert "Saved <b>US-CA</b>" in tg.to(2)[-1] and "California" in tg.to(2)[-1]
+    await say(conn, tg, 2, "/jurisdiction")
+    assert "Your jurisdiction is <b>US-CA</b>" in tg.to(2)[-1]
+    await say(conn, tg, 2, "/jurisdiction clear")
+    assert users.by_chat(conn, 2).jurisdiction is None and "Cleared" in tg.to(2)[-1]
+
+
+async def test_invalid_jurisdiction_is_rejected_with_the_supported_codes(conn, tg):
+    await say(conn, tg, 2, "/start join-code")
+    await say(conn, tg, 2, "/jurisdiction EU")  # set first: a rejected code must not clear it
+    await say(conn, tg, 2, "/jurisdiction MARS")
+    reply = tg.to(2)[-1]
+    assert "I don't know the jurisdiction MARS" in reply
+    assert all(f"<code>{c}</code>" in reply for c in ("US-CA", "US-NY", "US-OTHER", "EU", "UK"))
+    assert users.by_chat(conn, 2).jurisdiction == "EU"
+
+
+async def test_link_check_passes_the_member_to_the_check(conn, tg, monkeypatch):
+    seen = []
+
+    async def fake_check(cl, url, on_stage=None, *, conn=None, user=None):
+        seen.append(user.chat_id)
+        return "<b>Card</b>"
+
+    monkeypatch.setattr(agent, "check_url", fake_check)
+    await say(conn, tg, 2, "/start join-code")
+    await say(conn, tg, 2, "https://acme.test/terms")
+    assert seen == [2]
