@@ -345,6 +345,19 @@ async def test_missing_fields_are_asked_for_then_drafted(conn, members):
     assert "ignored" not in reply.text
 
 
+async def test_a_typed_email_reaches_the_notice_and_the_name_is_asked_once(conn, members):
+    a, _ = members
+    conn.execute("UPDATE users SET email = NULL, name = '' WHERE id = ?", (a.id,))
+    a = users.by_id(conn, a.id)
+    change_id = watched_change(conn, a)
+    with extraction(email_opt(required_fields=["Name", "Email"])):
+        ask = await advocate.draft_change(conn, agent.Clients(), a, change_id)
+    assert ask.ask and ask.text.count("name: ") == 1 and "Full name: " in ask.text and "Email: " in ask.text
+    reply = advocate.answer_fields(conn, a, "Full name: Ada Lovelace\nEmail: ada.typed@example.com")
+    assert reply is not None and not reply.ask
+    assert "Email: ada.typed@example.com" in reply.text and "Name: Ada Lovelace" in reply.text
+
+
 async def test_a_target_off_the_services_domain_is_never_sent(conn, members):
     a, _ = members
     text = "To opt out, email optout@other-company.test within 30 days of this change, says the clause."
@@ -361,6 +374,61 @@ async def drafted(conn, user, opt=None, text=CLAUSE) -> str:
     change_id = watched_change(conn, user, text=text)
     with extraction(opt or email_opt()):
         return secret_of(await advocate.draft_change(conn, agent.Clients(), user, change_id))
+
+
+def _receipt(conn, user_id, target, hours_ago=1):
+    at = (datetime.now(UTC) - timedelta(hours=hours_ago)).isoformat(timespec="seconds")
+    conn.execute(
+        """INSERT INTO action_receipts (user_id, service_name, action_kind, target, clause_sha, proof_ref, executed_at)
+           VALUES (?, 'Acme', 'opt_out_email', ?, 'sha', 'm', ?)""",
+        (user_id, target, at),
+    )
+
+
+async def test_one_member_cant_send_the_same_opt_out_twice_a_day(conn, members):
+    a, _ = members
+    _receipt(conn, a.id, "arbitration-optout@acme.com")
+    _receipt(conn, a.id, "arbitration-optout@acme.com", hours_ago=30)  # older than a day: doesn't count
+    raw = await drafted(conn, a)
+    tg = FakeTelegram()
+    sw = FakeSwarm({"email": {"ok": True, "message_id": "m-2"}})
+    assert await advocate.approve(conn, SimpleNamespace(swarm=sw, ai=None), tg, a, raw) == "error"
+    assert sw.jobs == [] and "already sent an opt-out" in tg.texts(11)[-1] and "Nothing was sent" in tg.texts(11)[-1]
+    assert conn.execute("SELECT COUNT(*) FROM approval_tokens").fetchone()[0] == 0  # the draft is withdrawn
+
+
+async def test_daily_caps_per_member_and_per_target(conn, members):
+    a, b = members
+    for i in range(advocate.MAX_OPT_OUTS_PER_MEMBER_PER_DAY):
+        _receipt(conn, a.id, f"optout-{i}@other.example")
+    tg = FakeTelegram()
+    sw = FakeSwarm({"email": {"ok": True, "message_id": "m-3"}})
+    change_id = watched_change(conn, a)
+    conn.execute("INSERT INTO subscriptions (user_id, service_id, created_at) SELECT ?, service_id, ? FROM changes WHERE id = ?",
+                 (b.id, db.now(), change_id))
+    with extraction(email_opt()):
+        raw = secret_of(await advocate.draft_change(conn, agent.Clients(), a, change_id))
+    assert await advocate.approve(conn, SimpleNamespace(swarm=sw, ai=None), tg, a, raw) == "error"
+    assert "daily limit" in tg.texts(11)[-1] and sw.jobs == []
+    for _ in range(advocate.MAX_OPT_OUTS_PER_TARGET_PER_DAY):  # other members' sends to the same address
+        _receipt(conn, a.id, "arbitration-optout@acme.com")
+    with extraction(email_opt()):
+        raw = secret_of(await advocate.draft_change(conn, agent.Clients(), b, change_id))
+    assert await advocate.approve(conn, SimpleNamespace(swarm=sw, ai=None), tg, b, raw) == "error"
+    assert "daily share" in tg.texts(22)[-1] and sw.jobs == []
+
+
+def test_sweep_drops_expired_tokens_and_cache_entries(conn, members):
+    a, _ = members
+    old = datetime.now(UTC) - timedelta(hours=1)
+    advocate.issue(conn, a, "opt_out_email", SimpleNamespace(model_dump_json=lambda: "{}"), now=old)
+    clock = [0.0]
+    cache = advocate.EphemeralCache(10, 1024, clock=lambda: clock[0])
+    cache.put(a.id, "private draft", 13)
+    clock[0] = 11.0
+    advocate.sweep(conn)
+    cache.purge()
+    assert conn.execute("SELECT COUNT(*) FROM approval_tokens").fetchone()[0] == 0 and len(cache._slots) == 0
 
 
 async def test_approved_email_is_sent_by_the_advocate_with_a_receipt(conn, members):
@@ -460,6 +528,24 @@ async def test_captcha_fails_cleanly_with_a_printable_notice(conn, members, monk
     assert tg.documents == [] and conn.execute("SELECT COUNT(*) FROM action_receipts").fetchone()[0] == 0
 
 
+async def test_a_form_that_was_submitted_but_not_confirmed_is_never_reported_unsent(conn, members, monkeypatch):
+    a, _ = members
+
+    async def public(host):
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(advocate, "resolve_public", public)
+    opt = OptOut(channel="web_form", target=FORM_URL, verbatim_instruction=FORM_TEXT)
+    raw = await drafted(conn, a, opt, text=FORM_TEXT)
+    tg = FakeTelegram()
+    sw = FakeSwarm({"web_form": {"ok": False, "submitted": True, "error": "redirect_outside_lock"}})
+    assert await advocate.approve(conn, SimpleNamespace(swarm=sw, ai=None), tg, a, raw) == "error"
+    text = tg.texts(11)[-1]
+    assert "I submitted the" in text and "couldn't confirm it" in text and "Nothing was sent" not in text
+    receipt = conn.execute("SELECT action_kind, proof_ref FROM action_receipts").fetchone()
+    assert (receipt["action_kind"], receipt["proof_ref"]) == ("opt_out_form", "unconfirmed")
+
+
 async def test_a_web_form_is_never_offered_for_an_unverified_domain(conn, members):
     a, _ = members
     opt = OptOut(channel="web_form", target=FORM_URL, verbatim_instruction=FORM_TEXT)
@@ -503,6 +589,9 @@ async def test_bot_field_reply_finishes_the_draft(conn, members):
         await tap(conn, agent.Clients(), tg, 11, taps.build("oc", str(change_id)))
     prompt = tg.messages[-1]
     assert prompt["markup"]["force_reply"] is True
+    # A command sent as a reply to the prompt runs as a command and leaves the pending draft alone.
+    await bot.handle(conn, None, tg, Incoming(chat_id=11, name="Ada Lovelace", text="/list", reply_to_text=prompt["text"]))
+    assert "Approve & Send" not in str(tg.messages[-1]["buttons"]) and not tg.messages[-1]["text"].startswith(advocate.FIELDS_HEAD)
     await bot.handle(conn, None, tg, Incoming(chat_id=11, name="Ada Lovelace", text="Account username: ada_l",
                                               reply_to_text=prompt["text"]))
     assert "Approve & Send" in str(tg.messages[-1]["buttons"])

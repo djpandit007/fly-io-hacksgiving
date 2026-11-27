@@ -25,6 +25,7 @@ from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 
 from app import (
+    advocate,
     agent,
     bot,
     db,
@@ -53,6 +54,19 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 # service (inside the agent), and only one daily run happens at a time ("tick").
 
 
+SWEEP_EVERY = 60.0  # seconds between drops of expired drafts, approval tokens and held contracts
+
+
+async def _sweep_forever(conn) -> None:
+    """While the Sprite is awake, drop expired counter-measure data on a timer, not only on activity."""
+    while True:
+        try:
+            advocate.sweep(conn)
+        except Exception as exc:  # noqa: BLE001 — a failed sweep is retried next time
+            log.warning("sweep failed: %s", type(exc).__name__)
+        await asyncio.sleep(SWEEP_EVERY)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.conn = db.connect(settings.db_path)
@@ -62,11 +76,13 @@ async def lifespan(app: FastAPI):
     app.state.tg.recorder = recorder
     # Description and command menus: best-effort, in the background so a slow Telegram never delays startup.
     app.state.setup = asyncio.create_task(bot.setup(app.state.conn, app.state.tg)) if app.state.tg.configured else None
+    app.state.sweeper = asyncio.create_task(_sweep_forever(app.state.conn))
     yield
-    if app.state.setup:
-        app.state.setup.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await app.state.setup
+    for task in (app.state.setup, app.state.sweeper):
+        if task:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
     await app.state.clients.aclose()
     await app.state.tg.aclose()
     app.state.conn.close()
@@ -113,6 +129,7 @@ async def tick(request: Request) -> TickSummary:
         )
         metrics.prune(st.conn)
         feedback.prune(st.conn)
+        advocate.sweep(st.conn)
     return TickSummary(
         checked=result.checked, failed=result.failed, changes=result.changes, nudges=result.nudges,
         members_notified=len(result.deliveries), sent=delivered.sent, undelivered=delivered.failed,
@@ -123,6 +140,7 @@ async def _handle_message(app_: FastAPI, payload: dict, task: str) -> None:
     st = app_.state
     started = time.monotonic()
     claimed: tuple[int, int] | None = None
+    advocate.sweep(st.conn)  # expired drafts, tokens and contracts go before anything new is handled
     try:
         msg = parse_update(payload)
         if not msg:

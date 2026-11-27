@@ -234,6 +234,7 @@ class Swarm:
         # Workers whose last clean-up (egress close or checkpoint restore) failed. Fail closed: no job
         # runs on a quarantined worker until a fresh restore succeeds.
         self.quarantined: set[str] = set()
+        self._busy: dict[str, asyncio.Lock] = {}  # per worker role: one job at a time
 
     @classmethod
     def from_settings(cls, recorder: Recorder | None = None) -> Swarm | None:
@@ -302,25 +303,28 @@ class Swarm:
         """
         if not self.available(role):
             raise SwarmUnavailable("worker_unconfigured")
-        if role in self.quarantined:
-            await self._reset(role, close_egress=True)  # raises while the worker stays dirty
-        try:
-            if allow_hosts is not None:
-                rules = lock_rules(allow_hosts)
-                started = time.monotonic()
-                try:
-                    await self.set_network_policy(role, rules)
-                except Exception:
-                    self._count(role, "egress_lock", "error", metrics.elapsed_ms(started))
-                    self._event(role, "error", "egress_lock_failed")
-                    raise
-                ms = metrics.elapsed_ms(started)
-                self._count(role, "egress_lock", "ok", ms)
-                self._event(role, "egress_lock", "dns_allowlist", ms)
-                await asyncio.sleep(POLICY_SETTLE)
-            yield
-        finally:
-            await self._reset(role, close_egress=allow_hosts is not None)
+        # One job per worker at a time: a second job would replace the first one's egress policy, and the
+        # first one's restore would wipe the second one's disk mid-run.
+        async with self._busy.setdefault(role, asyncio.Lock()):
+            if role in self.quarantined:
+                await self._reset(role, close_egress=True)  # raises while the worker stays dirty
+            try:
+                if allow_hosts is not None:
+                    rules = lock_rules(allow_hosts)
+                    started = time.monotonic()
+                    try:
+                        await self.set_network_policy(role, rules)
+                    except Exception:
+                        self._count(role, "egress_lock", "error", metrics.elapsed_ms(started))
+                        self._event(role, "error", "egress_lock_failed")
+                        raise
+                    ms = metrics.elapsed_ms(started)
+                    self._count(role, "egress_lock", "ok", ms)
+                    self._event(role, "egress_lock", "dns_allowlist", ms)
+                    await asyncio.sleep(POLICY_SETTLE)
+                yield
+            finally:
+                await self._reset(role, close_egress=allow_hosts is not None)
 
     async def _reset(self, role: str, close_egress: bool) -> None:
         """Close egress and restore the base checkpoint. On any failure the worker is quarantined and

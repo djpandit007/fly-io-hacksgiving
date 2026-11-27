@@ -118,6 +118,52 @@ def test_form_fields_are_matched_by_their_words():
     assert ar.match_field("Postcode", controls) is None
 
 
+def test_the_form_to_submit_is_the_one_that_holds_the_filled_fields():
+    assert ar.target_form([{"index": "3", "form": "1"}, {"index": "4", "form": "1"}]) == 1
+    assert ar.target_form([{"index": "0", "form": "0"}, {"index": "4", "form": "1"}]) is None  # split across forms
+    assert ar.target_form([{"index": "0", "form": "-1"}]) is None  # not inside a form
+    assert ar.target_form([]) is None
+
+
+def test_the_forms_state_after_the_click_decides_if_it_was_accepted():
+    assert ar.form_outcome({"present": False}) is None  # gone: replaced by a confirmation
+    assert ar.form_outcome(None) is None
+    assert ar.form_outcome({"present": True, "invalid": True, "flagged": 0}) == (False, "form_invalid")
+    assert ar.form_outcome({"present": True, "invalid": False, "flagged": 2}) == (True, "form_rejected")
+    assert ar.form_outcome({"present": True, "invalid": False, "flagged": 0}) == (True, "form_still_shown")
+
+
+async def test_a_form_still_on_the_page_is_not_taken_as_accepted():
+    class Page:
+        url = "https://acme.test/opt-out"
+
+        async def wait_for_load_state(self, *a, **kw):
+            return None
+
+        async def content(self):
+            return "<form><input name=email></form>"
+
+        async def evaluate(self, js, arg):
+            return {"present": True, "invalid": False, "flagged": 1}
+
+    assert await ar._confirm(Page(), ["acme.test"], 0) == {"ok": False, "submitted": True, "error": "form_rejected"}
+
+
+async def test_a_failure_after_the_click_is_reported_as_submitted():
+    class Page:
+        url = "https://acme.test/thanks"
+
+        async def wait_for_load_state(self, *a, **kw):
+            return None
+
+        async def content(self):
+            raise RuntimeError("page crashed")
+
+    assert await ar._confirm(Page(), ["acme.test"]) == {"ok": False, "submitted": True, "error": "runtime_error"}
+    Page.url = "https://elsewhere.test/thanks"
+    assert (await ar._confirm(Page(), ["acme.test"]))["submitted"] is True
+
+
 def test_captchas_and_login_walls_stop_the_form():
     assert ar.blocked_by('<div class="g-recaptcha"></div>') == "captcha"
     assert ar.blocked_by('<form><input type="password"></form>') == "login_wall"

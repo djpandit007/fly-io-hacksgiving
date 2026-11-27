@@ -606,7 +606,7 @@ async def handle(conn: sqlite3.Connection, cl: Clients, tg: Telegram, msg: Incom
     chat = msg.chat_id
     if msg.reply_to_text == WATCH_PROMPT and msg.text.strip() and not msg.text.startswith("/") and not msg.file_id:
         cmd, arg = "/watch", msg.text.strip()
-    if (msg.reply_to_text or "").startswith(advocate.FIELDS_HEAD) and msg.text.strip() and not msg.file_id:
+    if (msg.reply_to_text or "").startswith(advocate.FIELDS_HEAD) and msg.text.strip() and not msg.text.startswith("/") and not msg.file_id:
         # Details for a drafted opt-out notice: held in RAM with the draft, never logged or counted by value.
         reply = advocate.answer_fields(conn, user, msg.text)
         metrics.count(conn, "command", "opt_out_fields", "ok" if reply else "error")

@@ -205,12 +205,67 @@ CONTROLS_JS = """() => Array.from(document.querySelectorAll('form input, form te
   .map((el, i) => {
     el.setAttribute('data-fp-field', String(i));
     const lab = el.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`) : el.closest('label');
-    return {index: String(i), type: (el.type || '').toLowerCase(), name: el.name || '', id: el.id || '',
+    return {index: String(i), form: String(Array.from(document.forms).indexOf(el.form)),
+            type: (el.type || '').toLowerCase(), name: el.name || '', id: el.id || '',
             placeholder: el.placeholder || '', aria: el.getAttribute('aria-label') || '',
             label: lab ? (lab.innerText || '').trim().slice(0, 120) : ''};
   })"""
 
 FORM_ACTIONS_JS = """() => Array.from(document.querySelectorAll('form')).map(f => f.action || location.href)"""
+
+
+def target_form(filled: list[dict[str, str]]) -> int | None:
+    """The one form (by index in document.forms) holding every filled control, else None."""
+    forms = {c.get("form", "-1") for c in filled}
+    if len(forms) != 1:
+        return None
+    (form,) = forms
+    return int(form) if form.isdigit() else None
+
+
+FORM_STATE_JS = """(i) => {
+  const f = document.forms[i];
+  if (!f || !f.isConnected) return {present: false, invalid: false, flagged: 0};
+  return {present: true, invalid: !f.checkValidity(),
+          flagged: f.querySelectorAll('[aria-invalid="true"]').length};
+}"""
+
+
+def form_outcome(state: dict[str, Any] | None) -> tuple[bool, str] | None:
+    """What the filled form's state after the click says: None when it's gone (taken as accepted), or
+    (submitted, error). A form that fails its own validation was never sent by the browser; one that is
+    still shown, or flags fields as invalid, may have been rejected, so it is unconfirmed."""
+    if not state or not state.get("present"):
+        return None
+    if state.get("invalid"):
+        return False, "form_invalid"
+    if state.get("flagged"):
+        return True, "form_rejected"
+    return True, "form_still_shown"
+
+
+async def _confirm(page, allow: list[str], form: int | None = None) -> dict[str, Any]:
+    """After the click: the confirmation page's screenshot, or why it couldn't be confirmed (submitted)."""
+    try:
+        with contextlib.suppress(Exception):
+            await page.wait_for_load_state("networkidle", timeout=10_000)
+        final = (urlparse(page.url).hostname or "").lower()
+        if not host_allowed(final, allow):
+            return {"ok": False, "submitted": True, "error": "redirect_outside_lock"}
+        if reason := blocked_by(await page.content()):
+            return {"ok": False, "submitted": True, "error": reason}
+        if form is not None and (outcome := form_outcome(await page.evaluate(FORM_STATE_JS, form))):
+            submitted, error = outcome
+            return {"ok": False, "submitted": submitted, "error": error}
+        png = await page.screenshot(full_page=True, type="png")
+        if len(png) > MAX_SCREENSHOT_BYTES:
+            png = await page.screenshot(full_page=False, type="png")
+        if len(png) > MAX_SCREENSHOT_BYTES:
+            return {"ok": False, "submitted": True, "error": "screenshot_too_large"}
+        return {"ok": True, "submitted": True, "screenshot_png_b64": base64.b64encode(png).decode(),
+                "screenshot_sha256": digest(png), "final_host": final}
+    except Exception as exc:  # noqa: BLE001 — the click happened; say so rather than "nothing was sent"
+        return {"ok": False, "submitted": True, "error": error_label(exc)}
 
 
 async def submit_form(job: dict[str, Any]) -> dict[str, Any]:
@@ -260,29 +315,26 @@ async def _submit(job: dict[str, Any], proxy: EgressProxy) -> dict[str, Any]:
             if not actions or not all(host_allowed(urlparse(a).hostname or "", allow) for a in actions):
                 return {"ok": False, "error": "form_outside_lock"}
             controls = await page.evaluate(CONTROLS_JS)
+            filled = []
             for label, value in job["fields"].items():
                 i = match_field(str(label), controls)
                 if i is None:
                     return {"ok": False, "error": "field_not_found"}
-                await page.fill(f'[data-fp-field="{controls[i]["index"]}"]', str(value)[:500])
-            submit = page.locator('form [type="submit"], form button:not([type])').first
+                filled.append(controls[i])
+            form = target_form(filled)
+            if form is None:
+                return {"ok": False, "error": "fields_in_several_forms"}
+            for control, value in zip(filled, job["fields"].values(), strict=True):
+                await page.fill(f'[data-fp-field="{control["index"]}"]', str(value)[:500])
+            # The submit button of the form that holds the filled fields, never another form on the page.
+            scope = page.locator("form").nth(form)
+            submit = scope.locator('[type="submit"], button:not([type])').first
             if await submit.count() == 0:
                 return {"ok": False, "error": "no_submit"}
             await submit.click()
-            with contextlib.suppress(Exception):
-                await page.wait_for_load_state("networkidle", timeout=10_000)
-            final = (urlparse(page.url).hostname or "").lower()
-            if not host_allowed(final, allow):
-                return {"ok": False, "error": "redirect_outside_lock"}
-            if reason := blocked_by(await page.content()):
-                return {"ok": False, "error": reason}
-            png = await page.screenshot(full_page=True, type="png")
-            if len(png) > MAX_SCREENSHOT_BYTES:
-                png = await page.screenshot(full_page=False, type="png")
-            if len(png) > MAX_SCREENSHOT_BYTES:
-                return {"ok": False, "error": "screenshot_too_large"}
-            return {"ok": True, "screenshot_png_b64": base64.b64encode(png).decode(),
-                    "screenshot_sha256": digest(png), "final_host": final}
+            # From here the form may have gone: a problem confirming it is reported as such, never as
+            # "nothing was sent".
+            return await _confirm(page, allow, form)
         finally:
             await browser.close()
 

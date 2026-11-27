@@ -175,6 +175,26 @@ async def test_service_with_only_terms_and_pre_bundle_snapshots_keeps_working(co
     assert [c.heading for c in changes] == ["Disputes"]
     assert changes[0].document_id == agent.documents_for(conn, svc)[0].id
     assert report.doc_role == "terms" and report.to_html().startswith("<b>Acme</b> changed <i>Disputes</i>")
+    # The conflict check reads one terms text (the newest), never the pre-bundle snapshot as a second copy.
+    assert agent._bundle_texts(conn, svc) == [("terms", new)]
+
+
+@respx.mock
+async def test_a_companion_whose_history_breaks_never_blocks_the_watch(conn, members, pages, monkeypatch):
+    providers()
+
+    async def backfill(name, url, days=365, document="Terms of Service"):
+        if url == AI_URL:
+            raise ValueError("archive sent something that isn't JSON")
+        return []
+
+    monkeypatch.setattr(agent, "backfill", backfill)
+    cl = clients()
+    svc = await watch_acme(conn, cl, members[0])
+    await cl.aclose()
+    roles = [r["role"] for r in conn.execute(
+        "SELECT d.role FROM snapshots s JOIN service_documents d ON d.id = s.document_id")]
+    assert roles == ["terms"] and [d.role for d in agent.documents_for(conn, svc)] == ["terms", "ai_terms"]
 
 
 # --- Contradictions ----------------------------------------------------------------------------------

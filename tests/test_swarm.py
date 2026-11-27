@@ -267,6 +267,25 @@ async def test_failed_restore_fails_closed_until_a_restore_succeeds(conn):
 
 
 @respx.mock
+async def test_jobs_on_one_worker_never_overlap(conn):
+    import asyncio
+
+    log: list[str] = []
+    mock_api(httpx.Response(200, content=framed({"ok": True})))
+    sw = make(conn)
+
+    async def one(name):
+        async with sw.job("scout", ["acme.test"]):
+            log.append(f"start {name}")
+            await asyncio.sleep(0.01)
+            log.append(f"end {name}")
+
+    await asyncio.gather(one("a"), one("b"))
+    await sw.aclose()
+    assert log in (["start a", "end a", "start b", "end b"], ["start b", "end b", "start a", "end a"])
+
+
+@respx.mock
 async def test_job_without_hosts_leaves_policy_alone():
     adv = f"{API}/v1/sprites/fp-advocate"
     policy = respx.post(f"{adv}/policy/network").mock(return_value=httpx.Response(200))

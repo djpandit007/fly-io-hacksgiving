@@ -805,22 +805,33 @@ async def _discover_companions(conn: sqlite3.Connection, svc: Service) -> None:
         log.warning("companion discovery failed for %s: %s", svc.name, type(exc).__name__)
 
 
+async def _onboard_document(conn: sqlite3.Connection, cl: Clients, svc: Service, doc: ServiceDocument) -> None:
+    """Backfill a year of one document's history, then take its live version."""
+    if doc.role == "terms":
+        url, versions = svc.terms_url, await backfill(svc.name, svc.terms_url)
+    else:
+        url, versions = doc.url, await backfill(svc.name, doc.url, document=OTA_DOCUMENTS.get(doc.role))
+    for version in versions:
+        await record_version(conn, cl, svc, version.text, version.taken_at, version.origin, doc)
+    try:
+        text = await page_text(cl, url, public=swarm.PublicPage(service_id=svc.id, doc_role=doc.role))
+        await record_version(conn, cl, svc, text, datetime.now(UTC), "live", doc)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("live fetch failed for %s (%s): %s", svc.name, doc.role, exc)
+
+
 async def onboard_service(conn: sqlite3.Connection, cl: Clients, svc: Service) -> None:
     """Once per service: find its Policy Bundle, then for each document backfill a year of history and
     take the live version; finally fetch the community grade."""
     await _discover_companions(conn, svc)
     for doc in documents_for(conn, svc):
         if doc.role == "terms":
-            url, versions = svc.terms_url, await backfill(svc.name, svc.terms_url)
-        else:
-            url, versions = doc.url, await backfill(svc.name, doc.url, document=OTA_DOCUMENTS.get(doc.role))
-        for version in versions:
-            await record_version(conn, cl, svc, version.text, version.taken_at, version.origin, doc)
-        try:
-            text = await page_text(cl, url, public=swarm.PublicPage(service_id=svc.id, doc_role=doc.role))
-            await record_version(conn, cl, svc, text, datetime.now(UTC), "live", doc)
+            await _onboard_document(conn, cl, svc, doc)
+            continue
+        try:  # a companion that can't be read (bad archive reply, judge error) never blocks the watch
+            await _onboard_document(conn, cl, svc, doc)
         except Exception as exc:  # noqa: BLE001
-            log.warning("live fetch failed for %s (%s): %s", svc.name, doc.role, exc)
+            log.warning("onboarding %s's %s failed: %s", svc.name, doc.role, type(exc).__name__)
     if rating := await tosdr.lookup(svc.domain or svc.name):
         conn.execute("UPDATE services SET tosdr_grade = ? WHERE id = ?", (rating.grade, svc.id))
 
@@ -1042,18 +1053,13 @@ async def _statutory(
     return f"<b>Where you live ({where})</b>\n" + "\n".join(lines)
 
 
-def _bundle_texts(conn: sqlite3.Connection, service_id: int) -> list[tuple[str, str]]:
-    """(document role, latest stored text) for each document of a service; role "terms" when unknown."""
+def _bundle_texts(conn: sqlite3.Connection, svc: Service) -> list[tuple[str, str]]:
+    """(document role, latest stored text) for each document of a service's bundle. Pre-v6 snapshots
+    (no document_id) count as the terms document's, through `latest_text`, never as a second copy."""
     out: list[tuple[str, str]] = []
-    doc_ids = [r[0] for r in conn.execute("SELECT DISTINCT document_id FROM snapshots WHERE service_id = ?", (service_id,))]
-    for doc_id in doc_ids:
-        row = conn.execute(
-            """SELECT s.text, d.role FROM snapshots s LEFT JOIN service_documents d ON d.id = s.document_id
-               WHERE s.service_id = ? AND s.document_id IS ? ORDER BY s.taken_at DESC, s.id DESC LIMIT 1""",
-            (service_id, doc_id),
-        ).fetchone()
-        if row:
-            out.append((row["role"] or "terms", row["text"]))
+    for doc in documents_for(conn, svc):
+        if text := latest_text(conn, svc, doc):
+            out.append((doc.role, text))
     return out
 
 
@@ -1074,7 +1080,7 @@ async def _conflicts(
         return ""
     candidates: list[tuple[tuple[int, int], Service, str, Section, dict[str, int]]] = []
     for svc in services_for(conn, user.id):
-        for role, stored in _bundle_texts(conn, svc.id):
+        for role, stored in _bundle_texts(conn, svc):
             for sec in sections(stored):
                 hits = playbooks.topics(sec.heading + "\n" + sec.body, playbooks.SERVICE_TOPICS)
                 if hits and ("ai" in hits or "licence" in hits):
@@ -1210,9 +1216,9 @@ async def verdict_card(
         on_stage("Looking for an opt-out…")
         site = discover.registrable_domain(domain) if domain else None
         opt = await advocate.extract_opt_out(cl, title, text, about=advocate.opt_out_about(found))
-        parts.insert(len(parts) - 1, advocate.how_to_opt_out(opt, site) if opt else advocate.NO_OPT_OUT_PATH)
-        if opt and advocate.dispatchable(opt, site):
-            actions += advocate.offer_opt_out(user, title, site, opt)
+        offer = advocate.offer_opt_out(user, title, site, opt) if opt and advocate.dispatchable(opt, site) else []
+        actions += offer
+        parts.insert(len(parts) - 1, advocate.how_to_opt_out(opt, site, bool(offer)) if opt else advocate.NO_OPT_OUT_PATH)
     return Outgoing(text="\n\n".join(parts), buttons=_explain_buttons(flags) + actions, rate=rate, check=check)
 
 

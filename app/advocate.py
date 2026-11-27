@@ -301,6 +301,16 @@ def prune(conn: sqlite3.Connection, now: datetime | None = None) -> int:
     return cur.rowcount
 
 
+def sweep(conn: sqlite3.Connection | None = None) -> None:
+    """Drop everything past its lifetime: expired approval tokens (their field values with them) and
+    expired entries of every RAM cache (offers, drafts, notice bodies, contracts). Runs on a timer and on
+    each update, so an abandoned draft doesn't linger until the next counter-measure."""
+    if conn is not None:
+        prune(conn)
+    for cache in (OFFERS, PENDING_FIELDS, DRAFTS, CONTRACTS, REDLINE_NEXT):
+        cache.purge()
+
+
 def issue(
     conn: sqlite3.Connection, user: User, kind: ActionKind, payload: BaseModel, now: datetime | None = None
 ) -> str:
@@ -406,9 +416,21 @@ def _known(user: User, label: str) -> str | None:
     return None
 
 
+def _is_name(label: str) -> bool:
+    low = label.lower()
+    return "name" in low and "user" not in low and "account" not in low
+
+
+def _is_email(label: str) -> bool:
+    low = label.lower()
+    return "email" in low or "e-mail" in low
+
+
 def _missing(user: User, offer: Offer) -> list[str]:
     need = ["Full name"] if not user.name else []
     for f in offer.opt.required_fields:
+        if _is_name(f) and need:  # "Full name" already asks for it
+            continue
         if _known(user, f) is None and f not in offer.fields:
             need.append(f)
     return [f for f in need if f not in offer.fields]
@@ -416,8 +438,10 @@ def _missing(user: User, offer: Offer) -> list[str]:
 
 def _fields(user: User, offer: Offer) -> dict[str, str]:
     out: dict[str, str] = {"Name": offer.fields.get("Full name") or user.name}
-    if user.email:
-        out["Email"] = user.email
+    # A linked, verified email first; otherwise the one the member typed when asked.
+    email = user.email or next((v for k, v in offer.fields.items() if _is_email(k) and v), "")
+    if email:
+        out["Email"] = email
     for f in offer.opt.required_fields:
         value = _known(user, f) or offer.fields.get(f)
         if value and f.lower() not in {"name", "full name", "email", "email address"}:
@@ -478,13 +502,15 @@ def _where(opt: OptOut) -> str:
     return f"⚙️ In your account: <b>{esc(opt.target)}</b>"
 
 
-def how_to_opt_out(opt: OptOut, domain: str | None) -> str:
+def how_to_opt_out(opt: OptOut, domain: str | None, offered: bool = True) -> str:
     """A verdict card section: the verified instruction, where to act, any deadline, and why Fine Print
-    will or won't offer to send it."""
+    will or won't offer to send it. `offered` says whether the card really carries the draft button."""
     lines = ["<b>How to opt out</b>", f"“{esc(quotes.shown(opt.verbatim_instruction))}”", _where(opt)]
     if opt.deadline_days is not None:
         lines.append(f"⏰ Within <b>{opt.deadline_days} days</b>")
-    if dispatchable(opt, domain):
+    if dispatchable(opt, domain) and not offered:
+        lines.append("You can send it yourself using the details above.")
+    elif dispatchable(opt, domain):
         lines.append("Tap <b>Review & Draft Opt-Out</b> to see the exact notice. Nothing is sent until you approve it.")
     elif opt.channel == "account_setting":
         lines.append("This is a setting you change yourself, so there's nothing for me to send.")
@@ -634,6 +660,7 @@ class EmailResult(BaseModel):
 
 class FormResult(BaseModel):
     ok: bool
+    submitted: bool = False  # the submit button was clicked, so the form may have gone even if not ok
     error: str = ""
     screenshot_png_b64: str = ""
     screenshot_sha256: str = ""
@@ -662,7 +689,61 @@ FORM_BLOCKED = {
     "redirect_outside_lock": "the form redirected to another site",
     "field_not_found": "I couldn't match the notice's details to the form's fields",
     "no_submit": "I couldn't find the form's submit button",
+    "fields_in_several_forms": "the details belong in more than one form on the page",
+    "form_invalid": "the form refused the details (a required box or field), so the browser didn't send it",
+    "form_rejected": "the form showed errors after it was sent, so it may not have been accepted",
+    "form_still_shown": "the form was still on the page afterwards, so I couldn't tell it was accepted",
+    "screenshot_too_large": "the confirmation page was too large to capture",
 }
+
+
+MAX_OPT_OUTS_PER_MEMBER_PER_DAY = 5   # sent opt-outs (email or form), by one member
+MAX_OPT_OUTS_PER_TARGET_PER_DAY = 3   # to one address or form host, by all members together
+DISPATCH_KINDS = ("opt_out_email", "opt_out_form")
+
+
+def _target_key(d: Dispatch) -> str:
+    """What a receipt records as the target: the address for email, the form's host for a web form."""
+    return d.target if d.channel == "email" else (urlparse(d.target).hostname or "").lower()
+
+
+def _over_limit(conn: sqlite3.Connection, raw: str, user: User, now: datetime | None = None) -> str | None:
+    """Why this approval would go over the daily dispatch limits, or None. Read from the metadata-only
+    receipts of the last 24 hours, before the token is consumed."""
+    if not taps.SECRET.fullmatch(raw):
+        return None
+    now = now or datetime.now(UTC)
+    row = conn.execute(
+        "SELECT payload_json FROM approval_tokens WHERE token_hash = ? AND user_id = ? AND consumed_at IS NULL AND expires_at > ?",
+        (_hash(raw), user.id, _stamp(now)),
+    ).fetchone()
+    if row is None:
+        return None  # consume() reports the invalid token as before
+    try:
+        d = Dispatch.model_validate_json(row["payload_json"])
+    except ValidationError:
+        return None
+    since, kinds = _stamp(now - timedelta(days=1)), DISPATCH_KINDS
+    target = _target_key(d)
+    mine = conn.execute(
+        "SELECT COUNT(*) FROM action_receipts WHERE user_id = ? AND action_kind IN (?, ?) AND executed_at > ?",
+        (user.id, *kinds, since),
+    ).fetchone()[0]
+    if mine >= MAX_OPT_OUTS_PER_MEMBER_PER_DAY:
+        return f"You've sent {mine} opt-outs in the last 24 hours, the daily limit. Try again tomorrow."
+    same = conn.execute(
+        "SELECT COUNT(*) FROM action_receipts WHERE user_id = ? AND target = ? AND action_kind IN (?, ?) AND executed_at > ?",
+        (user.id, target, *kinds, since),
+    ).fetchone()[0]
+    if same:
+        return f"You already sent an opt-out to {esc(target)} in the last 24 hours, so I won't send another."
+    everyone = conn.execute(
+        "SELECT COUNT(*) FROM action_receipts WHERE target = ? AND action_kind IN (?, ?) AND executed_at > ?",
+        (target, *kinds, since),
+    ).fetchone()[0]
+    if everyone >= MAX_OPT_OUTS_PER_TARGET_PER_DAY:
+        return f"{esc(target)} has had its daily share of opt-outs from this bot. Try again tomorrow."
+    return None
 
 
 async def approve(conn: sqlite3.Connection, cl: Any, tg: Messenger, user: User, raw: str) -> str:
@@ -681,6 +762,13 @@ async def approve(conn: sqlite3.Connection, cl: Any, tg: Messenger, user: User, 
         retry = [[("✅ Approve & Send", taps.build("oa", raw)), ("✖ Cancel", taps.build("ox", raw))]] if live else None
         await tg.send(chat, UNAVAILABLE, buttons=retry)
         return "unavailable"
+    if limit := _over_limit(conn, raw, user):
+        # Checked before the token is used: the draft is withdrawn and nothing goes out.
+        if taps.SECRET.fullmatch(raw):
+            conn.execute("DELETE FROM approval_tokens WHERE token_hash = ? AND user_id = ?", (_hash(raw), user.id))
+            DRAFTS.pop(user.id, _hash(raw))
+        await tg.send(chat, f"{limit} Nothing was sent.")
+        return "error"
     token = consume(conn, raw, user.id)
     if token is None:
         await tg.send(chat, "That approval is no longer valid (already used, cancelled or expired). Nothing was sent.")
@@ -755,6 +843,19 @@ async def _submit_form(conn: sqlite3.Connection, cl: Any, tg: Messenger, user: U
         result.ok and png.startswith(PNG_MAGIC) and hashlib.sha256(png).hexdigest() == result.screenshot_sha256
         and (not result.final_host or swarm.host_allowed(result.final_host, hosts))
     )
+    if not valid and result.submitted:
+        # The click happened, so the form may have gone: never say "nothing was sent", keep a receipt
+        # marked unconfirmed, and tell the member to check before sending it again.
+        why = FORM_BLOCKED.get(result.error, "the confirmation page couldn't be checked")
+        at = _receipt(conn, user, d, "opt_out_form", host, "unconfirmed")
+        await tg.send(
+            user.chat_id,
+            f"⚠️ <b>I submitted the {esc(d.service)} opt-out form at {esc(host)}, but couldn't confirm it</b>: "
+            f"{esc(why)}.\nTime: {esc(at)} UTC\nClause SHA-256: <code>{d.clause_sha}</code>\n\n"
+            "It may well have gone through. Look for a confirmation email or a change in your account "
+            f"before sending it again.\n\n{DISCLAIMER}",
+        )
+        return "error"
     if not valid:
         why = FORM_BLOCKED.get(result.error, "the form couldn't be completed automatically")
         await tg.send(
