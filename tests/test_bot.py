@@ -15,6 +15,8 @@ class FakeTelegram:
         self.sent: list[tuple[int, str]] = []
         self.messages: list[dict] = []   # every sent message with its buttons, reply_to and markup
         self.calls: list[tuple] = []     # (method, *args) for everything that isn't sendMessage
+        self.documents: list[dict] = []  # every sent document: chat, filename, content, caption, mime
+        self.photos: list[dict] = []     # every sent photo: chat, filename, content, caption
         self.configured = True
         self._next_id = 100
 
@@ -24,6 +26,17 @@ class FakeTelegram:
         self.messages.append({"chat": chat, "text": text, "buttons": buttons, "reply_to": reply_to,
                               "markup": markup, "id": self._next_id})
         return [self._next_id]
+
+    async def send_document(self, chat, filename, content, *, caption="", mime="application/octet-stream"):
+        self._next_id += 1
+        self.documents.append({"chat": chat, "filename": filename, "content": content, "caption": caption,
+                               "mime": mime})
+        return self._next_id
+
+    async def send_photo(self, chat, filename, content, *, caption=""):
+        self._next_id += 1
+        self.photos.append({"chat": chat, "filename": filename, "content": content, "caption": caption})
+        return self._next_id
 
     async def answer_callback(self, callback_id, text="", alert=False):
         self.calls.append(("answer", callback_id, text, alert))
@@ -68,6 +81,25 @@ def tg():
 
 async def say(conn, tg, chat, text, name="Someone", **fields):
     await bot.handle(conn, None, tg, Incoming(chat_id=chat, name=name, text=text, **fields))
+
+
+def watch(conn, user, name="Acme", url="https://acme.test/terms"):
+    """Subscribe a member to a service (created if new) and return the service."""
+    svc = agent.add_service(conn, name, url)
+    conn.execute("INSERT OR IGNORE INTO subscriptions (user_id, service_id, created_at) VALUES (?, ?, ?)",
+                 (user.id, svc.id, db.now()))
+    return svc
+
+
+async def test_the_shared_fakes_record_files_and_watches(conn, tg):
+    member = users.join_member(conn, "join-code", chat_id=5, name="M")
+    svc = watch(conn, member)
+    assert watch(conn, member).id == svc.id  # watching twice changes nothing
+    assert [s.name for s in agent.services_for(conn, member.id)] == ["Acme"]
+    assert await tg.send_document(5, "a.png", b"x", caption="c", mime="image/png")
+    assert await tg.send_photo(5, "b.png", b"y", caption="d")
+    assert tg.documents == [{"chat": 5, "filename": "a.png", "content": b"x", "caption": "c", "mime": "image/png"}]
+    assert tg.photos == [{"chat": 5, "filename": "b.png", "content": b"y", "caption": "d"}]
 
 
 async def test_owner_claims_then_members_join(conn, tg):
