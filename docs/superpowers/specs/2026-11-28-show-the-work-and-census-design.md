@@ -20,8 +20,9 @@ Advocate Sprites, approved opt-outs, redline kits. What is missing is everything
 2. Day one makes the existing work visible; day two builds a census of popular services.
 3. The video shows the opt-out notice Fine Print drafts and leaves sending to the member. Nothing is
    sent from the app on camera.
-4. The demo company lives on a free shared host. That costs the "terms contradict the privacy
-   policy" alert in the video, because Fine Print does not attach companion pages on shared hosts.
+4. No demo company. The video opens a real change that a real company (Spotify, YouTube) made in the
+   past year. Dropped with it, because they only showed with a page we control: an owner `/check`,
+   a provenance record, and evidence screenshots.
 5. Building continues into Monday morning.
 6. No new connectors. Jev stays on OpenCode, as it is today, and the census reads its pages with the
    fetchers Fine Print already has. (Decided after the plans were first written: a switch to the
@@ -41,17 +42,18 @@ Advocate Sprites, approved opt-outs, redline kits. What is missing is everything
 
 | Lane | What a judge sees |
 |---|---|
-| 1. Show the work | A change detected on camera; buttons for the diff, the evidence screenshot and how it was judged; the Sprites narrating their own steps; a notice ready to send |
+| 1. Show the work | A real change opened on camera; buttons for the diff and how it was judged; the Sprites narrating their own steps |
 | 2. Wrapped card | A shareable image of your year in fine print (also the social post) |
 | 3. Census | "More severe than 86% of 74 services" on alerts and verdict cards; `/radar`; watch everything you use in one message |
-| 4. Guests and kit | A good first minute for a judge who joins; demo company, video script, README, licence, post copy |
+| 4. Guests and kit | A good first minute for a judge who joins; video script, README, licence, post copy |
 
 ## Goals, non-goals, anti-goals
 
 **Goals**
 
-1. The video can show, for real and on demand: a terms change detected, the alert, its evidence and
-   reasoning, an opt-out notice drafted and ready to send; a contract checked and redlined; the card.
+1. The video can show, for real: a change a real company made in the past year, its diff and how it
+   was judged, the opt-out notice drafted for it; a contract checked and redlined while the Sprites
+   narrate; the card.
 2. A judge who joins gets something worth seeing in the first minute, with nothing to wait for, and
    cannot run up the operator's bill.
 3. The 📊 benchmark line appears on alerts and verdict cards.
@@ -60,17 +62,19 @@ Advocate Sprites, approved opt-outs, redline kits. What is missing is everything
 **Non-goals**
 
 - No web UI. No storing members' documents. No per-member Sprites.
-- No simulated, replayed or reset path in the product: the demo runs the real pipeline, and takes
-  are staged by redeploying the demo site.
-- Sending from the app (Approve & Send, receipts, its limits) is untouched and not in the video.
-  `/receipts` is not built: no judge could reach a sent opt-out.
+- No demo company, and no simulated, replayed or reset path in the product.
+- Not built before the deadline: an owner `/check`, a provenance record on snapshots, and evidence
+  screenshots for changes.
+- Sending from the app (Approve & Send, receipts, its limits) is untouched; the video stops at the
+  draft. `/receipts` is not built.
 - Census services are graded, not watched: no history, no daily checks, no contradiction search.
 - No changes to thresholds, prompts, the worker runners or the safety checks in `app/discover.py`.
 - OpenSpec capability specs are not updated before the deadline (my call; this design is the record).
 
 **Anti-goals** (failure even if it all works)
 
-- A new feature destabilises the daily watch before recording.
+- A new feature destabilises the daily watch before recording. Nothing in this change alters
+  `tick`, `check_bundle` or `record_version`.
 - The video or README claims something the code does not do ("300 ms restore", "forks Sprites",
   "HMAC-signed"). The measured restore is ~15 s warm and ~48 s cold; say that.
 - A named real company is graded wrongly in public.
@@ -106,68 +110,49 @@ Day one (show the work) is common to all three. For day two:
 
 ## Lane 1: show the work
 
-**One migration for the whole change, landed first** (`app/db.py`, `SCHEMA_VERSION` 7 → 8): add
-`snapshots.provenance TEXT` (JSON, NULL for old rows) and the `census` table from Lane 3. Lanes 2–4
-build on it, so no two lanes race for a schema version.
+**One migration for the whole change, landed first** (`app/db.py`, `SCHEMA_VERSION` 7 → 8): the
+`census` table for Lane 3, and a `snapshots.provenance` column that is now unused (it was for 1.3).
 
-**1.1 `/check <service>` (owner only).** Move the per-service body of `agent.tick` (run
-`check_bundle`, build `alert()` and `contradiction_alert()` for each watcher, with the shared
-vector and benchmark caches) into one function. `tick` loops over it; `/check` calls it for one
-watched service inside its own progress bubble, then `notify.deliver`; and it replaces the copy in
-`app/intake.py`, which today alerts without benchmarks. The owner gets a one-line result ("Checked
-Gobblr: 1 material change, 2 members notified", or "No changes since 27 Nov"). Add it to
-`OWNER_MENU`; the command list derives from the menus.
+**1.1 (dropped) `/check <service>`.** An owner command to run one service's check on demand. It was
+only useful on camera with a page we control, and the demo company was dropped.
 
 **1.2 The swarm narrates itself.** `Swarm.job`, `run_job` and `scout` (`app/swarm.py`) take an
 optional `on_stage` (the existing `progress.Stage` type) and call it at each step: "🔒 Locking the
-Scout's network to gobblr.netlify.app…", "🌐 Reading the page in a quarantined browser…", "⏪ Rewinding
-the Scout to its clean checkpoint…". Cosmetic only: it must never raise or change an outcome.
+Scout's network to acme.test…", "🌐 Reading the page in a quarantined browser…", "⏪ Rewinding the
+Scout to its clean checkpoint…". Cosmetic only: it must never raise or change an outcome.
 
 - `/watch`, link checks and file checks already run inside a bubble, so passing `on_stage` down
-  through `page_text`, `check_bundle` and `check_url` is enough for them.
+  through `page_text` and `check_url` is enough for them. The daily run (`check_bundle`) is not
+  touched.
 - The redline-kit tap runs bare today. Give it a bubble and thread `on_stage` through
   `advocate.redline_kit`, whose three jobs are the longest wait in the product.
 - Leave the Approve & Send tap alone.
 
-**1.3 Provenance.** `page_text` reports how it read the page (direct, Scout, Exa, LlamaParse).
-`Swarm.job` today times only the lock and the restore and returns neither, so add a small trace
-object that it fills with the lock, run and restore times and the number of allowed hosts.
-`record_version` stores that JSON on the snapshot, with the judge's model id, which is not stored
-anywhere today. It describes a public page fetch: no member data.
-
-**1.4 Evidence for every material change.** In `check_bundle`, when a live version produced a
-material change and has no screenshot (the direct fetch worked, so the Scout never ran), run one
-Scout job with `screenshot=True`, save it with `swarm.save_evidence` under that snapshot's digest,
-and update the snapshot's `evidence_path` and provenance (`record_version` only sets the path at
-insert). Record the capture time, the PNG's SHA-256 and whether the Scout's text matched the judged
-text. Best effort: a failure is logged and the alert goes out without the button. Never for
-members' links.
+**1.3 (dropped) Provenance** and **1.4 (dropped) Evidence for every material change.** Both record
+how a *live* change was read and screenshot it. A change from the past year has neither, and both
+alter the daily watch path, so they are not built before the deadline.
 
 **1.5 Inspector buttons** on every change card (`agent.alert`), with new button data in
-`app/taps.py` (grammar comment, `_valid`, `METRIC`; none of them in `SLOW`):
+`app/taps.py` (none of it in `SLOW`):
 
 ```
-Gobblr changed Dispute Resolution (28 Nov 2026)
+Spotify changed Dispute resolution (03 Mar 2026)
 arbitration · Major (2.7/3) · favours the company
 …
-[🔍 What changed]  [📸 Evidence]  [🔬 How I checked]
+[🔍 What changed]  [🔬 How I checked]
 [✉️ Review & Draft Opt-Out]
 ```
 
 - `cd:<change id>` sends the diff: `watch.redline` output with removals struck through and additions
   bold, escaped, in an expandable quote, cut to one message.
-- `ce:<change id>` sends the screenshot as a file (full-page captures are too tall for a Telegram
-  photo) with a caption: service, document, capture time, text SHA-256, PNG SHA-256, and a plain
-  note if the Scout's text differed. The button is shown only when a screenshot exists.
-- `ch:<change id>` sends the reasoning, from stored fields only (no provider call). The model name
-  is shown only for versions recorded after this change.
+- `ch:<change id>` sends the reasoning, from stored fields only (no provider call). For a version
+  that came from the Wayback Machine it links to the capture, so anyone can check it.
 
 ```
 🔬 How I checked this
-Read 28 Nov 2026 08:14 UTC, directly from gobblr.netlify.app
-Screenshot by the Scout Sprite: network locked to 1 host (1.1 s),
-page rendered (8.4 s), rewound to its clean checkpoint (15.2 s)
-Jev's answers (jev-1.14):
+From the Wayback Machine: the capture of 03 Mar 2026 (a link)
+Compared with the version of 12 Jan 2026.
+Jev's answers (TypeSafe's decision model):
 • Would you want to know? yes, 96% sure
 • About: arbitration   • Favours: the company
 • How much it matters: Major (2.7 of 3)
@@ -177,25 +162,26 @@ I alert when Jev is at least 70% sure a change matters.
 
 - `co:<change id>` sends any stored change as a full card (with a benchmark cache, so the 📊 line
   can appear), and `cl:<service id>` lists a service's material changes of the past year as
-  buttons. The `/watch` reply gets a `🔎 Open a change` button. Review & Draft Opt-Out is a slow
-  tap, so it strips the row above it; `co:` is how a member gets the card back.
+  buttons. The `/watch` reply gets a `🔎 Open a change` button. **This is how the video shows a real
+  company's change, so it is not optional.** Review & Draft Opt-Out is a slow tap, so it strips the
+  row above it; `co:` is how a member gets the card back.
 - Every one of these checks that the tapping member watches that service, with the join
   `advocate.draft_change` uses; otherwise it answers "That button no longer works."
 
-**1.6 A notice the member sends themselves.** When Fine Print will not send an email opt-out (the
-address is not on the service's own verified domain), today's reply opens with a warning and "Print
-this notice, sign it and send it" (`advocate._printable`). For an email target, make it read as a
-finished draft. Postal stays "print, sign and post"; a form says "fill it in yourself" and lists the
-fields. The notice's last line says "Drafted with Fine Print" rather than "Sent at my request by
-Fine Print". This is what the video shows.
+**1.6 A notice the member sends themselves** (lowest priority; not in the video). When Fine Print
+will not send an email opt-out (the address is not on the service's own verified domain), today's
+reply opens with a warning and "Print this notice, sign it and send it" (`advocate._printable`). For
+an email target, make it read as a finished draft. Postal stays "print, sign and post"; a form says
+"fill it in yourself" and lists the fields. The notice's last line says "Drafted with Fine Print"
+rather than "Sent at my request by Fine Print".
 
 ```
-Your opt-out notice for Gobblr is ready
-⏰ Deadline: Mon 28 Dec 2026 (30 days)
+Your opt-out notice for Acme is ready
+⏰ Deadline: within 30 days
 Send it from your own email.
-To: optout@gobblr.example
-Subject: Opt-out notice: Gobblr
-┌ To Gobblr, I am writing to opt out as your terms permit. …
+To: optout@acme.example
+Subject: Opt-out notice: Acme
+┌ To Acme, I am writing to opt out as your terms permit. …
 I haven't sent this. I only send for you when the address is on the
 service's own verified domain, so check this one before you use it.
 ```
@@ -204,10 +190,10 @@ service's own verified domain, so check this one before you use it.
 `app/main.py`, with a test that all three return 404.
 
 **1.8 Names from the registrable domain.** `bot._name_for` takes the second-to-last label of the
-host, so `bbc.co.uk` and `amazon.co.uk` are both named "Co", and a page on `gobblr.netlify.app` is
+host, so `bbc.co.uk` and `amazon.co.uk` are both named "Co", and a page on `acme.netlify.app` is
 named "Netlify" (checked by running it). Use the first label of `discover.registrable_domain(host)`
-instead: "Bbc", "Amazon", "Gobblr"; `youtube.com` and `policies.google.com` are unchanged. Stored
-names of existing services do not change. The demo company depends on this.
+instead: "Bbc", "Amazon", "Acme"; `youtube.com` and `policies.google.com` are unchanged. Stored
+names of existing services do not change.
 
 ## Lane 2: Wrapped card
 
@@ -327,46 +313,30 @@ and instant. No more than 50 members in all (`users.join_member`). The join link
 notes for judges, not in the README or the public post, so spend stays bounded without a global
 meter. Each message at a limit says so plainly.
 
-**4.2 A real alert for a newcomer.** `FP_SHOWCASE_SERVICE` names the demo company. The welcome and
-`/help` get a `🎬 See a real alert` button that adds it to the member's watchlist and sends its
-newest material change that offers an opt-out as a full card, with one line saying this is a
-fictional demo company. Every button on it works, and the opt-out comes back as a draft. Unset hides
-the button.
+**4.2 A real alert for a newcomer.** `FP_SHOWCASE_SERVICE` names a real service the owner watches
+(for example Spotify). The welcome and `/help` get a `🎬 See a real alert` button that adds it to the
+member's watchlist and sends one of its material changes as a full card: the newest that offers an
+opt-out when there is one, otherwise the newest. One line before it says this is a real change that
+company made, and that nothing is ever sent without the member's tap. Unset hides the button.
 
 **4.3 Welcome copy** offers three things: see a real alert, tell me what you use, send me a contract.
 
-**4.4 The demo company** (`demo/site/v1/`, `demo/site/v2/`, `demo/switch.sh`, `demo/README.md`):
-
-- A static site for a fictional service with a one-word name, each folder complete, with a footer
-  saying it is fictional. Terms v1 is mild. Terms v2 adds binding arbitration with an opt-out
-  "within 30 days" by email, a licence to train AI on what users upload, and a price change on
-  renewal. The opt-out address is on the reserved `.example` domain, so nothing anyone sends can
-  reach a real mailbox.
-- Hosted on any free static host where you choose the subdomain (Netlify, Cloudflare Pages). Not a
-  project page under a personal GitHub account: the name would come out as the account's.
-- **Takes.** `demo/switch.sh v1|v2` stamps a one-word revision into the page and redeploys that
-  folder. The stamp gives every deploy a new digest, so each take gets a fresh screenshot and the
-  full narration; without it, a repeated v2 reuses the stored screenshot and the Scout never runs.
-  It is a single token rather than a "Last updated" line because the normaliser drops such lines
-  (the digest would not change) and a longer stamp would itself count as a change.
-  One take is: switch to v1, `/check`, switch to v2, `/check`.
-- **Rules for takes.** Rehearse and record before the join link is shared, and do not touch the
-  site afterwards, because going back to v1 is itself a change that every watcher is told about.
-  Pause the daily workflow while recording (it runs at 7:47 PM IST and would use up the change).
-  The redline kit runs five times a UTC day, so rehearse it sparingly.
+**4.4 (dropped) The demo company.** A fictional service on a static host, to stage a change on
+camera. Dhananjay dropped it: the video shows a real company's change instead.
 
 **4.5 Video script** (`docs/demo/script.md`): a 2:30 run with every tap and line, what to stage
-beforehand, and honest numbers. Tap the inspector buttons before Review & Draft Opt-Out.
+beforehand, and honest numbers. The real change is chosen beforehand. Tap the inspector buttons
+before Review & Draft Opt-Out, and stop at the draft: nothing is sent.
 
 | Time | Shot |
 |---|---|
 | 0:00 | Hook and the Wrapped card |
-| 0:15 | "I use Spotify, Netflix, Uber and Notion": all watched, the year summed up |
-| 0:35 | The demo company changes its terms; `/check`; the Sprites narrate; the alert with its 📊 line |
-| 0:55 | Diff, evidence, how it was judged |
-| 1:10 | Review & Draft Opt-Out: the notice, the clause quoted, the deadline in the calendar; you send it |
-| 1:30 | A lease: verdict, a clause void where you live, the redline kit |
-| 1:55 | How it is built: three Sprites, connectors with least privilege, Jev's typed answers |
+| 0:15 | "I use Spotify, Netflix, Uber and Notion": all watched, what their terms say today, the year summed up |
+| 0:40 | 🔎 Open a change: a real change a real company made, with its 📊 line |
+| 0:55 | The diff, then how it was checked: the archive it came from and Jev's answers |
+| 1:10 | Review & Draft Opt-Out: the notice, with the clause quoted. Nothing is sent |
+| 1:30 | A lease: verdict, a clause void where you live, the redline kit while the Advocate narrates |
+| 1:55 | How it is built: a link check narrated by the Scout, three Sprites, connectors with least privilege, Jev's typed answers |
 | 2:15 | `/radar`, the card again |
 
 **4.6 README.** Lead with the pitch, screenshots from the recording, a "For judges" section (three
@@ -376,25 +346,24 @@ GitHub renders. The setup reference stays below. Correct any claim the code does
 **4.7 `LICENSE`** (MIT unless told otherwise) and **4.8 `docs/demo/submission.md`**: the two
 sentences, the connectors answer, notes for judges with the join link, and post copy.
 
-## Stretch, decided Sunday evening once everything above is live
+## Stretch
 
-1. The `/ask` verifier on Ollama Cloud: a second opinion from another vendor's open-weight model.
-   `llm.model_for` takes the provider's API prefix; unset falls back to OpenCode.
-2. Box as an evidence locker: each screenshot and a Markdown record of the change uploaded through a
-   connector that can upload but not delete. The upload half of `app/box.py` is in git at `0e553ba^`.
+None is planned. One idea is left on the list and is only built if Dhananjay asks: the `/ask`
+verifier on Ollama Cloud, a second opinion from another vendor's open-weight model. The Box evidence
+locker went with the evidence screenshots.
 
 ## Tasks only Dhananjay can do
 
-1. Put the demo company on a free static host under a subdomain of his choice.
-2. Pick the card's look from the mockups.
-3. Deploy with `scripts/setup_sprite.sh`; run `/census run`; spot-check ten graded services.
+1. Pick the card's look from the mockups.
+2. Deploy with `scripts/setup_sprite.sh`; run `/census run`; spot-check ten graded services.
+3. Name a watched service for the showcase (`FP_SHOWCASE_SERVICE`), and choose the real change to
+   open on camera. Watch YouTube only after the archive name fix is deployed: a service that already
+   has history is not read again.
 4. Record, post, submit.
 
 ## Order, deadlines and what gets cut
 
-- **Sat 28 Nov:** the migration lands first. Then lanes 1, 2 and 4 in parallel worktrees, and lane 3
-  started at the same time because it carries the most risk. Lane 1 merges before the others touch
-  `app/bot.py` and `app/agent.py`.
+- **Sat 28 Nov:** the foundation lands first. Then the four lanes in parallel worktrees.
 - **Sun 29 Nov:** merge, deploy, census run, live testing. Stretch decided in the evening.
 - **Sun night: a safe take.** Record the whole script with whatever is live, so a video exists
   whatever Monday brings (my call, given the choice to build into Monday).
@@ -402,53 +371,51 @@ sentences, the connectors answer, notes for judges with the join link, and post 
   submit by 12:30 PM. The deadline is 1:29 PM.
 
 If time runs short, cut in this order: stretch; the Wrapped comparison line and `/radar <service>`;
-the archive name fix (3.7); watch several at once; the showcase button; the open-a-change list.
-Never cut: `/check`, the inspector
-buttons, the narrated steps, the send-it-yourself draft, the name fix (1.8), the card, the demo
-company, the script, README and licence, the closed API pages, and the limits.
+the send-it-yourself draft (1.6); watch several at once; the showcase button. Never cut: the
+inspector buttons, opening a past change, the narrated steps, the archive name fix (3.7), the card,
+the census and `/radar`, the script, README and licence, the closed API pages, and the limits.
 
 ## Verification
 
 - Per lane: `uv run pytest -q` and `uvx ruff@0.17.6 check .` green; new tests beside the old ones for
-  button validation and forged ids, access checks on every new tap, provenance stored, evidence
-  capture failing quietly, the send-it-yourself draft for email, post and form targets, service
-  names for country-code and shared-host domains, limits and the member cap, census grading with
-  Jev and Pinecone faked, a census service never benchmarked against itself, name parsing
-  for several services, the card being a valid PNG of the right size, and the closed API pages.
+  button validation and forged ids, access checks on every new tap, the narration never changing a
+  job's outcome, the diff and "how I checked" messages, service names for country-code and
+  shared-host domains, limits and the member cap, census grading with Jev and Pinecone faked, a
+  census service never benchmarked against itself, name parsing for several services, the card being
+  a valid PNG of the right size, and the closed API pages.
 - `tests/test_e2e_smoke.py` grows: the alert carries the inspector buttons and they answer only a
   watcher; a faked census of twelve services makes the 📊 line appear.
-- Live, by the owner on the Sprites: `demo/switch.sh v2` then `/check`; the alert arrives under the
-  company's own name with the narration; `📸` returns a PNG; `🔬` shows the Scout's timings; Review
-  & Draft Opt-Out returns the ready-to-send notice; a second take after `switch.sh v1` and `v2`
-  narrates again; `/wrapped` sends the card; `/census run` finishes and `/radar` shows shares; a
-  second Telegram account joins, taps "See a real alert", and is stopped at its sixth new service.
+- Live, by the owner on the Sprites: `/watch` a real service and tap `🔎 Open a change`; the card
+  opens with its buttons; `🔍` shows the diff and `🔬` names the archive and Jev's answers; Review &
+  Draft Opt-Out returns the notice; a link that needs the Scout narrates its steps; `/wrapped` sends
+  the card; `/census run` finishes and `/radar` shows shares; a second Telegram account joins, taps
+  "See a real alert", and is stopped at its sixth new service.
 - The safe take on Sunday night is itself the end-to-end test of the script.
 
 ## Left to the builder
 
 Wording of new messages; button layout; the per-flag word lists and how candidate sections are
-scored; the card's layout within the chosen look; whether `page_text` reports its path by return
-value or an out-parameter; concurrency; test
-structure; the demo company's name and which static host.
+scored; the card's layout within the chosen look; concurrency; test structure.
 
 ## Calls I made (check these while reading)
 
 1. One migration for the whole change, landed before anything else.
-2. No reset or replay in the product. Takes are staged by redeploying a time-stamped demo site, and
-   recorded before the join link is shared.
-3. `/receipts` is dropped, and the email draft is reworded to read as ready to send.
+2. No demo company, and no reset or replay in the product: the video opens a real change from the
+   past year. `/check`, provenance and evidence screenshots were dropped with it, because they only
+   showed with a page we control and all three change the daily watch.
+3. `/receipts` is dropped. The email draft is reworded to read as ready to send, last in priority.
 4. Service names come from the registrable domain (this also fixes every `.co.uk` being "Co").
 5. The census is separate from `services` and `snapshots`, and is graded, not watched.
 6. The census asks only Jev; a clause is always the stored section text.
-7. Evidence is sent as a file with its capture time and both hashes, and says when the Scout's text
-   differed from the text that was judged.
+7. "How I checked" links a Wayback capture, so a reader can check the version for themselves.
 8. Limits apply to every member except the owner; membership is capped at 50; the join link goes in
    the form's notes, not in the README or the post.
 9. The card is drawn with Pillow on the Gateway, with a fixed line rather than model text.
-10. `/check` and `/census` are owner-only.
+10. `/census` is owner-only.
 11. The census skips the Scout: a direct fetch, then Exa, then LlamaParse.
 12. A safe take on Sunday night, and the last merge at 9 AM on Monday.
-13. The demo's opt-out address is on `.example`, so a judge who sends the draft reaches no one.
+13. The showcase button opens a real company's change; a judge can draft its opt-out, and nothing
+    is sent without their own tap.
 14. No OpenSpec artifacts for this change.
 
 ## Building it
