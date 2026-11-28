@@ -3,7 +3,7 @@
 Button data comes back from the client and is untrusted: `parse` accepts only the shapes below, and the
 bot still checks at tap time that whatever a tap acts on belongs to the member who tapped.
 
-    v1:h:<list|dl|watch|how>       help buttons            v1:u:<service id>   unwatch
+    v1:h:<list|dl|watch|how|demo>  help buttons            v1:u:<service id>   unwatch
     v1:w:<name>                yes, watch this          v1:r:<service id>   undo an unwatch
     v1:n                       no thanks                v1:fx:<flag key>    explain a red flag
     v1:fb:<token>:<u|d>        rate an answer           v1:fr:<token>:<w|c|n>  reason for a 👎
@@ -14,6 +14,14 @@ bot still checks at tap time that whatever a tap acts on belongs to the member w
     v1:ox:<secret>             cancel a drafted opt-out
     v1:rk:<ref>                redline kit: pick a tone (RAM-only contract)
     v1:rt:<ref>:<p|b|f>        redline kit: generate at that tone
+    v1:cd:<change id>          show a change's diff
+    v1:ce:<change id>          send a change's evidence screenshot
+    v1:ch:<change id>          how a change was checked
+    v1:co:<change id>          open a change as a full card
+    v1:cl:<service id>         list a service's material changes
+    v1:wa:<ref>                yes, watch all (RAM-only offer)
+    v1:rf:<flag key>           a census flag's ranking
+    v1:h:demo                  see a real alert
 """
 
 from __future__ import annotations
@@ -25,7 +33,7 @@ from app.judge import FLAG_EXPLANATIONS
 from app.telegram import CALLBACK_DATA_MAX
 
 VERSION = "v1"
-HELP_TOPICS = frozenset({"list", "dl", "watch", "how"})
+HELP_TOPICS = frozenset({"list", "dl", "watch", "how", "demo"})
 # One token that could be a service name or domain: dot-separated labels of letters, digits and inner
 # hyphens (no leading, trailing or doubled dots or hyphens at label edges), 2-58 characters in all.
 # 58 keeps "v1:w:<name>" within 64 bytes.
@@ -38,11 +46,12 @@ TONES = {"p": "polite", "b": "balanced", "f": "firm"}
 VOTES = {"u": "up", "d": "down"}
 REASONS = {"w": "wrong", "c": "unclear", "n": "not_useful"}
 # Taps that start provider work; everything else is a quick lookup or a single write.
-SLOW = frozenset({"w", "oc", "oa", "rt"})
+SLOW = frozenset({"w", "oc", "oa", "rt", "wa"})
 # Metric names per action (votes and reasons are recorded by answer feedback instead).
 METRIC = {"h": "help", "w": "watch", "n": "no", "u": "unwatch", "r": "undo", "fx": "explain",
           "oc": "opt_out_draft", "od": "opt_out_draft", "oa": "opt_out_send", "ox": "opt_out_cancel",
-          "rk": "redline", "rt": "redline_kit"}
+          "rk": "redline", "rt": "redline_kit", "cd": "inspect_diff", "ce": "inspect_evidence",
+          "ch": "inspect_how", "co": "open_change", "cl": "list_changes", "wa": "watch_many", "rf": "radar_flag"}
 
 
 class Tap(NamedTuple):
@@ -73,6 +82,12 @@ def _valid(tap: Tap) -> bool:
             return bool(SECRET.fullmatch(tap.arg)) and not tap.extra
         case "rt":
             return bool(SECRET.fullmatch(tap.arg)) and tap.extra in TONES
+        case "cd" | "ce" | "ch" | "co" | "cl":
+            return tap.arg.isascii() and tap.arg.isdigit() and len(tap.arg) <= 12 and not tap.extra
+        case "wa":
+            return bool(SECRET.fullmatch(tap.arg)) and not tap.extra
+        case "rf":
+            return tap.arg in FLAG_EXPLANATIONS and not tap.extra
     return False
 
 

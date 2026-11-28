@@ -47,3 +47,34 @@ def test_only_watch_is_slow():
 ])
 def test_suggestion(text, expected):
     assert taps.suggestion(text) == expected
+
+
+REF = "A" * 22
+
+
+@pytest.mark.parametrize("action,arg,extra", [
+    ("cd", "7", ""), ("ce", "7", ""), ("ch", "7", ""), ("co", "123456789012", ""), ("cl", "3", ""),
+    ("wa", REF, ""), ("rf", "arbitration", ""), ("rf", "ai_model_training", ""), ("h", "demo", ""),
+])
+def test_new_actions_round_trip(action, arg, extra):
+    data = taps.build(action, arg, extra)
+    assert len(data.encode()) <= 64 and taps.parse(data) == Tap(action, arg, extra)
+
+
+@pytest.mark.parametrize("data", [
+    "v1:cd:abc", "v1:ce:-1", "v1:ch:1234567890123", "v1:co:7:x", "v1:cl:", "v1:wa:short", f"v1:wa:{REF}:x",
+    "v1:rf:not_a_flag", "v1:rf:arbitration:x", "v1:h:secrets",
+])
+def test_forged_new_actions_are_refused(data):
+    assert taps.parse(data) is None
+
+
+def test_inspector_taps_are_quick_and_watch_many_is_slow():
+    assert taps.is_slow(f"v1:wa:{REF}")
+    assert not any(taps.is_slow(d) for d in ("v1:cd:7", "v1:ce:7", "v1:ch:7", "v1:co:7", "v1:cl:3", "v1:rf:arbitration", "v1:h:demo"))
+
+
+def test_every_new_action_has_a_metric_name():
+    assert {a: taps.METRIC[a] for a in ("cd", "ce", "ch", "co", "cl", "wa", "rf")} == {
+        "cd": "inspect_diff", "ce": "inspect_evidence", "ch": "inspect_how", "co": "open_change",
+        "cl": "list_changes", "wa": "watch_many", "rf": "radar_flag"}
