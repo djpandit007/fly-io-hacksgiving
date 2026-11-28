@@ -23,6 +23,9 @@ Advocate Sprites, approved opt-outs, redline kits. What is missing is everything
 4. The demo company lives on a free shared host. That costs the "terms contradict the privacy
    policy" alert in the video, because Fine Print does not attach companion pages on shared hosts.
 5. Building continues into Monday morning.
+6. No new connectors. Jev stays on OpenCode, as it is today, and the census reads its pages with the
+   fetchers Fine Print already has. (Decided after the plans were first written: a switch to the
+   TypeSafeAI connector and a bulk crawl through Apify were both dropped.)
 
 **What a judge cannot see today** (verified in code)
 
@@ -40,7 +43,7 @@ Advocate Sprites, approved opt-outs, redline kits. What is missing is everything
 |---|---|
 | 1. Show the work | A change detected on camera; buttons for the diff, the evidence screenshot and how it was judged; the Sprites narrating their own steps; a notice ready to send |
 | 2. Wrapped card | A shareable image of your year in fine print (also the social post) |
-| 3. Census | "More severe than 86% of 74 services" on alerts and verdict cards; `/radar`; watch everything you use in one message; Jev on the TypeSafeAI connector; Apify crawling |
+| 3. Census | "More severe than 86% of 74 services" on alerts and verdict cards; `/radar`; watch everything you use in one message |
 | 4. Guests and kit | A good first minute for a judge who joins; demo company, video script, README, licence, post copy |
 
 ## Goals, non-goals, anti-goals
@@ -84,8 +87,7 @@ Advocate Sprites, approved opt-outs, redline kits. What is missing is everything
   width + height ≤ 10,000.
 - A slow tap (`taps.SLOW`) strips every button from its message before it runs (`app/main.py`), so
   new taps must stay out of that set.
-- A worker job costs about 5 s of settle time plus a 15–48 s restore. The connector gateway may time
-  requests out at about 120 s (unverified), so long provider jobs must be started and polled.
+- A worker job costs about 5 s of settle time plus a 15–48 s restore.
 - Jev takes 32k tokens per question; documents are capped at `judge.MAX_DOCUMENT_CHARS`.
 - Existing quotas bind the owner too: 5 redline kits and 10 Scout link checks per UTC day.
 - Existing privacy rules hold: metrics and `swarm_events` carry no URLs or member content; nothing is
@@ -97,8 +99,8 @@ Day one (show the work) is common to all three. For day two:
 
 - **A. Polish only.** Safest, but benchmarks stay dark and the first minute for a judge is slow.
 - **B. Census (chosen).** The only option that adds a moment to the video *and* makes the bot instant
-  for a stranger, and it puts Pinecone, Apify and TypeSafe on screen doing real work. It is the lane
-  most likely to slip, but it is additive: 30 services still works and nothing else depends on it.
+  for a stranger, and it puts Pinecone and Jev on screen doing real work. It is the lane most likely
+  to slip, but it is additive: 30 services still works and nothing else depends on it.
 - **C. All partner connectors.** Aims at the panel, but four live integrations, and benchmarks stay
   dark. Its two best pieces (Ollama verifier, Box evidence locker) are kept as stretch.
 
@@ -238,24 +240,10 @@ privacy URL, in a data file. It includes Fly.io and the five partner companies; 
 features them is decided after their results are spot-checked. A URL that fails a sanity check (too
 short, or not a terms or privacy page) falls back to `discover.find_terms_url`.
 
-**3.2 Reading the pages.** New `app/apify.py`: start one run of Apify's website content crawler over
-all seed URLs, wait for it, read the dataset, validate with Pydantic, and report the run's cost to
-metrics. Any URL Apify did not return goes through `agent.page_text` with the Scout skipped (160
-Scout jobs would take hours). Without an Apify connector the whole census uses `page_text`.
-
-- Start: `POST v2/actors/apify~website-content-crawler/runs`, JSON body
-  `{"startUrls": [{"url": …}], "maxCrawlDepth": 0, "maxCrawlPages": <n>}`, with
-  `maxTotalChargeUsd=2` so a run can never cost more than two dollars.
-- Wait: `GET v2/actor-runs/<id>?waitForFinish=60`, repeated until `data.status` is `SUCCEEDED`,
-  `FAILED`, `TIMED-OUT` or `ABORTED`. Each call stays under the gateway's time limit. Give up after
-  20 minutes and fall back.
-- Read: `GET v2/datasets/<data.defaultDatasetId>/items?format=json&clean=true`; each item has `url`,
-  `crawl.loadedUrl`, `text` and `markdown`. Cost is `data.usageTotalUsd`, re-read ten seconds after
-  the run ends because the first figure is preliminary.
-- Apify's own estimate is $0.50 to $5 per 1,000 pages with a browser, so about 160 pages should cost
-  well under a dollar; the free plan includes $5 a month.
-- Write it against these documented calls with the provider faked, then check the connector's
-  allowed paths against its "API Usage" example as soon as the connector exists.
+**3.2 Reading the pages.** Each page is read with `agent.page_text` with the Scout skipped (160
+Scout jobs would take hours): a direct fetch first, then Exa, then LlamaParse. A few services are
+read at a time. A page that cannot be read, or that turns out not to be the terms, is reported as
+failed and never graded.
 
 **3.3 Grading, with Jev only.** For each document:
 
@@ -323,14 +311,7 @@ Two limits to say plainly rather than fix: categories the consumer batteries nev
 liability) get no 📊 line, so the lease in the video has none; and `/watch` replays of past changes
 stay without it, to avoid a Jev call per old change.
 
-**3.7 Jev through the TypeSafeAI connector.** A `typesafe` provider in `app/config.py`
-(`FP_TYPESAFE_BASE`, key for local use). `Clients` gets a judge gateway that is TypeSafe when
-configured and OpenCode otherwise; `app/judge.py` picks the path for each (`v1/systemone` against
-`systemone/v1/systemone`); every Jev call site uses it. Unset means today's behaviour exactly. The
-day-one client (`git show adf4ec7:app/judge.py`) used model `jev-latest` and sent a long-context
-header on whole-document calls only; confirm both against TypeSafe's API once the connector exists.
-
-**3.8 History for names with a capital inside (a bug found while planning).** `history.ota_versions`
+**3.7 History for names with a capital inside (a bug found while planning).** `history.ota_versions`
 asks the Open Terms Archive for `<service name>/Terms of Service.md`, and the name comes from
 `bot._name_for`, which gives "Youtube" and "Linkedin". The archive's folders are "YouTube" and
 "LinkedIn" and the lookup is case-sensitive (checked live on 28 Nov: 3 versions against 0), so these
@@ -404,14 +385,10 @@ sentences, the connectors answer, notes for judges with the join link, and post 
 
 ## Tasks only Dhananjay can do
 
-1. **Today:** TypeSafeAI and Apify connectors in the Fly dashboard (name prefix
-   `fly-io-hacksgiving`, label `fineprint`), and their gateway bases in `.env.sprite`. Lane 3 is
-   written against the documented APIs either way, but it can only be verified once they exist. If
-   either is not possible, say so: Jev stays on OpenCode, or the census uses the existing fetchers.
-2. Put the demo company on a free static host under a subdomain of his choice.
-3. Pick the card's look from the mockups.
-4. Deploy with `scripts/setup_sprite.sh`; run `/census run`; spot-check ten graded services.
-5. Record, post, submit.
+1. Put the demo company on a free static host under a subdomain of his choice.
+2. Pick the card's look from the mockups.
+3. Deploy with `scripts/setup_sprite.sh`; run `/census run`; spot-check ten graded services.
+4. Record, post, submit.
 
 ## Order, deadlines and what gets cut
 
@@ -425,8 +402,8 @@ sentences, the connectors answer, notes for judges with the join link, and post 
   submit by 12:30 PM. The deadline is 1:29 PM.
 
 If time runs short, cut in this order: stretch; the Wrapped comparison line and `/radar <service>`;
-the archive name fix (3.8); watch several at once; Apify (the census falls back to `page_text`); the
-TypeSafeAI switch; the showcase button; the open-a-change list. Never cut: `/check`, the inspector
+the archive name fix (3.7); watch several at once; the showcase button; the open-a-change list.
+Never cut: `/check`, the inspector
 buttons, the narrated steps, the send-it-yourself draft, the name fix (1.8), the card, the demo
 company, the script, README and licence, the closed API pages, and the limits.
 
@@ -436,7 +413,7 @@ company, the script, README and licence, the closed API pages, and the limits.
   button validation and forged ids, access checks on every new tap, provenance stored, evidence
   capture failing quietly, the send-it-yourself draft for email, post and form targets, service
   names for country-code and shared-host domains, limits and the member cap, census grading with
-  Jev, Pinecone and Apify faked, a census service never benchmarked against itself, name parsing
+  Jev and Pinecone faked, a census service never benchmarked against itself, name parsing
   for several services, the card being a valid PNG of the right size, and the closed API pages.
 - `tests/test_e2e_smoke.py` grows: the alert carries the inspector buttons and they answer only a
   watcher; a faked census of twelve services makes the 📊 line appear.
@@ -450,8 +427,8 @@ company, the script, README and licence, the closed API pages, and the limits.
 ## Left to the builder
 
 Wording of new messages; button layout; the per-flag word lists and how candidate sections are
-scored; the card's layout within the chosen look; Apify's actor input beyond the fields above;
-whether `page_text` reports its path by return value or an out-parameter; concurrency; test
+scored; the card's layout within the chosen look; whether `page_text` reports its path by return
+value or an out-parameter; concurrency; test
 structure; the demo company's name and which static host.
 
 ## Calls I made (check these while reading)
@@ -469,7 +446,7 @@ structure; the demo company's name and which static host.
    the form's notes, not in the README or the post.
 9. The card is drawn with Pillow on the Gateway, with a fixed line rather than model text.
 10. `/check` and `/census` are owner-only.
-11. The census skips the Scout: Apify, then direct fetch, Exa and LlamaParse.
+11. The census skips the Scout: a direct fetch, then Exa, then LlamaParse.
 12. A safe take on Sunday night, and the last merge at 9 AM on Monday.
 13. The demo's opt-out address is on `.example`, so a judge who sends the draft reaches no one.
 14. No OpenSpec artifacts for this change.

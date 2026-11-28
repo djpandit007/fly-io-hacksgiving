@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - All of `docs/superpowers/plans/2026-11-28-show-the-work-and-census.md` "Global Constraints" apply.
-- Lane 0 is already on your branch: `snapshots.provenance`, the button data `cd`, `ce`, `ch`, `co`, `cl`, `judge.active_model`, and `FakeTelegram.send_document`.
+- Lane 0 is already on your branch: `snapshots.provenance`, the button data `cd`, `ce`, `ch`, `co`, `cl`, and `FakeTelegram.send_document` and `watch()` in `tests/test_bot.py`.
 - Do not touch `advocate.approve`, `advocate.finish`, `_printable` or `bot._name_for` (Lane 4 owns them).
 - Narration and provenance are cosmetic and best effort: they never raise and never change what a check returns.
 - `app/agent.py` must not import `app/inspector.py` (the inspector imports the agent).
@@ -310,11 +310,11 @@ git commit -m "Have worker jobs narrate their steps and report their timings"
 - Test: `tests/test_agent.py`
 
 **Interfaces:**
-- Consumes: `swarm.JobTrace`, `Swarm.scout(on_stage=, trace=)` (Task 3), `judge.active_model` (Lane 0).
+- Consumes: `swarm.JobTrace`, `Swarm.scout(on_stage=, trace=)` (Task 3), `settings.judge_model`.
 - Produces:
   - `agent.PageTrace(BaseModel)`: `via: Literal["direct", "scout", "exa", "llama"] | None = None`, `scout: swarm.JobTrace | None = None`.
   - `page_text(cl, url, *, public=None, may_scout=None, links=None, on_stage: Stage = no_stage, trace: PageTrace | None = None) -> str`: sets `trace.via` to the step that produced the returned text, and `trace.scout` whenever the Scout ran.
-  - `agent.provenance(trace: PageTrace | None, url: str, cl: Clients) -> dict | None`: `None` when there is no trace or `trace.via is None`; otherwise `{"via": …, "host": <url host without "www.">, "judge_model": judge.active_model(cl.judge)}` plus `"scout": {"hosts", "lock_ms", "run_ms", "restore_ms"}` when the Scout ran.
+  - `agent.provenance(trace: PageTrace | None, url: str, cl: Clients) -> dict | None`: `None` when there is no trace or `trace.via is None`; otherwise `{"via": …, "host": <url host without "www.">, "judge_model": settings.judge_model}` plus `"scout": {"hosts", "lock_ms", "run_ms", "restore_ms"}` when the Scout ran.
   - `record_version(conn, cl, svc, text, taken_at, origin, doc=None, *, provenance: dict | None = None)`: stores it as compact JSON in `snapshots.provenance` (NULL when `None`).
   - `check_bundle(conn, cl, svc, on_stage: Stage = no_stage)`, `onboard_service(conn, cl, svc, on_stage: Stage = no_stage)`: pass `on_stage` and a fresh `PageTrace` per document to `page_text`. `subscribe` passes its `on_stage` on; `check_and_report` passes its own to `check_bundle`.
 
@@ -746,7 +746,7 @@ def test_change_list_shows_the_newest_ten_to_a_watcher_only(conn):
 
 async def test_full_card_carries_the_inspector_and_opt_out_buttons(conn):
     a, b, svc, change = seed(conn)
-    cl = SimpleNamespace(pinecone=None, ai=None, judge=None, swarm=None)
+    cl = SimpleNamespace(pinecone=None, ai=None, swarm=None)
     card = await inspector.full_card(conn, cl, a, change.id)
     labels = [label for row in card.buttons for label, _ in row]
     assert labels == ["🔍 What changed", "🔬 How I checked", "✉️ Review & Draft Opt-Out", "🗑 Unwatch Acme"]

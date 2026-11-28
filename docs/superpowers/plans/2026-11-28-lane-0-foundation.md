@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Land the shared pieces every other lane builds on, so no two lanes race for a schema version, a button name or a settings field.
+**Goal:** Land the shared pieces every other lane builds on, so no two lanes race for a schema version, a button name or a test helper.
 
-**Architecture:** Three small, independent additions: schema v8, the full button grammar for the change, and settings plus client wiring for two new providers. Nothing here changes what a member sees.
+**Architecture:** Three small, independent additions: schema v8, the full button grammar for the change, and one setting plus the test fakes every lane shares. Nothing here changes what a member sees.
 
-**Tech Stack:** Python 3.12, SQLite, Pydantic, pydantic-settings, pytest, respx.
+**Tech Stack:** Python 3.12, SQLite, Pydantic, pydantic-settings, pytest.
 
-**Spec:** `docs/superpowers/specs/2026-11-28-show-the-work-and-census-design.md` (Lane 1 "One migration for the whole change", sections 1.5, 3.2, 3.4, 3.6, 3.7, 4.2).
+**Spec:** `docs/superpowers/specs/2026-11-28-show-the-work-and-census-design.md` (Lane 1 "One migration for the whole change", sections 1.5, 3.4, 3.6, 4.2).
 
 ## Global Constraints
 
@@ -25,8 +25,8 @@
    every snapshot, and leaves a `.v7.bak` copy. (Task 1)
 2. **Button data a client forged for the new actions:** letters where an id belongs, an unknown
    flag, a too-short reference. Expected: `taps.parse` returns `None`. (Task 2)
-3. **Both gateways being the same object** when TypeSafe is not configured. Expected: closing the
-   clients closes it once and raises nothing. (Task 3)
+3. **A shared fake drifting from the real client.** Expected: `FakeTelegram.send_document` and
+   `send_photo` take the same arguments the real `Telegram` methods take. (Task 3)
 
 ---
 
@@ -197,20 +197,19 @@ git commit -m "Define the button grammar for the inspector, census and showcase"
 
 ---
 
-### Task 3: Settings, client wiring and shared test fakes
+### Task 3: The showcase setting and shared test fakes
 
 **Files:**
-- Modify: `app/config.py` (`Settings`), `.env.example`, `app/agent.py` (`Clients`), `app/judge.py` (new `active_model`), `tests/test_bot.py` (`FakeTelegram`)
+- Modify: `app/config.py` (`Settings`), `.env.example`, `tests/test_bot.py` (`FakeTelegram`, new `watch`)
 - Create: `tests/test_config.py`
-- Test: `tests/test_config.py`, `tests/test_agent.py`, `tests/test_judge.py`
 
 **Interfaces:**
 - Produces:
-  - Settings fields `typesafe_base: str = ""`, `typesafe_key: SecretStr`, `typesafe_model: str = ""` (empty means "use `judge_model`"), `apify_base: str = ""`, `apify_key: SecretStr`, `showcase_service: str = ""`; properties `settings.typesafe -> Provider(name="typesafe", …)` and `settings.apify -> Provider(name="apify", …)`, both with the default bearer auth.
-  - `Clients.judge: Gateway | None`: a TypeSafe gateway (timeout `AI_TIMEOUT`) when `settings.typesafe.configured`, otherwise the same object as `Clients.ai`. `Clients.apify: Gateway | None`.
-  - `judge.active_model(gw: Gateway | None) -> str`: `settings.typesafe_model` when `gw` is the TypeSafe gateway and that setting is non-empty, otherwise `settings.judge_model`.
+  - `settings.showcase_service: str = ""` (environment variable `FP_SHOWCASE_SERVICE`): the display name of the demo company. Empty means every feature that depends on it stays hidden.
   - `tests.test_bot.FakeTelegram.send_document(chat, filename, content, *, caption="", mime="application/octet-stream") -> int` recording into `self.documents`, and `send_photo(chat, filename, content, *, caption="") -> int` recording into `self.photos`; each record is a dict with keys `chat`, `filename`, `content`, `caption` (and `mime` for documents).
   - `tests.test_bot.watch(conn, user, name="Acme", url="https://acme.test/terms") -> Service`: a module-level test helper that calls `agent.add_service(conn, name, url)`, inserts the member's subscription (`INSERT OR IGNORE INTO subscriptions (user_id, service_id, created_at)`), and returns the service. Every lane's bot tests use it.
+
+No provider, client or model setting is added: Jev stays on OpenCode through `Clients.ai`, exactly as today.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -220,56 +219,34 @@ git commit -m "Define the button grammar for the inspector, census and showcase"
 from app.config import Settings
 
 
-def test_new_providers_are_off_by_default():
-    s = Settings(_env_file=None)
-    assert not s.typesafe.configured and not s.apify.configured
-    assert (s.typesafe_model, s.showcase_service) == ("", "")
-
-
-def test_typesafe_and_apify_providers():
-    s = Settings(_env_file=None, typesafe_base="https://typesafe.test/", typesafe_key="k", apify_base="https://apify.test")
-    assert (s.typesafe.name, s.typesafe.base_url) == ("typesafe", "https://typesafe.test")
-    assert (s.apify.name, s.apify.base_url, s.apify.configured) == ("apify", "https://apify.test", True)
+def test_the_showcase_service_is_off_by_default_and_read_from_settings():
+    assert Settings(_env_file=None).showcase_service == ""
+    assert Settings(_env_file=None, showcase_service="Gobblr").showcase_service == "Gobblr"
 ```
 
-`tests/test_agent.py` (add `from app.config import Settings`):
+`tests/test_bot.py`:
 
 ```python
-async def test_judge_is_the_chat_gateway_unless_typesafe_is_configured(monkeypatch):
-    cl = agent.Clients()
-    assert cl.judge is cl.ai and cl.apify is None
-    await cl.aclose()  # the shared gateway is closed once; this must not raise
-    monkeypatch.setattr(agent, "settings", Settings(
-        _env_file=None, typesafe_base="https://typesafe.test", typesafe_key="k", apify_base="https://apify.test", apify_key="a"))
-    cl = agent.Clients()
-    assert cl.judge is not cl.ai and cl.judge.provider.name == "typesafe" and cl.apify.provider.name == "apify"
-    await cl.aclose()
-```
-
-`tests/test_judge.py` (add `from app import judge`, `from app.config import Provider, Settings, settings`, `from app.gateway import Gateway`):
-
-```python
-async def test_active_model_follows_the_gateway(monkeypatch):
-    oc = Gateway(Provider(name="opencode", base_url="https://o.test", key="k"))
-    ts = Gateway(Provider(name="typesafe", base_url="https://t.test", key="k"))
-    assert judge.active_model(None) == judge.active_model(oc) == judge.active_model(ts) == settings.judge_model
-    monkeypatch.setattr(judge, "settings", Settings(_env_file=None, typesafe_model="jev-latest"))
-    assert judge.active_model(ts) == "jev-latest" and judge.active_model(oc) == judge.settings.judge_model
-    await oc.aclose()
-    await ts.aclose()
+async def test_the_shared_fakes_record_files_and_watches(conn, tg):
+    member = users.join_member(conn, "join-code", chat_id=5, name="M")
+    svc = watch(conn, member)
+    assert watch(conn, member).id == svc.id  # watching twice changes nothing
+    assert [s.name for s in agent.services_for(conn, member.id)] == ["Acme"]
+    assert await tg.send_document(5, "a.png", b"x", caption="c", mime="image/png")
+    assert await tg.send_photo(5, "b.png", b"y", caption="d")
+    assert tg.documents == [{"chat": 5, "filename": "a.png", "content": b"x", "caption": "c", "mime": "image/png"}]
+    assert tg.photos == [{"chat": 5, "filename": "b.png", "content": b"y", "caption": "d"}]
 ```
 
 - [ ] **Step 2: Run them and see them fail**
 
-Run: `uv run pytest -q tests/test_config.py tests/test_agent.py::test_judge_is_the_chat_gateway_unless_typesafe_is_configured tests/test_judge.py::test_active_model_follows_the_gateway`
-Expected: FAIL (`AttributeError: 'Settings' object has no attribute 'typesafe'`).
+Run: `uv run pytest -q tests/test_config.py tests/test_bot.py::test_the_shared_fakes_record_files_and_watches`
+Expected: FAIL (`AttributeError: 'Settings' object has no attribute 'showcase_service'`; `NameError: name 'watch' is not defined`).
 
 - [ ] **Step 3: Implement**
 
-- `app/config.py`: the six fields and two properties. Comment the TypeSafe ones as "Jev straight from TypeSafe's own connector; unset keeps Jev on OpenCode" and Apify as "bulk crawler for the census".
-- `.env.example`: under Providers add `FP_TYPESAFE_BASE=`, `FP_TYPESAFE_KEY=`, `FP_TYPESAFE_MODEL=`, `FP_APIFY_BASE=`, `FP_APIFY_KEY=`; under Tuning add `FP_SHOWCASE_SERVICE=`, each with a one-line comment in the file's existing style.
-- `app/agent.py` `Clients.__init__`: set `self.judge` and `self.apify` as specified. `aclose` closes each distinct gateway once (compare by identity).
-- `app/judge.py`: `active_model` as specified. Nothing calls it yet.
+- `app/config.py`: the `showcase_service` field, commented as "the demo company's display name; shows members a 'See a real alert' button".
+- `.env.example`: under Tuning add `FP_SHOWCASE_SERVICE=` with a one-line comment in the file's existing style.
 - `tests/test_bot.py`: the two `FakeTelegram` recorders and the `watch` helper.
 
 - [ ] **Step 4: Run the whole suite**
@@ -280,6 +257,6 @@ Expected: all pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/config.py .env.example app/agent.py app/judge.py tests/test_config.py tests/test_agent.py tests/test_judge.py tests/test_bot.py
-git commit -m "Add settings and clients for TypeSafe, Apify and the showcase service"
+git add app/config.py .env.example tests/test_config.py tests/test_bot.py
+git commit -m "Add the showcase setting and shared test fakes"
 ```

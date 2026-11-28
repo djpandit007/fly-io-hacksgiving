@@ -4,17 +4,17 @@
 
 **Goal:** Grade the standing terms of about 80 popular services with Jev, publish their clauses to Pinecone so the 📊 benchmark line appears, and show the results through `/radar` and a faster, friendlier `/watch`.
 
-**Architecture:** A census is graded, not watched: it has its own table and never creates snapshots or history. Grading asks only Jev (flags, then which section states each flag, then how much that clause matters); the clause is always a section of the stored text. Pages come from one Apify crawl when that connector exists, otherwise from the existing fetch ladder with the Scout skipped.
+**Architecture:** A census is graded, not watched: it has its own table and never creates snapshots or history. Grading asks only Jev (flags, then which section states each flag, then how much that clause matters); the clause is always a section of the stored text. Pages are read with the existing fetch ladder, with the Scout skipped.
 
-**Tech Stack:** Python 3.12, SQLite, Pydantic, httpx, respx, pytest (asyncio auto mode); TypeSafe's Jev; Pinecone; Apify.
+**Tech Stack:** Python 3.12, SQLite, Pydantic, httpx, respx, pytest (asyncio auto mode); Jev through OpenCode; Pinecone.
 
 **Spec:** `docs/superpowers/specs/2026-11-28-show-the-work-and-census-design.md`, Lane 3 (sections 3.1 to 3.6).
 
 ## Global Constraints
 
 - All of `docs/superpowers/plans/2026-11-28-show-the-work-and-census.md` "Global Constraints" apply.
-- Lane 0 is already on your branch: the `census` table and `db.CensusRow`, the button data `wa`, `rf` and `cl`, `Clients.judge`, `Clients.apify`, and `FakeTelegram`'s recorders and `watch()` in `tests/test_bot.py`.
-- Every Jev call takes the judge gateway (`cl.judge`). The census never calls a chat model.
+- Lane 0 is already on your branch: the `census` table and `db.CensusRow`, the button data `wa`, `rf` and `cl`, and `FakeTelegram`'s recorders and `watch()` in `tests/test_bot.py`.
+- Every Jev call goes through the existing OpenCode gateway (`cl.ai`), exactly as the rest of the app does. The census never calls a chat model, and no task adds a provider or a connector.
 - The census never writes to `services`, `snapshots` or `changes`, and never uses the Scout.
 - `app/agent.py` must not import `app/census.py` (the census imports the agent).
 - `services.domain` holds a host, not a registrable domain. Match a service to the census with `census.site(svc.terms_url)`, never with a SQL join on `domain`.
@@ -26,7 +26,7 @@
 1. **A page that is not the terms** (a cookie wall, a login page, a soft 404). Expected: reported as failed, no rows saved, nothing published. (Task 5)
 2. **`/census run` sent twice.** Expected: one run; the second message says one is already going. (Task 5)
 3. **Names with `<` or `&` in census output.** Expected: escaped everywhere. (Task 6)
-4. **The "Yes, watch all" offer after a restart, a Sprite sleep or a second tap.** Expected: "That offer has expired. Send me the names again." (Task 8)
+4. **The "Yes, watch all" offer after a restart, a Sprite sleep or a second tap.** Expected: "That offer has expired. Send me the names again." (Task 7)
 5. **`/radar` before any census has run, or for an unknown service.** Expected: one plain sentence. (Task 6)
 
 ---
@@ -406,15 +406,15 @@ git commit -m "Publish census clauses and name gentler services in the benchmark
 - Test: `tests/test_census.py`, `tests/test_bot.py`
 
 **Interfaces:**
-- Consumes: `grade` (Task 2), `save`, `graded_sha`, `drop`, `status` (Task 3), `publish`, `unpublish` (Task 4), `agent.page_text`, `discover.find_terms_url`, `watch.sha`, `watch.normalise`, `watch.markdown_to_canonical`, `sprite.stay_awake`.
+- Consumes: `grade` (Task 2), `save`, `graded_sha`, `drop`, `status` (Task 3), `publish`, `unpublish` (Task 4), `agent.page_text`, `discover.find_terms_url`, `watch.sha`, `sprite.stay_awake`.
 - Produces:
   - `census.MAX_SERVICES = 100`, `CONCURRENCY = 4`, `PROGRESS_EVERY = 10`, `MIN_PAGE_CHARS = 2_000`.
   - `census.looks_like(role: str, text: str) -> bool`: at least `MIN_PAGE_CHARS` characters, and the word `privacy` (for `privacy`) or `terms` or `agreement` (for `terms`) at least three times, ignoring case.
   - `async census.read_page(cl, url: str) -> str`: `agent.page_text(cl, url, may_scout=lambda: False)`.
   - `census.RunSummary(BaseModel)`: `graded: int = 0`, `unchanged: int = 0`, `failed: list[str] = []`, `published: int = 0`.
-  - `async census.run(conn, cl, seeds: Sequence[Seed], *, read: Callable[[list[str]], Awaitable[dict[str, str]]] | None = None, notify: Callable[[str], Awaitable[None]] | None = None) -> RunSummary`.
+  - `async census.run(conn, cl, seeds: Sequence[Seed], *, notify: Callable[[str], Awaitable[None]] | None = None) -> RunSummary`.
 
-How `run` works: take the first `MAX_SERVICES` seeds. If `read` is given, call it once with every URL (terms and privacy) and treat its values as Markdown (`normalise(markdown_to_canonical(...))`); if it raises, carry on as if it returned nothing. Then, at most `CONCURRENCY` services at a time, for each document: use the bulk text if it passes `looks_like`, else `read_page`; if that still fails and the role is `terms`, try `discover.find_terms_url(seed.name, cl)` once and read that; if it still does not look right, add `"{name} ({role})"` to `failed` and move on. If `graded_sha` equals the text's `sha`, count it `unchanged`. Otherwise `grade(cl.judge, …)`, `save`, and, when `cl.pinecone` is set, `publish`. Any exception for one document adds it to `failed` and never stops the run. After every `PROGRESS_EVERY` services, `await notify(f"Census: {done} of {total} services done…")`.
+How `run` works: take the first `MAX_SERVICES` seeds. At most `CONCURRENCY` services at a time, for each of a service's documents (terms, then privacy when the seed has one): read it with `read_page`. If reading raises or the text does not pass `looks_like`, and the role is `terms`, try `discover.find_terms_url(seed.name, cl)` once and read that instead. If there is still no text that looks right, add `"{name} ({role})"` to `failed` and move on. If `graded_sha` equals the text's `sha`, count it `unchanged`. Otherwise `grade(cl.ai, …)`, `save`, and, when `cl.pinecone` is set, `publish`. Any exception for one document adds it to `failed` and never stops the run. After every `PROGRESS_EVERY` services, `await notify(f"Census: {done} of {total} services done…")`.
 
 Owner commands and exact replies:
 
@@ -437,10 +437,11 @@ The run happens in a background task that the bot keeps a reference to, inside `
 ```python
 TERMS = "## Terms\n" + "These terms are an agreement between you and us. " * 60
 PRIVACY = "## Privacy\n" + "This privacy policy explains what we collect. " * 60
-CL = SimpleNamespace(judge=None, pinecone=object(), apify=None, ai=None, exa=None, llama=None, swarm=None)
+CL = SimpleNamespace(pinecone=object(), ai=None, exa=None, llama=None, swarm=None)
 
 
 def stub_grading(monkeypatch, published=None, broken=()):
+    """Grade and publish without Jev or Pinecone; no name is ever looked up on the network."""
     async def grade(gw, name, role, text):
         if name in broken:
             raise RuntimeError("jev is down")
@@ -450,8 +451,22 @@ def stub_grading(monkeypatch, published=None, broken=()):
         (published if published is not None else []).append((name, role))
         return 1
 
+    async def not_found(query, cl=None, client=None):
+        return None
+
     monkeypatch.setattr(census, "grade", grade)
     monkeypatch.setattr(census, "publish", publish)
+    monkeypatch.setattr(census.discover, "find_terms_url", not_found)
+
+
+def serve(monkeypatch, pages, asked=None):
+    """Every page the census reads comes from `pages`: a dict by URL, or one text for any URL."""
+    async def read_page(cl, url):
+        if asked is not None:
+            asked.append(url)
+        return pages[url] if isinstance(pages, dict) else pages
+
+    monkeypatch.setattr(census, "read_page", read_page)
 
 
 def test_looks_like_refuses_walls_and_wrong_pages():
@@ -465,48 +480,44 @@ async def test_run_grades_saves_and_skips_what_has_not_changed(conn, monkeypatch
     seeds = (Seed("Acme", "https://acme.test/terms", "https://acme.test/privacy"), Seed("Beta", "https://beta.test/tos"))
     pages = {"https://acme.test/terms": TERMS, "https://acme.test/privacy": PRIVACY, "https://beta.test/tos": TERMS}
     asked = []
-
-    async def read(urls):
-        asked.append(sorted(urls))
-        return pages
-
-    first = await census.run(conn, CL, seeds, read=read)
+    serve(monkeypatch, pages, asked)
+    first = await census.run(conn, CL, seeds)
     assert (first.graded, first.unchanged, first.failed, first.published) == (3, 0, [], 3)
-    assert asked == [sorted(pages)] and census.status(conn).services == 2
-    second = await census.run(conn, CL, seeds, read=read)
+    assert sorted(asked) == sorted(pages) and census.status(conn).services == 2
+    second = await census.run(conn, CL, seeds)
     assert (second.graded, second.unchanged, second.published) == (0, 3, 0)
 
 
 async def test_a_page_that_is_not_the_terms_is_reported_and_never_published(conn, monkeypatch):
     published = []
     stub_grading(monkeypatch, published)
-
-    async def wall(cl, url):
-        return "Please accept cookies to continue."
-
-    async def not_found(query, cl=None, client=None):
-        return None
-
-    monkeypatch.setattr(census, "read_page", wall)
-    monkeypatch.setattr(census.discover, "find_terms_url", not_found)
+    serve(monkeypatch, "Please accept cookies to continue.")
     summary = await census.run(conn, CL, (Seed("Acme", "https://acme.test/terms"),))
     assert summary.failed == ["Acme (terms)"] and published == []
     assert conn.execute("SELECT COUNT(*) FROM census").fetchone()[0] == 0
 
 
+async def test_a_page_that_cannot_be_read_is_reported_too(conn, monkeypatch):
+    stub_grading(monkeypatch)
+
+    async def unreadable(cl, url):
+        raise RuntimeError("couldn't read the page")
+
+    monkeypatch.setattr(census, "read_page", unreadable)
+    summary = await census.run(conn, CL, (Seed("Acme", "https://acme.test/terms", "https://acme.test/privacy"),))
+    assert (summary.graded, summary.failed) == (0, ["Acme (terms)", "Acme (privacy)"])
+
+
 async def test_one_bad_service_does_not_stop_the_rest_and_progress_is_reported(conn, monkeypatch):
     stub_grading(monkeypatch, broken=("Svc3",))
-    seeds = tuple(Seed(f"Svc{n}", f"https://svc{n}.test/terms") for n in range(25))
-
-    async def read(urls):
-        return {u: TERMS for u in urls}
-
+    serve(monkeypatch, TERMS)
     said = []
 
     async def notify(text):
         said.append(text)
 
-    summary = await census.run(conn, CL, seeds, read=read, notify=notify)
+    seeds = tuple(Seed(f"Svc{n}", f"https://svc{n}.test/terms") for n in range(25))
+    summary = await census.run(conn, CL, seeds, notify=notify)
     assert (summary.graded, summary.failed) == (24, ["Svc3 (terms)"])
     assert said == ["Census: 10 of 25 services done…", "Census: 20 of 25 services done…"]
 
@@ -514,12 +525,8 @@ async def test_one_bad_service_does_not_stop_the_rest_and_progress_is_reported(c
 async def test_run_stops_at_one_hundred_services(conn, monkeypatch):
     stub_grading(monkeypatch)
     asked = []
-
-    async def read(urls):
-        asked.extend(urls)
-        return {u: TERMS for u in urls}
-
-    await census.run(conn, CL, tuple(Seed(f"S{n}", f"https://s{n}.test/terms") for n in range(120)), read=read)
+    serve(monkeypatch, TERMS, asked)
+    await census.run(conn, CL, tuple(Seed(f"S{n}", f"https://s{n}.test/terms") for n in range(120)))
     assert len(asked) == 100
 ```
 
@@ -540,7 +547,7 @@ async def test_a_second_census_run_is_refused_while_one_is_going(conn, tg, monke
     await say(conn, tg, 1, "/start owner-code")
     release = asyncio.Event()
 
-    async def slow_run(conn_, cl_, seeds, read=None, notify=None):
+    async def slow_run(conn_, cl_, seeds, notify=None):
         await release.wait()
         return census.RunSummary(graded=118, unchanged=3, failed=["Acme (terms)", "Beta (privacy)"], published=412)
 
@@ -561,7 +568,7 @@ Make the seed list reachable for the first test as `census.SEEDS` (re-exported f
 Run: `uv run pytest -q tests/test_census.py -k "looks_like or run_ or page_that or bad_service" tests/test_bot.py -k census`
 Expected: FAIL (`AttributeError: module 'app.census' has no attribute 'run'`).
 
-- [ ] **Step 3: Implement** `looks_like`, `read_page`, `run` and the bot's `/census` handling. `/census run` passes `read=None` for now; Task 7 wires Apify in.
+- [ ] **Step 3: Implement** `looks_like`, `read_page`, `run` and the bot's `/census` handling.
 
 - [ ] **Step 4: Run the whole suite**
 
@@ -672,132 +679,7 @@ git commit -m "Add /radar: what popular services' terms say today"
 
 ---
 
-### Task 7: Reading the pages with Apify
-
-**Files:**
-- Create: `app/apify.py`, `tests/test_apify.py`
-- Modify: `app/bot.py` (`/census run` passes the reader)
-
-**Interfaces:**
-- Consumes: `Clients.apify` (Lane 0), `Gateway.request`, `agent.normalise_url`.
-- Produces:
-  - `apify.ACTOR = "apify~website-content-crawler"`, `MAX_CHARGE_USD = 2`, `WAIT_S = 60`, `GIVE_UP_S = 1200`, `COST_SETTLE_S = 10`, `TERMINAL = frozenset({"SUCCEEDED", "FAILED", "TIMED-OUT", "ABORTED"})`.
-  - `async apify.crawl(gw: Gateway, urls: list[str]) -> dict[str, str]`: the requested URL mapped to the page's Markdown (its `text` when there is no Markdown), for the pages Apify returned; `{}` when the run did not succeed or `GIVE_UP_S` passed.
-  - `/census run` calls `census.run(..., read=functools.partial(apify.crawl, cl.apify))` when `cl.apify` is set.
-
-The calls, all relative to the gateway's base, each validated with a Pydantic model:
-
-1. `POST v2/actors/apify~website-content-crawler/runs?maxTotalChargeUsd=2` with JSON `{"startUrls": [{"url": u}, …], "maxCrawlDepth": 0, "maxCrawlPages": len(urls)}`. The run is `data` in the reply: `id`, `status`, `defaultDatasetId`.
-2. `GET v2/actor-runs/{id}?waitForFinish=60`, with a request timeout of `WAIT_S + 30`, until `data.status` is in `TERMINAL` or `GIVE_UP_S` has passed.
-3. On `SUCCEEDED`: `GET v2/datasets/{defaultDatasetId}/items?format=json&clean=true`. Each item has `url`, optional `crawl.loadedUrl`, `markdown` and `text`. Match an item to a requested URL by `agent.normalise_url` of its `url`, then of its `crawl.loadedUrl`.
-4. Sleep `COST_SETTLE_S`, fetch the run once more and `gw.report("usd", data.usageTotalUsd)` (the first figure after a run ends is preliminary).
-
-- [ ] **Step 1: Write the failing tests** in `tests/test_apify.py`
-
-```python
-import json
-
-import httpx
-import pytest
-import respx
-
-from app import apify
-from app.config import Provider
-from app.gateway import Gateway
-
-BASE = "https://apify.test"
-RUNS = f"{BASE}/v2/actors/apify~website-content-crawler/runs"
-RUN = f"{BASE}/v2/actor-runs/run1"
-ITEMS = f"{BASE}/v2/datasets/ds1/items"
-
-
-def run(status, usd=None):
-    return httpx.Response(200, json={"data": {"id": "run1", "status": status, "defaultDatasetId": "ds1", "usageTotalUsd": usd}})
-
-
-class Recorder:
-    """What `Gateway` needs of a metrics recorder; keeps the amounts a provider reported."""
-
-    def __init__(self):
-        self.amounts = []
-
-    def count(self, kind, name, outcome="ok", ms=0):
-        pass
-
-    def usage(self, provider, unit, amount):
-        self.amounts.append((provider, unit, amount))
-
-
-@pytest.fixture
-def recorder():
-    return Recorder()
-
-
-@pytest.fixture
-def gw(monkeypatch, recorder):
-    monkeypatch.setattr(apify, "COST_SETTLE_S", 0)
-    return Gateway(Provider(name="apify", base_url=BASE, key="tok"), recorder=recorder)
-
-
-@respx.mock
-async def test_crawl_starts_one_capped_run_waits_and_returns_markdown_by_url(gw, recorder):
-    start = respx.post(RUNS).mock(return_value=run("READY"))
-    poll = respx.get(RUN).mock(side_effect=[run("RUNNING"), run("SUCCEEDED"), run("SUCCEEDED", 0.31)])
-    respx.get(ITEMS).mock(return_value=httpx.Response(200, json=[
-        {"url": "https://acme.test/terms", "markdown": "## Terms\nBe nice."},
-        {"url": "https://m.beta.test/tos", "crawl": {"loadedUrl": "https://www.beta.test/tos/"}, "text": "Beta terms", "markdown": ""},
-    ]))
-    urls = ["https://acme.test/terms", "https://beta.test/tos", "https://gone.test/terms"]
-    pages = await apify.crawl(gw, urls)
-    await gw.aclose()
-    assert pages == {"https://acme.test/terms": "## Terms\nBe nice.", "https://beta.test/tos": "Beta terms"}
-    request = start.calls[0].request
-    assert request.url.params["maxTotalChargeUsd"] == "2" and request.headers["authorization"] == "Bearer tok"
-    assert json.loads(request.content) == {"startUrls": [{"url": u} for u in urls], "maxCrawlDepth": 0, "maxCrawlPages": 3}
-    assert poll.calls[0].request.url.params["waitForFinish"] == "60" and poll.call_count == 3
-    assert recorder.amounts == [("apify", "usd", 0.31)]  # the settled figure, not the preliminary one
-
-
-@respx.mock
-async def test_a_failed_run_returns_nothing(gw):
-    respx.post(RUNS).mock(return_value=run("READY"))
-    respx.get(RUN).mock(return_value=run("FAILED"))
-    items = respx.get(ITEMS).mock(return_value=httpx.Response(200, json=[]))
-    assert await apify.crawl(gw, ["https://acme.test/terms"]) == {} and not items.called
-    await gw.aclose()
-
-
-@respx.mock
-async def test_crawl_gives_up_on_a_run_that_never_ends(gw, monkeypatch):
-    monkeypatch.setattr(apify, "GIVE_UP_S", 0)
-    respx.post(RUNS).mock(return_value=run("READY"))
-    respx.get(RUN).mock(return_value=run("RUNNING"))
-    assert await apify.crawl(gw, ["https://acme.test/terms"]) == {}
-    await gw.aclose()
-```
-
-- [ ] **Step 2: Run and see them fail**
-
-Run: `uv run pytest -q tests/test_apify.py`
-Expected: FAIL (`ImportError: cannot import name 'apify' from 'app'`).
-
-- [ ] **Step 3: Implement `app/apify.py`** and pass the reader in `/census run`. An HTTP error at any step is logged by type and returns `{}`: the census then reads those pages itself.
-
-- [ ] **Step 4: Run the whole suite**
-
-Run: `uv run pytest -q && uvx ruff@0.17.6 check .`
-Expected: all pass.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add app/apify.py app/bot.py tests/test_apify.py
-git commit -m "Read the census pages with one Apify crawl"
-```
-
----
-
-### Task 8: The census on `/watch`, and watching several at once
+### Task 7: The census on `/watch`, and watching several at once
 
 **Files:**
 - Modify: `app/bot.py` (`_watch`, `handle`, `_dispatch`; new `names_in`, `WATCH_OFFERS`, `_subscribe_by_name`, `_watch_many`)
@@ -910,7 +792,7 @@ git commit -m "Show the census on /watch and watch several services in one messa
 
 ---
 
-### Task 9: The comparison line on the Wrapped card
+### Task 8: The comparison line on the Wrapped card
 
 Do this only after Lane 2 has merged and your branch is rebased on it. It is the first thing to cut.
 

@@ -1,31 +1,31 @@
-# Lane 2: Wrapped Card and Two Engine Fixes Implementation Plan
+# Lane 2: Wrapped Card and the Archive Fix Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Turn `/wrapped` into a shareable image card, route Jev through TypeSafe's own connector when it is configured, and stop the year-of-history lookup missing services whose names have a capital inside.
+**Goal:** Turn `/wrapped` into a shareable image card, and stop the year-of-history lookup missing services whose names have a capital inside.
 
-**Architecture:** The card is drawn on the Gateway with Pillow from numbers computed in plain SQL, in three named looks so the owner can pick one from real renders. The two engine fixes are independent of the card and of each other; each is off or harmless until its setting or its input appears.
+**Architecture:** The card is drawn on the Gateway with Pillow from numbers computed in plain SQL, in three named looks so the owner can pick one from real renders. The archive fix is independent of the card.
 
 **Tech Stack:** Python 3.12, Pillow (new), SQLite, Pydantic, httpx, respx, pytest (asyncio auto mode).
 
-**Spec:** `docs/superpowers/specs/2026-11-28-show-the-work-and-census-design.md`, Lane 2 and sections 3.7 and 3.8.
+**Spec:** `docs/superpowers/specs/2026-11-28-show-the-work-and-census-design.md`, Lane 2 and section 3.7.
 
 ## Global Constraints
 
 - All of `docs/superpowers/plans/2026-11-28-show-the-work-and-census.md` "Global Constraints" apply.
-- Lane 0 is already on your branch: `Clients.judge`, `judge.active_model`, `settings.typesafe*`, and `FakeTelegram.send_photo` and `watch()` in `tests/test_bot.py`.
+- Lane 0 is already on your branch: `FakeTelegram.send_photo` and `watch()` in `tests/test_bot.py`.
 - The card shows numbers from the database and fixed copy only. No model output is drawn on it.
 - CI installs with `uv sync --locked`: add Pillow with `uv add pillow` and commit `pyproject.toml` and `uv.lock` together.
 - Fonts in the repository must be under the SIL Open Font License, with the licence text beside them.
-- With `FP_TYPESAFE_BASE` unset, every Jev request is byte-for-byte what it is today.
+- No task in this lane changes how Jev or any other provider is called.
 
 ## Review Focus
 
 1. **A member who watches nothing asks for `/wrapped`.** Expected: one helpful sentence and no card. (Task 3)
 2. **Rendering fails on the Sprite** (a missing font, a Pillow error). Expected: the written dissent still arrives. (Task 3)
 3. **Text that does not fit the card:** a 300-character service name, a seven-digit word count. Expected: it is cut or wrapped, never drawn off the edge, and never raises. (Task 2)
-4. **GitHub refuses the archive listing** (the unauthenticated limit is 60 calls an hour). Expected: the lookup proceeds with the name as given, and the failure is not remembered for a day. (Task 5)
-5. **TypeSafe is configured but a call site still uses the chat gateway.** Expected: a test that fails if any Jev request reaches OpenCode. (Task 4)
+4. **GitHub refuses the archive listing** (the unauthenticated limit is 60 calls an hour). Expected: the lookup proceeds with the name as given, and the failure is not remembered for a day. (Task 4)
+5. **A year with one change, one service, or under an hour of reading.** Expected: singular wording and `under an hour`, never `1 services` or `0.1 hours`. (Task 2)
 
 ---
 
@@ -317,92 +317,7 @@ git commit -m "Send the Agreed Wrapped card before the written dissent"
 
 ---
 
-### Task 4: Jev through the TypeSafeAI connector
-
-**Files:**
-- Modify: `app/judge.py` (every request to System One), and every caller of an `app.judge` function in `app/agent.py`, `app/ask.py`, `app/ask_tools.py`, `app/advocate.py` and `app/playbooks.py`
-- Test: `tests/test_judge.py`, `tests/test_agent.py`
-
-**Interfaces:**
-- Consumes: `Clients.judge`, `judge.active_model`, `settings.typesafe_model` (Lane 0).
-- Produces:
-  - In `app/judge.py`: `SYSTEMONE_PATHS = {"opencode": "systemone/v1/systemone", "typesafe": "v1/systemone"}`; every request uses the path for `gw.provider.name` (any other name uses the OpenCode path) and `"model": active_model(gw)`.
-  - `judge.red_flags` (the whole-document call) sends the header `TypeSafe-Danger-Zone-Long-Context: true` when, and only when, `gw.provider.name == "typesafe"`.
-  - Every call into `app.judge` passes the judge gateway (`cl.judge`), not `cl.ai`. Calls into `app.writer`, `app.llm` and the `/ask` agents are the chat model and keep `cl.ai`. Where code reads the gateway with `getattr(cl, "ai", None)` for a Jev call (as `advocate._passes` does for `judge.redline_delta`), use `getattr(cl, "judge", None) or getattr(cl, "ai", None)`, so test doubles without a `judge` attribute still work.
-
-The model id and header come from the day-one client (`git show adf4ec7:app/judge.py`); the owner confirms both against TypeSafe's API once the connector exists, by setting `FP_TYPESAFE_MODEL`.
-
-- [ ] **Step 1: Write the failing tests**
-
-`tests/test_agent.py`:
-
-```python
-TS_JEV = "https://typesafe.test/v1/systemone"
-
-
-@respx.mock
-async def test_jev_goes_to_typesafe_and_never_to_opencode_when_configured(conn, members, history, monkeypatch):
-    custom = Settings(_env_file=None, typesafe_base="https://typesafe.test", typesafe_key="k", typesafe_model="jev-latest")
-    monkeypatch.setattr(agent, "settings", custom)
-    monkeypatch.setattr(agent.judge, "settings", custom)
-    m = mock_providers()
-    direct = respx.post(TS_JEV).mock(return_value=httpx.Response(200, json=GOOD))
-    cl = agent.Clients()
-    _svc, reports = await agent.subscribe(conn, cl, members[0], "Acme", "https://acme.test/terms")
-    await cl.aclose()
-    assert reports and direct.call_count == 4 and not m["jev"].called
-    first = direct.calls[0].request
-    assert json.loads(first.content)["model"] == "jev-latest" and first.headers["authorization"] == "Bearer k"
-    assert m["chat"].called  # writing stays on the chat model
-```
-
-`tests/test_judge.py`:
-
-```python
-@respx.mock
-async def test_only_whole_document_calls_to_typesafe_ask_for_long_context():
-    ts = Gateway(Provider(name="typesafe", base_url="https://typesafe.test", key="k"))
-    oc = Gateway(Provider(name="opencode", base_url="https://opencode.test/inference", key="k"))
-    answers = {"model": "jev", "answers": {"arbitration": {"type": "noul", "noul": 0.9}}}
-    direct = respx.post("https://typesafe.test/v1/systemone").mock(return_value=httpx.Response(200, json=answers))
-    via_opencode = respx.post("https://opencode.test/inference/systemone/v1/systemone").mock(return_value=httpx.Response(200, json=answers))
-    flags = {"arbitration": "Does the document require arbitration?"}
-    assert await judge.red_flags(ts, "Terms", "All disputes go to arbitration.", flags) == {"arbitration": 0.9}
-    await judge.nouls(ts, {"clause": "x"}, {"arbitration": "Is it about arbitration?"})
-    await judge.red_flags(oc, "Terms", "All disputes go to arbitration.", flags)
-    assert direct.calls[0].request.headers["typesafe-danger-zone-long-context"] == "true"
-    assert "typesafe-danger-zone-long-context" not in direct.calls[1].request.headers
-    assert "typesafe-danger-zone-long-context" not in via_opencode.calls[0].request.headers
-    await ts.aclose()
-    await oc.aclose()
-```
-
-- [ ] **Step 2: Run and see them fail**
-
-Run: `uv run pytest -q tests/test_agent.py::test_jev_goes_to_typesafe_and_never_to_opencode_when_configured tests/test_judge.py::test_only_whole_document_calls_to_typesafe_ask_for_long_context`
-Expected: FAIL (the TypeSafe route is never called; Jev still posts to OpenCode).
-
-- [ ] **Step 3: Implement**
-
-Change `app/judge.py` first, then the callers. Find them with `grep -rn "judge\.[a-z_]*(" app/ | grep -v "^app/judge.py"` and check each one's first argument. Keep guards such as `if cl.ai:` that decide whether a judge exists at all, but test `cl.judge` where the guard protects only a Jev call.
-
-- [ ] **Step 4: Run the whole suite**
-
-Run: `uv run pytest -q && uvx ruff@0.17.6 check .`
-Expected: all pass with no other test changed: with TypeSafe unset, `cl.judge is cl.ai`.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add app/judge.py app/agent.py app/ask.py app/ask_tools.py app/advocate.py app/playbooks.py tests/test_judge.py tests/test_agent.py
-git commit -m "Send Jev requests through TypeSafe's own connector when configured"
-```
-
-(Add only the files you changed.)
-
----
-
-### Task 5: Archive folders matched without regard to case
+### Task 4: Archive folders matched without regard to case
 
 **Files:**
 - Modify: `app/history.py` (`ota_versions`; new `ota_folder`)

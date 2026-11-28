@@ -400,7 +400,7 @@ Three things to try:
 - [ ] **Step 1: Write the failing tests** in `tests/test_bot.py` (add `from app.config import Settings`)
 
 ```python
-CL = SimpleNamespace(pinecone=None, ai=None, judge=None, swarm=None)
+CL = SimpleNamespace(pinecone=None, ai=None, swarm=None)
 
 
 def showcase(monkeypatch, name="Gobblr"):
@@ -656,7 +656,7 @@ Do this last, after rebasing on `main`, so the README describes what was actuall
 
 What each contains:
 
-- **`README.md`**, from the top: the pitch in two lines; a line for the demo video (`Demo video: to be added`, until the owner supplies the link); `## For judges` with what to try (see a real alert, tell it what you use, send it a contract) and the sentence `The join link is in our submission notes.`; `## Who does what`, a table of each provider and its one job, listing only what is merged (TypeSafe's Jev for every judgment, Pinecone for clause memory and the census benchmarks, Apify for the census crawl, AgentMail, Exa, LlamaParse, OpenCode for writing); `## How it is built`, a Mermaid diagram of the Gateway, Scout and Advocate Sprites, the connectors each may use, and the per-job lock, run, rewind cycle. The command table gains every command that was merged (`/check`, `/census`, `/radar`). The existing setup reference stays below, unchanged in substance. Correct any sentence the code does not back.
+- **`README.md`**, from the top: the pitch in two lines; a line for the demo video (`Demo video: to be added`, until the owner supplies the link); `## For judges` with what to try (see a real alert, tell it what you use, send it a contract) and the sentence `The join link is in our submission notes.`; `## Who does what`, a table of each provider and its one job, listing only what is merged (TypeSafe's Jev, served by OpenCode, for every judgment; Pinecone for clause memory and the census benchmarks; AgentMail; Exa; LlamaParse; OpenCode's chat models for writing); `## How it is built`, a Mermaid diagram of the Gateway, Scout and Advocate Sprites, the connectors each may use, and the per-job lock, run, rewind cycle. The command table gains every command that was merged (`/check`, `/census`, `/radar`). The existing setup reference stays below, unchanged in substance. Correct any sentence the code does not back.
 - **`LICENSE`:** the MIT License, `Copyright (c) 2026 Dhananjay Pandit`.
 - **`docs/demo/submission.md`:** the agent's name; two sentences on what it does; the connectors answer, as a list to trim to what is live on the Sprite at submission; notes for judges with a `<join link>` placeholder; a short post (at most 280 characters, tagging @flydotio) and a longer one, neither containing the join link.
 
