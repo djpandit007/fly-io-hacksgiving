@@ -78,7 +78,7 @@ def now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Version 2: members, per-member watchlists and deadlines, email dedupe, replayable verdicts.
 V2_MIGRATION = """
@@ -301,8 +301,29 @@ ALTER TABLE snapshots_v7 RENAME TO snapshots;
 CREATE INDEX snapshots_document_taken ON snapshots(document_id, taken_at)
 """
 
+# Version 8: how each live version was read (provenance), and the census of popular services'
+# standing terms: one row per (registrable domain, document role, red flag), found or not.
+V8_MIGRATION = """
+ALTER TABLE snapshots ADD COLUMN provenance TEXT;
+CREATE TABLE census (
+    domain      TEXT NOT NULL,
+    role        TEXT NOT NULL,
+    flag        TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    url         TEXT NOT NULL,
+    p           REAL NOT NULL,
+    clause      TEXT,
+    severity    REAL,
+    has_opt_out INTEGER NOT NULL DEFAULT 0,
+    sha         TEXT NOT NULL,
+    graded_at   TEXT NOT NULL,
+    PRIMARY KEY (domain, role, flag)
+)
+"""
+
 MIGRATIONS = {
     2: V2_MIGRATION, 3: V3_MIGRATION, 4: V4_MIGRATION, 5: V5_MIGRATION, 6: V6_MIGRATION, 7: V7_MIGRATION,
+    8: V8_MIGRATION,
 }
 REBUILDS = frozenset({7})  # migrations that rebuild a table other tables reference
 
@@ -409,6 +430,7 @@ class Snapshot(Row):
     text: str
     document_id: int | None = None   # NULL: the service's primary terms document (pre-v6 rows)
     evidence_path: str | None = None  # relative path of a public evidentiary PNG, if Scout captured one
+    provenance: str | None = None     # how a live version was read; NULL for rows from before v8
 
 
 class Change(Row):
@@ -531,6 +553,20 @@ class SwarmEvent(Row):
     event: Literal["wake", "egress_lock", "run", "checkpoint_restore", "sleep", "error"]
     detail: str = ""
     duration_ms: int | None = None
+
+
+class CensusRow(Row):
+    domain: str
+    role: Literal["terms", "privacy"]
+    flag: str
+    name: str
+    url: str
+    p: float
+    clause: str | None = None
+    severity: float | None = None
+    has_opt_out: bool = False
+    sha: str
+    graded_at: datetime
 
 
 def rows[R: Row](model: type[R], cursor: sqlite3.Cursor) -> list[R]:

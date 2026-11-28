@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from app import db
 
 V1_LEDGER_ROW = ("Opt out: Acme", "x", "2030-01-31", "opt_out", "2026-11-01T00:00:00+00:00")
@@ -183,3 +185,32 @@ def test_v6_service_documents_are_unique_per_role_and_url(tmp_path):
             raise AssertionError("duplicate accepted")
         except sqlite3.IntegrityError:
             pass
+
+
+CENSUS_INSERT = "INSERT INTO census (domain, role, flag, name, url, p, sha, graded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+
+
+def test_fresh_database_has_provenance_and_census(tmp_path):
+    conn = db.connect(tmp_path / "v8.db")
+    assert db.SCHEMA_VERSION == 8
+    assert "provenance" in {r["name"] for r in conn.execute("PRAGMA table_info(snapshots)")}
+    conn.execute(CENSUS_INSERT, ("spotify.com", "terms", "arbitration", "Spotify", "https://www.spotify.com/legal/", 0.93, "a" * 64, db.now()))
+    [row] = db.rows(db.CensusRow, conn.execute("SELECT * FROM census"))
+    assert (row.clause, row.severity, row.has_opt_out) == (None, None, False)
+    with pytest.raises(sqlite3.IntegrityError):  # one row per (domain, role, flag)
+        conn.execute(CENSUS_INSERT, ("spotify.com", "terms", "arbitration", "S", "u", 0.1, "b" * 64, db.now()))
+
+
+def test_v7_database_upgrades_with_backup_and_keeps_snapshots(tmp_path, monkeypatch):
+    path = tmp_path / "old.db"
+    monkeypatch.setattr(db, "SCHEMA_VERSION", 7)
+    conn = db.connect(path)
+    conn.execute("INSERT INTO services (name, terms_url, domain, added_at) VALUES ('Acme', 'https://acme.test/terms', 'acme.test', ?)", (db.now(),))
+    conn.execute("INSERT INTO snapshots (service_id, taken_at, origin, sha, text) VALUES (1, ?, 'live', 'abc', 'hello')", (db.now(),))
+    conn.close()
+    monkeypatch.undo()
+    conn = db.connect(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
+    assert db.backup_path(path, 7).exists()
+    [snap] = db.rows(db.Snapshot, conn.execute("SELECT * FROM snapshots"))
+    assert snap.text == "hello" and snap.provenance is None
