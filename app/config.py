@@ -70,6 +70,8 @@ class Settings(BaseSettings):
     agentmail_key: SecretStr = SecretStr("")
     agentmail_webhook_secret: SecretStr = SecretStr("")
     material_threshold: float = Field(0.7, ge=0, le=1)
+    # The demo company's display name; shows members a "See a real alert" button. Empty hides it.
+    showcase_service: str = ""
 
     # On a Sprite: a Custom API connector's gateway base for https://opencode.ai/inference.
     opencode_base: str = "https://opencode.ai/inference"
