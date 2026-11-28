@@ -363,9 +363,11 @@ the button.
   reach a real mailbox.
 - Hosted on any free static host where you choose the subdomain (Netlify, Cloudflare Pages). Not a
   project page under a personal GitHub account: the name would come out as the account's.
-- **Takes.** `demo/switch.sh v1|v2` stamps a "Last updated" time into the page and redeploys that
+- **Takes.** `demo/switch.sh v1|v2` stamps a one-word revision into the page and redeploys that
   folder. The stamp gives every deploy a new digest, so each take gets a fresh screenshot and the
   full narration; without it, a repeated v2 reuses the stored screenshot and the Scout never runs.
+  It is a single token rather than a "Last updated" line because the normaliser drops such lines
+  (the digest would not change) and a longer stamp would itself count as a change.
   One take is: switch to v1, `/check`, switch to v2, `/check`.
 - **Rules for takes.** Rehearse and record before the join link is shared, and do not touch the
   site afterwards, because going back to v1 is itself a change that every watcher is told about.
